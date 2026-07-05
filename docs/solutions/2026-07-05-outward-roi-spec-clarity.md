@@ -46,3 +46,7 @@ details before coding:
   viewport height budget for the image stage. The image-stage `max-height`
   cannot keep using the previous toolbar-only subtraction, or new lower controls
   may be pushed below the first viewport even though no elements overlap.
+- The same budget check must include toolbar wrapping. Adding segmented controls
+  or status chips can turn a one-row toolbar into two rows at 1280px width, so
+  browser verification should inspect `documentElement.scrollHeight` against the
+  viewport after every editor toolbar change.

@@ -70,7 +70,7 @@ async function listMaskFiles(maskDir) {
   }
 }
 
-async function selectMaskSource(image, maskDir) {
+export async function selectMaskSource(image, maskDir) {
   const files = await listMaskFiles(maskDir);
   const basename = imageBasename(image.imageFile);
   const pngs = files.filter(isPng);

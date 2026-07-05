@@ -205,6 +205,38 @@ input[type="range"] {
   width: 92px;
 }
 
+.segmented-control {
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
+  border: 1px solid #33404c;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented-control button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 0;
+  background: #151b22;
+}
+
+.segmented-control button[aria-pressed="true"] {
+  color: #f3f7fa;
+  background: #2a3a49;
+}
+
+.toggle-field {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #aab7c3;
+}
+
+.toggle-field input {
+  min-height: auto;
+}
+
 .status-chip,
 .dirty-indicator,
 .status-line {
@@ -234,8 +266,8 @@ input[type="range"] {
 .image-stage {
   position: relative;
   place-self: center;
-  width: min(100%, calc((100vh - 370px) * var(--image-aspect)));
-  max-height: calc(100vh - 370px);
+  width: min(100%, calc((100vh - 420px) * var(--image-aspect)));
+  max-height: calc(100vh - 420px);
   background:
     linear-gradient(45deg, #161b20 25%, transparent 25%),
     linear-gradient(-45deg, #161b20 25%, transparent 25%),
@@ -254,6 +286,7 @@ input[type="range"] {
 }
 
 .raw-canvas,
+.layer-image,
 .overlay {
   position: absolute;
   inset: 0;
@@ -263,9 +296,29 @@ input[type="range"] {
 
 .raw-canvas {
   image-rendering: pixelated;
+  z-index: 0;
+}
+
+.raw-canvas.hidden-layer {
+  opacity: 0;
+}
+
+.layer-image {
+  object-fit: fill;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.mask-preview {
+  z-index: 1;
+}
+
+.roi-overlay {
+  z-index: 2;
 }
 
 .overlay {
+  z-index: 3;
   pointer-events: none;
 }
 

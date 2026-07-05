@@ -172,6 +172,15 @@ function raw16Response(width = 100, height = 80) {
   );
 }
 
+function pngResponse() {
+  return Promise.resolve(
+    new Response(new Blob(["png"], { type: "image/png" }), {
+      status: 200,
+      headers: { "content-type": "image/png" },
+    }),
+  );
+}
+
 function mockApi({
   boundsQueue = [savedBounds],
   rootImages = images,
@@ -203,8 +212,14 @@ function mockApi({
     if (url === "/api/images/scan-a/raw16" && method === "GET") {
       return raw16Response(100, 80);
     }
+    if (url === "/api/images/scan-a/roi-overlay" && method === "POST") {
+      return pngResponse();
+    }
     if (url === "/api/images/scan-b/raw16" && method === "GET") {
       return raw16Response(120, 90);
+    }
+    if (url === "/api/images/scan-b/roi-overlay" && method === "POST") {
+      return pngResponse();
     }
     if (url === "/api/images/scan-a/bounds" && method === "GET") {
       return jsonResponse({ bounds: boundsQueue.shift() ?? savedBounds, hasBounds: true });
@@ -252,6 +267,11 @@ describe("App", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.stubGlobal("confirm", vi.fn(() => true));
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:roi-overlay"),
+      revokeObjectURL: vi.fn(),
+    });
   });
 
   afterEach(() => {
@@ -308,6 +328,42 @@ describe("App", () => {
       { id: "far", label: "멀리", fromPx: 50, toPx: 100 },
     ]);
     expect(await screen.findByText(/analysis recalculated/i)).toBeInTheDocument();
+  });
+
+  test("switches the image stage between original and mask preview", async () => {
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    expect(screen.getByRole("button", { name: "Original" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Mask" }));
+
+    expect(screen.getByRole("button", { name: "Mask" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByAltText("mask preview")).toHaveAttribute("src", "/api/images/scan-a/mask-preview");
+  });
+
+  test("shows and hides an ROI overlay generated from current bounds and ROI bands", async () => {
+    const { fetchMock } = mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/roi-overlay",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    const call = fetchMock.mock.calls.find(([url]) => url === "/api/images/scan-a/roi-overlay");
+    const body = JSON.parse(call[1].body);
+    expect(body.bounds.groups[0].id).toBe("group-saved");
+    expect(body.roiBands).toEqual(savedAnalysis.roiBands);
+    expect(await screen.findByAltText("ROI overlay")).toHaveAttribute("src", "blob:roi-overlay");
+
+    fireEvent.click(screen.getByLabelText(/show roi/i));
+
+    expect(screen.queryByAltText("ROI overlay")).not.toBeInTheDocument();
   });
 
   test("draws polygon connections in the stored point order", async () => {

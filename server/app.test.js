@@ -477,6 +477,62 @@ describe("createApp", () => {
     expect([...new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2)]).toEqual([100, 20, 300, 40]);
   });
 
+  test("GET /api/images/:id/mask-preview returns selected mask as PNG", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const folderName = "selected-stack-sequence_T01";
+    await writeImage(imageRoot, folderName, "frame001.tif");
+    await writeMask(imageRoot, folderName, "frame001.png");
+
+    const response = await request(
+      createApp({ rootDir: appRoot, initialRoot: imageRoot }),
+      `/api/images/${folderName}/mask-preview`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("image/png");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-mask-file")).toBe("frame001.png");
+    expect(response.headers.get("x-image-width")).toBe("2");
+    expect(response.headers.get("x-image-height")).toBe("2");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    expect([...bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+  });
+
+  test("POST /api/images/:id/roi-overlay renders current bounds and ROI bands as a PNG", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const folderName = "selected-stack-sequence_T01";
+    const roiBands = [
+      { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+      { id: "mid", label: "Mid", fromPx: 1, toPx: 2 },
+      { id: "far", label: "Far", fromPx: 2, toPx: 3 },
+    ];
+    await writeImage(imageRoot, folderName, "frame001.tif");
+
+    const response = await jsonRequest(
+      createApp({ rootDir: appRoot, initialRoot: imageRoot }),
+      `/api/images/${folderName}/roi-overlay`,
+      {
+        method: "POST",
+        body: {
+          bounds: validBounds(folderName),
+          roiBands,
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("image/png");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-image-width")).toBe("2");
+    expect(response.headers.get("x-image-height")).toBe("2");
+    const png = sharp(Buffer.from(await response.arrayBuffer()));
+    const { data, info } = await png.raw().toBuffer({ resolveWithObject: true });
+    expect(info).toMatchObject({ width: 2, height: 2, channels: 4 });
+    expect([...data].some((value) => value > 0)).toBe(true);
+  });
+
   test("GET bounds with corrupt saved JSON returns safe 422 without parser internals", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();

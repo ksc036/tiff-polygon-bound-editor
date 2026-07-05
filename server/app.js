@@ -4,6 +4,7 @@ import express from "express";
 import { createStorage } from "./storage.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
 import { AnalysisError, loadAnalysis, recalculateAnalysis } from "./analysisService.js";
+import { createMaskPreview, createRoiOverlay } from "./previewLayers.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 
@@ -238,6 +239,43 @@ export function createApp({
           "X-Pixel-Format": "uint16le",
         })
         .send(raw.buffer);
+    }),
+  );
+
+  app.get(
+    "/api/images/:id/mask-preview",
+    asyncRoute(async (request, response) => {
+      const preview = await createMaskPreview(imageStorage, request.params.id, { maxImagePixels });
+
+      response
+        .type("image/png")
+        .set({
+          "Cache-Control": "no-store",
+          "X-Image-Width": String(preview.width),
+          "X-Image-Height": String(preview.height),
+          "X-Mask-File": preview.maskFile,
+        })
+        .send(preview.buffer);
+    }),
+  );
+
+  app.post(
+    "/api/images/:id/roi-overlay",
+    asyncRoute(async (request, response) => {
+      const overlay = await createRoiOverlay(imageStorage, request.params.id, {
+        bounds: request.body?.bounds,
+        roiBands: request.body?.roiBands,
+        maxImagePixels,
+      });
+
+      response
+        .type("image/png")
+        .set({
+          "Cache-Control": "no-store",
+          "X-Image-Width": String(overlay.width),
+          "X-Image-Height": String(overlay.height),
+        })
+        .send(overlay.buffer);
     }),
   );
 

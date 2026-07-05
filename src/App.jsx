@@ -27,6 +27,7 @@ export default function App() {
   const canvasRef = useRef(null);
   const loadRequestRef = useRef(0);
   const pointerRef = useRef(null);
+  const roiOverlayUrlRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [images, setImages] = useState([]);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -47,6 +48,10 @@ export default function App() {
   const [analysisError, setAnalysisError] = useState("");
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [roiLimits, setRoiLimits] = useState(DEFAULT_ROI_LIMITS);
+  const [imageLayer, setImageLayer] = useState("original");
+  const [showRoiOverlay, setShowRoiOverlay] = useState(true);
+  const [roiOverlayUrl, setRoiOverlayUrl] = useState(null);
+  const [roiOverlayStatus, setRoiOverlayStatus] = useState("ROI overlay pending");
   const [pointOpacity, setPointOpacity] = useState(() => {
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_OPACITY;
@@ -177,6 +182,63 @@ export default function App() {
     });
   }, [displayMax, displayMin, rawPixels]);
 
+  useEffect(() => {
+    if (!showRoiOverlay || !activeImage || !bounds || !hasActiveImageDimensions) {
+      setRoiOverlayStatus(showRoiOverlay ? "ROI overlay unavailable" : "ROI overlay hidden");
+      replaceRoiOverlayUrl(null);
+      return undefined;
+    }
+
+    if (!bounds.groups.some((group) => group.points.length >= 3)) {
+      setRoiOverlayStatus("ROI overlay needs polygon");
+      replaceRoiOverlayUrl(null);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        setRoiOverlayStatus("Loading ROI overlay");
+        const response = await fetch(`/api/images/${activeImage.id}/roi-overlay`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            bounds: normalizeAndClampBounds(bounds, activeImage),
+            roiBands: deriveRoiBands(roiLimits),
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error("Unable to load ROI overlay.");
+        }
+
+        const objectUrl = URL.createObjectURL(await response.blob());
+        replaceRoiOverlayUrl(objectUrl);
+        setRoiOverlayStatus("ROI overlay loaded");
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        setRoiOverlayStatus(`ROI overlay failed: ${error.message}`);
+        replaceRoiOverlayUrl(null);
+      }
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [activeImage?.height, activeImage?.id, activeImage?.width, bounds, hasActiveImageDimensions, roiLimits, showRoiOverlay]);
+
+  useEffect(
+    () => () => {
+      if (roiOverlayUrlRef.current) {
+        URL.revokeObjectURL(roiOverlayUrlRef.current);
+        roiOverlayUrlRef.current = null;
+      }
+    },
+    [],
+  );
+
   const replaceRoot = async (endpoint, body) => {
     if (!confirmReplaceDirty()) return;
 
@@ -265,6 +327,15 @@ export default function App() {
   function clearPointer() {
     pointerRef.current = null;
     setPointer(null);
+  }
+
+  function replaceRoiOverlayUrl(nextUrl) {
+    if (roiOverlayUrlRef.current && roiOverlayUrlRef.current !== nextUrl) {
+      URL.revokeObjectURL(roiOverlayUrlRef.current);
+    }
+
+    roiOverlayUrlRef.current = nextUrl;
+    setRoiOverlayUrl(nextUrl);
   }
 
   function clearAnalysisState(nextStatus = "No analysis") {
@@ -620,10 +691,37 @@ export default function App() {
               onChange={(event) => setDisplayMax(Number(event.target.value))}
             />
           </label>
+          <div className="segmented-control" aria-label="Image layer">
+            <button
+              type="button"
+              aria-pressed={imageLayer === "original"}
+              onClick={() => setImageLayer("original")}
+            >
+              Original
+            </button>
+            <button
+              type="button"
+              aria-pressed={imageLayer === "mask"}
+              onClick={() => setImageLayer("mask")}
+              disabled={!activeImage}
+            >
+              Mask
+            </button>
+          </div>
+          <label className="toggle-field" htmlFor="show-roi-overlay">
+            <input
+              id="show-roi-overlay"
+              type="checkbox"
+              checked={showRoiOverlay}
+              onChange={(event) => setShowRoiOverlay(event.target.checked)}
+            />
+            Show ROI
+          </label>
           <span className={dirty ? "dirty-indicator dirty" : "dirty-indicator"}>
             {dirty ? "Unsaved" : "Clean"}
           </span>
           <span className="status-chip">{hasBounds ? "Saved bound" : "No saved file"}</span>
+          <span className="status-chip">{roiOverlayStatus}</span>
           <span className="status-line">{status}</span>
         </div>
 
@@ -644,7 +742,21 @@ export default function App() {
             "--image-aspect": String(activeImageAspect),
           }}
         >
-          <canvas ref={canvasRef} className="raw-canvas" aria-label="raw16 image" />
+          <canvas
+            ref={canvasRef}
+            className={imageLayer === "original" ? "raw-canvas" : "raw-canvas hidden-layer"}
+            aria-label="raw16 image"
+          />
+          {activeImage && imageLayer === "mask" ? (
+            <img
+              className="layer-image mask-preview"
+              alt="mask preview"
+              src={`/api/images/${activeImage.id}/mask-preview`}
+            />
+          ) : null}
+          {showRoiOverlay && roiOverlayUrl ? (
+            <img className="layer-image roi-overlay" alt="ROI overlay" src={roiOverlayUrl} />
+          ) : null}
           {activeImage && hasActiveImageDimensions && bounds ? (
             <svg
               className="overlay"
