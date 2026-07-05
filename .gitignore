@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data/
+outputs/
+work/
+
+.DS_Store
+*.log
+
+docs/superpowers/
