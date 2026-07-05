@@ -91,6 +91,63 @@ const legacyBounds = {
   ],
 };
 
+const savedAnalysis = {
+  schemaVersion: 1,
+  imageFolder: "plate-a",
+  imageFile: "a.tif",
+  boundsFile: "plate-a.bounds.json",
+  maskSource: { file: "plate-a.png", format: "png", width: 100, height: 80, mtimeMs: 1000 },
+  skeletonFile: "plate-a.skeleton.png",
+  roiBands: [
+    { id: "near", label: "가까움", fromPx: 0, toPx: 20 },
+    { id: "mid", label: "중간", fromPx: 20, toPx: 50 },
+    { id: "far", label: "멀리", fromPx: 50, toPx: 100 },
+  ],
+  groups: [
+    {
+      groupId: "group-saved",
+      groupName: "Saved Tissue",
+      color: "#e11d48",
+      bands: {
+        near: {
+          roiAreaPx: 25,
+          skeletonPixelCount: 5,
+          skeletonLengthPx: 6,
+          density: 0.24,
+          coverage: 0.2,
+          globalAlignment: 0.8,
+          radialNormalAlignment: 0.7,
+          tangentialAlignment: 0.3,
+          empty: false,
+        },
+      },
+      allBands: {
+        roiAreaPx: 25,
+        skeletonPixelCount: 5,
+        skeletonLengthPx: 6,
+        density: 0.24,
+        coverage: 0.2,
+        globalAlignment: 0.8,
+        radialNormalAlignment: 0.7,
+        tangentialAlignment: 0.3,
+        empty: false,
+      },
+    },
+  ],
+  imageSummary: {
+    roiAreaPx: 25,
+    skeletonPixelCount: 5,
+    skeletonLengthPx: 6,
+    density: 0.24,
+    coverage: 0.2,
+    globalAlignment: 0.8,
+    radialNormalAlignment: 0.7,
+    tangentialAlignment: 0.3,
+  },
+  warnings: [],
+  updatedAt: "2026-07-05T00:00:00.000Z",
+};
+
 function jsonResponse(body, init = {}) {
   return Promise.resolve(
     new Response(JSON.stringify(body), {
@@ -115,7 +172,13 @@ function raw16Response(width = 100, height = 80) {
   );
 }
 
-function mockApi({ boundsQueue = [savedBounds], rootImages = images, saveResponse = null } = {}) {
+function mockApi({
+  boundsQueue = [savedBounds],
+  rootImages = images,
+  saveResponse = null,
+  analysisResponse = { analysis: null, hasAnalysis: false },
+  recalculateAnalysis = savedAnalysis,
+} = {}) {
   const calls = [];
   const fetchMock = vi.fn((input, options = {}) => {
     const url = String(input);
@@ -146,6 +209,12 @@ function mockApi({ boundsQueue = [savedBounds], rootImages = images, saveRespons
     if (url === "/api/images/scan-a/bounds" && method === "GET") {
       return jsonResponse({ bounds: boundsQueue.shift() ?? savedBounds, hasBounds: true });
     }
+    if (url === "/api/images/scan-a/analysis" && method === "GET") {
+      return jsonResponse(analysisResponse);
+    }
+    if (url === "/api/images/scan-a/analysis/recalculate" && method === "POST") {
+      return jsonResponse({ analysis: recalculateAnalysis, hasAnalysis: true });
+    }
     if (url === "/api/images/scan-b/bounds" && method === "GET") {
       return jsonResponse({
         bounds: {
@@ -158,6 +227,9 @@ function mockApi({ boundsQueue = [savedBounds], rootImages = images, saveRespons
         },
         hasBounds: false,
       });
+    }
+    if (url === "/api/images/scan-b/analysis" && method === "GET") {
+      return jsonResponse({ analysis: null, hasAnalysis: false });
     }
     if (url === "/api/images/scan-a/bounds" && method === "PUT") {
       if (saveResponse) {
@@ -202,6 +274,40 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: "Saved Tissue" })).toBeInTheDocument();
     expect(screen.getByText(/saved bound loaded/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Vertex point-1")).toHaveAttribute("cx", "10");
+  });
+
+  test("loads saved analysis after opening an image", async () => {
+    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
+    expect(screen.getByText("plate-a.png")).toBeInTheDocument();
+    expect(screen.getAllByText("0.2400").length).toBeGreaterThan(0);
+  });
+
+  test("recalculates analysis with edited contiguous ROI bands", async () => {
+    const { fetchMock } = mockApi({ analysisResponse: { analysis: null, hasAnalysis: false } });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    fireEvent.change(screen.getByLabelText(/가까움 upper/i), { target: { value: "18" } });
+    fireEvent.click(screen.getByRole("button", { name: /recalculate/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/analysis/recalculate",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    const call = fetchMock.mock.calls.find(([url]) => url === "/api/images/scan-a/analysis/recalculate");
+    expect(JSON.parse(call[1].body).roiBands).toEqual([
+      { id: "near", label: "가까움", fromPx: 0, toPx: 18 },
+      { id: "mid", label: "중간", fromPx: 18, toPx: 50 },
+      { id: "far", label: "멀리", fromPx: 50, toPx: 100 },
+    ]);
+    expect(await screen.findByText(/analysis recalculated/i)).toBeInTheDocument();
   });
 
   test("draws polygon connections in the stored point order", async () => {

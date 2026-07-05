@@ -19,6 +19,9 @@ const DEFAULT_OPACITY = 0.85;
 const SEGMENT_INSERT_SCREEN_THRESHOLD = 8;
 const SEGMENT_INSERT_IMAGE_THRESHOLD = 8;
 const GROUP_COLORS = ["#e11d48", "#2563eb", "#16a34a", "#ca8a04", "#9333ea"];
+const DEFAULT_ROI_LIMITS = { near: 20, mid: 50, far: 100 };
+const ROI_BAND_IDS = ["near", "mid", "far"];
+const ROI_BAND_LABELS = { near: "가까움", mid: "중간", far: "멀리" };
 
 export default function App() {
   const canvasRef = useRef(null);
@@ -38,6 +41,12 @@ export default function App() {
   const [rawPixels, setRawPixels] = useState(null);
   const [dragPoint, setDragPoint] = useState(null);
   const [hoverPointId, setHoverPointId] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
+  const [hasAnalysis, setHasAnalysis] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState("No analysis");
+  const [analysisError, setAnalysisError] = useState("");
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [roiLimits, setRoiLimits] = useState(DEFAULT_ROI_LIMITS);
   const [pointOpacity, setPointOpacity] = useState(() => {
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_OPACITY;
@@ -57,6 +66,7 @@ export default function App() {
         setActiveIndex(-1);
         setBounds(null);
         setActiveGroupId(null);
+        clearAnalysisState();
         return;
       }
 
@@ -64,6 +74,7 @@ export default function App() {
       clearPointer();
       setRawPixels(null);
       setStatus("Loading image");
+      clearAnalysisState("Loading analysis");
 
       try {
         const boundsPayload = await readJsonResponse(await fetch(`/api/images/${image.id}/bounds`));
@@ -82,6 +93,18 @@ export default function App() {
         setActiveGroupId(null);
         setDirty(false);
         setStatus(`Bound load failed: ${error.message}`);
+      }
+
+      try {
+        const analysisPayload = await readJsonResponse(await fetch(`/api/images/${image.id}/analysis`));
+        if (!isCurrentRequest()) return;
+        applyAnalysisPayload(analysisPayload, analysisPayload.hasAnalysis ? "Analysis loaded" : "No analysis");
+      } catch (error) {
+        if (!isCurrentRequest()) return;
+        setAnalysis(null);
+        setHasAnalysis(false);
+        setAnalysisError(error.message);
+        setAnalysisStatus(`Analysis load failed: ${error.message}`);
       }
 
       try {
@@ -177,6 +200,7 @@ export default function App() {
         setBounds(null);
         setActiveGroupId(null);
         setRawPixels(null);
+        clearAnalysisState();
         setStatus("No images found");
       }
     } catch (error) {
@@ -241,6 +265,24 @@ export default function App() {
   function clearPointer() {
     pointerRef.current = null;
     setPointer(null);
+  }
+
+  function clearAnalysisState(nextStatus = "No analysis") {
+    setAnalysis(null);
+    setHasAnalysis(false);
+    setAnalysisStatus(nextStatus);
+    setAnalysisError("");
+    setAnalysisLoading(false);
+    setRoiLimits(DEFAULT_ROI_LIMITS);
+  }
+
+  function applyAnalysisPayload(payload, nextStatus) {
+    const nextAnalysis = payload?.analysis ?? null;
+    setAnalysis(nextAnalysis);
+    setHasAnalysis(Boolean(payload?.hasAnalysis && nextAnalysis));
+    setAnalysisStatus(nextAnalysis ? nextStatus : "No analysis");
+    setAnalysisError("");
+    setRoiLimits(nextAnalysis?.roiBands ? roiLimitsFromBands(nextAnalysis.roiBands) : DEFAULT_ROI_LIMITS);
   }
 
   function addPointAtPointer(point = pointerRef.current) {
@@ -389,6 +431,54 @@ export default function App() {
     } catch (error) {
       setStatus(`Import failed: ${error.message}`);
     }
+  }
+
+  async function handleLoadAnalysis() {
+    if (!activeImage) return;
+    setAnalysisLoading(true);
+    setAnalysisStatus("Loading analysis");
+    setAnalysisError("");
+
+    try {
+      const payload = await readJsonResponse(await fetch(`/api/images/${activeImage.id}/analysis`));
+      applyAnalysisPayload(payload, payload.hasAnalysis ? "Analysis loaded" : "No analysis");
+    } catch (error) {
+      setAnalysis(null);
+      setHasAnalysis(false);
+      setAnalysisError(error.message);
+      setAnalysisStatus(`Analysis load failed: ${error.message}`);
+    } finally {
+      setAnalysisLoading(false);
+    }
+  }
+
+  async function handleRecalculateAnalysis() {
+    if (!activeImage) return;
+    setAnalysisLoading(true);
+    setAnalysisStatus("Recalculating analysis");
+    setAnalysisError("");
+
+    try {
+      const payload = await readJsonResponse(
+        await fetch(`/api/images/${activeImage.id}/analysis/recalculate`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ roiBands: deriveRoiBands(roiLimits) }),
+        }),
+      );
+      applyAnalysisPayload(payload, "Analysis recalculated");
+    } catch (error) {
+      setAnalysisError(error.message);
+      setAnalysisStatus(`Analysis failed: ${error.message}`);
+    } finally {
+      setAnalysisLoading(false);
+    }
+  }
+
+  function handleRoiLimitChange(bandId, value) {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return;
+    setRoiLimits((currentLimits) => ({ ...currentLimits, [bandId]: nextValue }));
   }
 
   const polygons = useMemo(() => {
@@ -658,6 +748,115 @@ export default function App() {
             )}
           </div>
         </div>
+
+        <div className="analysis-panel" aria-label="Analysis">
+          <div className="analysis-toolbar">
+            <strong>Analysis</strong>
+            <span className="status-chip">{hasAnalysis ? "Saved analysis" : "No saved analysis"}</span>
+            <span className="status-line">{analysisStatus}</span>
+            <button type="button" disabled={!activeImage || analysisLoading} onClick={handleLoadAnalysis}>
+              Load analysis
+            </button>
+            <button type="button" disabled={!activeImage || analysisLoading} onClick={handleRecalculateAnalysis}>
+              {analysisLoading ? "Working" : "Recalculate"}
+            </button>
+          </div>
+
+          <div className="roi-limit-grid">
+            <label htmlFor="roi-near-upper">
+              <span>가까움 upper</span>
+              <input
+                id="roi-near-upper"
+                type="number"
+                min="1"
+                step="1"
+                value={roiLimits.near}
+                onChange={(event) => handleRoiLimitChange("near", event.target.value)}
+              />
+            </label>
+            <label htmlFor="roi-mid-upper">
+              <span>중간 upper</span>
+              <input
+                id="roi-mid-upper"
+                type="number"
+                min="1"
+                step="1"
+                value={roiLimits.mid}
+                onChange={(event) => handleRoiLimitChange("mid", event.target.value)}
+              />
+            </label>
+            <label htmlFor="roi-far-upper">
+              <span>멀리 upper</span>
+              <input
+                id="roi-far-upper"
+                type="number"
+                min="1"
+                step="1"
+                value={roiLimits.far}
+                onChange={(event) => handleRoiLimitChange("far", event.target.value)}
+              />
+            </label>
+          </div>
+
+          {analysisError ? <p className="analysis-error">{analysisError}</p> : null}
+          {analysis ? (
+            <>
+              <div className="analysis-meta">
+                <span>Mask</span>
+                <strong>{analysis.maskSource?.file ?? "Unknown mask"}</strong>
+                <span>Skeleton</span>
+                <strong>{analysis.skeletonFile ?? "Not written"}</strong>
+                <span>Updated</span>
+                <strong>{formatDateTime(analysis.updatedAt)}</strong>
+              </div>
+              {analysis.warnings?.length ? (
+                <div className="analysis-warning-list">
+                  {analysis.warnings.map((warning) => (
+                    <span className="warning-chip" key={warning}>
+                      {warning}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <div className="analysis-table-wrap">
+                <table className="analysis-table">
+                  <thead>
+                    <tr>
+                      <th>Group</th>
+                      <th>ROI</th>
+                      <th>Area</th>
+                      <th>Pixels</th>
+                      <th>Length</th>
+                      <th>Density</th>
+                      <th>Coverage</th>
+                      <th>Global</th>
+                      <th>Radial</th>
+                      <th>Tangent</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {analysisRows(analysis).map((row) => (
+                      <tr key={row.id}>
+                        <td>{row.groupName}</td>
+                        <td>{row.bandLabel}</td>
+                        <td>{formatInteger(row.metrics.roiAreaPx)}</td>
+                        <td>{formatInteger(row.metrics.skeletonPixelCount)}</td>
+                        <td>{formatMetric(row.metrics.skeletonLengthPx)}</td>
+                        <td>{formatMetric(row.metrics.density)}</td>
+                        <td>{formatMetric(row.metrics.coverage)}</td>
+                        <td>{formatMetric(row.metrics.globalAlignment)}</td>
+                        <td>{formatMetric(row.metrics.radialNormalAlignment)}</td>
+                        <td>{formatMetric(row.metrics.tangentialAlignment)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <p className="analysis-empty">No analysis loaded</p>
+          )}
+        </div>
       </section>
     </main>
   );
@@ -683,6 +882,71 @@ function normalizeAndClampBounds(bounds, image) {
   return hasImageDimensions(normalized)
     ? clampBoundsToImage(normalized, normalized.width, normalized.height)
     : normalized;
+}
+
+function deriveRoiBands(limits) {
+  const near = positiveNumber(limits.near, DEFAULT_ROI_LIMITS.near);
+  const mid = positiveNumber(limits.mid, DEFAULT_ROI_LIMITS.mid);
+  const far = positiveNumber(limits.far, DEFAULT_ROI_LIMITS.far);
+  const ordered = [near, mid, far].sort((left, right) => left - right);
+
+  return [
+    { id: "near", label: ROI_BAND_LABELS.near, fromPx: 0, toPx: ordered[0] },
+    { id: "mid", label: ROI_BAND_LABELS.mid, fromPx: ordered[0], toPx: ordered[1] },
+    { id: "far", label: ROI_BAND_LABELS.far, fromPx: ordered[1], toPx: ordered[2] },
+  ];
+}
+
+function roiLimitsFromBands(roiBands) {
+  const nextLimits = { ...DEFAULT_ROI_LIMITS };
+  for (const band of Array.isArray(roiBands) ? roiBands : []) {
+    if (ROI_BAND_IDS.includes(band.id) && Number.isFinite(band.toPx)) {
+      nextLimits[band.id] = band.toPx;
+    }
+  }
+  return nextLimits;
+}
+
+function positiveNumber(value, fallback) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : fallback;
+}
+
+function analysisRows(analysis) {
+  const labels = new Map((analysis.roiBands ?? []).map((band) => [band.id, band.label ?? band.id]));
+  return (analysis.groups ?? []).flatMap((group) => {
+    const bandRows = ROI_BAND_IDS.filter((bandId) => group.bands?.[bandId]).map((bandId) => ({
+      id: `${group.groupId}-${bandId}`,
+      groupName: group.groupName ?? group.groupId,
+      bandLabel: labels.get(bandId) ?? bandId,
+      metrics: group.bands[bandId],
+    }));
+
+    if (!group.allBands) return bandRows;
+    return [
+      ...bandRows,
+      {
+        id: `${group.groupId}-all`,
+        groupName: group.groupName ?? group.groupId,
+        bandLabel: "전체",
+        metrics: group.allBands,
+      },
+    ];
+  });
+}
+
+function formatMetric(value) {
+  return Number.isFinite(value) ? value.toFixed(4) : "-";
+}
+
+function formatInteger(value) {
+  return Number.isFinite(value) ? String(Math.round(value)) : "-";
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
 }
 
 function normalizeBoundsForImage(bounds, image) {

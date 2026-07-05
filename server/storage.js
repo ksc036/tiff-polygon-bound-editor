@@ -156,6 +156,9 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
   function imagePaths(imageOrId) {
     const image = resolveImage(imageOrId);
     const boundDir = path.join(image.folderPath, "bound");
+    const maskDir = path.join(image.folderPath, "mask");
+    const skeletonDir = path.join(image.folderPath, "Skeletonize");
+    const analysisDir = path.join(image.folderPath, "analysis");
 
     return {
       folderPath: image.folderPath,
@@ -163,6 +166,11 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
       imagePath: image.imagePath,
       boundDir,
       boundsPath: path.join(boundDir, `${image.imageFolder}.bounds.json`),
+      maskDir,
+      skeletonDir,
+      analysisDir,
+      skeletonPath: path.join(skeletonDir, `${image.imageFolder}.skeleton.png`),
+      analysisPath: path.join(analysisDir, `${image.imageFolder}.analysis.json`),
     };
   }
 
@@ -209,6 +217,43 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     await mkdir(boundDir, { recursive: true });
     await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
     await rename(tempPath, boundsPath);
+
+    return payload;
+  }
+
+  async function loadAnalysis(id) {
+    const { analysisPath } = imagePaths(id);
+
+    try {
+      return JSON.parse(await readFile(analysisPath, "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return null;
+      }
+
+      if (error instanceof SyntaxError) {
+        throw new Error(`Invalid analysis JSON for ${resolveImage(id).imageFolder}: ${error.message}`, { cause: error });
+      }
+
+      throw error;
+    }
+  }
+
+  async function saveAnalysis(id, analysis) {
+    const image = resolveImage(id);
+    const { analysisDir, analysisPath } = imagePaths(image);
+    const payload = {
+      ...analysis,
+      schemaVersion: analysis?.schemaVersion ?? 1,
+      imageFolder: image.imageFolder,
+      imageFile: image.imageFile,
+      updatedAt: new Date().toISOString(),
+    };
+    const tempPath = path.join(analysisDir, `${image.imageFolder}.analysis.json.tmp-${randomUUID()}`);
+
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
+    await rename(tempPath, analysisPath);
 
     return payload;
   }
@@ -264,6 +309,8 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     getImage,
     loadBounds,
     saveBounds,
+    loadAnalysis,
+    saveAnalysis,
     importPreviousBounds,
     imagePaths,
   };

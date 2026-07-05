@@ -3,6 +3,7 @@ import path from "node:path";
 import express from "express";
 import { createStorage } from "./storage.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
+import { AnalysisError, loadAnalysis, recalculateAnalysis } from "./analysisService.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 
@@ -30,13 +31,37 @@ function isInvalidSavedBoundsJsonError(error) {
   return /invalid bounds json/i.test(error.message);
 }
 
+function isInvalidSavedAnalysisJsonError(error) {
+  return /invalid analysis json/i.test(error.message);
+}
+
 function safeErrorResponse(error) {
   if (isUnknownImageError(error)) {
     return { status: 404, body: { error: "Image not found." } };
   }
 
+  if (error instanceof AnalysisError) {
+    const messages = {
+      INVALID_ROI_BANDS: "Invalid ROI bands.",
+      MISSING_BOUNDS: "Saved bounds are required before analysis.",
+      MISSING_MASK: "Mask image is required before analysis.",
+      CORRUPT_BOUNDS: "Saved bounds JSON is invalid.",
+      INVALID_BOUNDS: "Saved bounds are invalid.",
+      INVALID_ANALYSIS: "Saved analysis JSON is invalid.",
+      UNREADABLE_MASK: "Unable to read mask image.",
+      DIMENSION_MISMATCH: "Mask dimensions do not match saved bounds.",
+      CALCULATION_FAILED: "Unable to calculate analysis metrics.",
+    };
+
+    return { status: error.status, body: { error: messages[error.code] ?? "Unable to calculate analysis metrics." } };
+  }
+
   if (isInvalidSavedBoundsJsonError(error)) {
     return { status: 422, body: { error: "Saved bounds JSON is invalid." } };
+  }
+
+  if (isInvalidSavedAnalysisJsonError(error)) {
+    return { status: 422, body: { error: "Saved analysis JSON is invalid." } };
   }
 
   if (isInvalidStorageRootError(error)) {
@@ -247,6 +272,25 @@ export function createApp({
       const bounds = await imageStorage.importPreviousBounds(request.params.id);
 
       response.json({ bounds });
+    }),
+  );
+
+  app.get(
+    "/api/images/:id/analysis",
+    asyncRoute(async (request, response) => {
+      response.json(await loadAnalysis(imageStorage, request.params.id));
+    }),
+  );
+
+  app.post(
+    "/api/images/:id/analysis/recalculate",
+    asyncRoute(async (request, response) => {
+      response.json(
+        await recalculateAnalysis(imageStorage, request.params.id, {
+          roiBands: request.body?.roiBands,
+          maxImagePixels,
+        }),
+      );
     }),
   );
 

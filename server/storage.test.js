@@ -65,6 +65,11 @@ describe("createStorage", () => {
       folderPath: path.join(rootDir, "selected-stack-sequence_T01"),
       imageDir: path.join(rootDir, "selected-stack-sequence_T01", "image"),
       imagePath: path.join(rootDir, "selected-stack-sequence_T01", "image", "frame001.tif"),
+      maskDir: path.join(rootDir, "selected-stack-sequence_T01", "mask"),
+      skeletonDir: path.join(rootDir, "selected-stack-sequence_T01", "Skeletonize"),
+      analysisDir: path.join(rootDir, "selected-stack-sequence_T01", "analysis"),
+      skeletonPath: path.join(rootDir, "selected-stack-sequence_T01", "Skeletonize", "selected-stack-sequence_T01.skeleton.png"),
+      analysisPath: path.join(rootDir, "selected-stack-sequence_T01", "analysis", "selected-stack-sequence_T01.analysis.json"),
     });
   });
 
@@ -161,6 +166,41 @@ describe("createStorage", () => {
     });
 
     await expect(storage.loadBounds("selected-stack-sequence_T01")).resolves.toEqual(saved);
+  });
+
+  test("loads missing analysis as null", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+
+    await expect(storage.loadAnalysis("selected-stack-sequence_T01")).resolves.toBeNull();
+  });
+
+  test("saves analysis atomically under the T folder analysis directory", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+    const analysis = {
+      schemaVersion: 1,
+      imageFolder: "selected-stack-sequence_T01",
+      imageFile: "frame001.tif",
+      groups: [],
+      imageSummary: { skeletonPixelCount: 0 },
+    };
+
+    const saved = await storage.saveAnalysis("selected-stack-sequence_T01", analysis);
+
+    const analysisDir = path.join(rootDir, "selected-stack-sequence_T01", "analysis");
+    const analysisPath = path.join(analysisDir, "selected-stack-sequence_T01.analysis.json");
+    await expect(readJson(analysisPath)).resolves.toEqual(saved);
+    await expect(storage.loadAnalysis("selected-stack-sequence_T01")).resolves.toEqual(saved);
+    await expect(readdir(analysisDir)).resolves.toEqual(["selected-stack-sequence_T01.analysis.json"]);
+    expect(saved).toMatchObject({
+      ...analysis,
+      imageFolder: "selected-stack-sequence_T01",
+      imageFile: "frame001.tif",
+    });
+    expect(Date.parse(saved.updatedAt)).not.toBeNaN();
   });
 
   test("wraps invalid bounds JSON with image context", async () => {

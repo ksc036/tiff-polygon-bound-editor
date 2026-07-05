@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
 
@@ -60,6 +61,40 @@ async function writeImage(rootDir, folderName, imageName = "frame.tif", pixels =
   const imageDir = path.join(rootDir, folderName, "image");
   await mkdir(imageDir, { recursive: true });
   await writeFile(path.join(imageDir, imageName), uint16Tiff({ width: 2, height: 2, pixels }));
+}
+
+async function writeMask(rootDir, folderName, fileName = "frame001.png") {
+  const maskDir = path.join(rootDir, folderName, "mask");
+  await mkdir(maskDir, { recursive: true });
+  await sharp(Buffer.from([0, 255, 0, 0]), { raw: { width: 2, height: 2, channels: 1 } })
+    .png()
+    .toFile(path.join(maskDir, fileName));
+}
+
+async function writeBounds(rootDir, folderName, bounds) {
+  const boundDir = path.join(rootDir, folderName, "bound");
+  await mkdir(boundDir, { recursive: true });
+  await writeFile(path.join(boundDir, `${folderName}.bounds.json`), `${JSON.stringify(bounds, null, 2)}\n`);
+}
+
+function validBounds(folderName, imageFile = "frame001.tif") {
+  return {
+    schemaVersion: 1,
+    imageFolder: folderName,
+    imageFile,
+    width: 2,
+    height: 2,
+    groups: [
+      {
+        id: "cell",
+        points: [
+          { id: "p1", x: 0, y: 0 },
+          { id: "p2", x: 1, y: 0 },
+          { id: "p3", x: 1, y: 1 },
+        ],
+      },
+    ],
+  };
 }
 
 async function request(app, pathname, options = {}) {
@@ -479,5 +514,183 @@ describe("createApp", () => {
     const body = await response.json();
     expect(body).toEqual({ error: "Unable to read image data." });
     expect(JSON.stringify(body)).not.toMatch(/sharp|vips|libvips|frame001|selected-stack|tiff/i);
+  });
+
+  test("GET /api/images/:id/analysis returns saved analysis or null state", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "selected-stack-sequence_T01", "frame001.tif");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const missingResponse = await request(app, "/api/images/selected-stack-sequence_T01/analysis");
+
+    expect(missingResponse.status).toBe(200);
+    await expect(missingResponse.json()).resolves.toEqual({ analysis: null, hasAnalysis: false });
+
+    const analysis = {
+      schemaVersion: 1,
+      imageFolder: "selected-stack-sequence_T01",
+      imageFile: "frame001.tif",
+      boundsFile: "selected-stack-sequence_T01.bounds.json",
+      maskSource: { file: "frame001.png", format: "png", width: 2, height: 2, mtimeMs: 1 },
+      skeletonFile: "selected-stack-sequence_T01.skeleton.png",
+      roiBands: [
+        { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+        { id: "mid", label: "Mid", fromPx: 1, toPx: 2 },
+        { id: "far", label: "Far", fromPx: 2, toPx: 3 },
+      ],
+      groups: [],
+      imageSummary: {},
+      warnings: [],
+      updatedAt: "2026-07-05T00:00:00.000Z",
+    };
+    await mkdir(path.join(imageRoot, "selected-stack-sequence_T01", "analysis"), { recursive: true });
+    await writeFile(
+      path.join(imageRoot, "selected-stack-sequence_T01", "analysis", "selected-stack-sequence_T01.analysis.json"),
+      JSON.stringify(analysis),
+    );
+
+    const savedResponse = await request(app, "/api/images/selected-stack-sequence_T01/analysis");
+
+    expect(savedResponse.status).toBe(200);
+    await expect(savedResponse.json()).resolves.toEqual({ analysis, hasAnalysis: true });
+  });
+
+  test("POST /api/images/:id/analysis/recalculate recalculates and saves analysis", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const folderName = "selected-stack-sequence_T01";
+    await writeImage(imageRoot, folderName, "frame001.tif");
+    await writeBounds(imageRoot, folderName, validBounds(folderName));
+    await writeMask(imageRoot, folderName, "frame001.png");
+
+    const response = await jsonRequest(
+      createApp({ rootDir: appRoot, initialRoot: imageRoot }),
+      `/api/images/${folderName}/analysis/recalculate`,
+      {
+        method: "POST",
+        body: {
+          roiBands: [
+            { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+            { id: "mid", label: "Mid", fromPx: 1, toPx: 2 },
+            { id: "far", label: "Far", fromPx: 2, toPx: 3 },
+          ],
+        },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      hasAnalysis: true,
+      analysis: {
+        imageFolder: folderName,
+        maskSource: { file: "frame001.png", format: "png", width: 2, height: 2, mtimeMs: expect.any(Number) },
+        skeletonFile: `${folderName}.skeleton.png`,
+        groups: [{ groupId: "cell", groupName: null, color: null }],
+      },
+    });
+    await expect(
+      readFile(path.join(imageRoot, folderName, "Skeletonize", `${folderName}.skeleton.png`)),
+    ).resolves.toBeInstanceOf(Buffer);
+    await expect(
+      JSON.parse(await readFile(path.join(imageRoot, folderName, "analysis", `${folderName}.analysis.json`), "utf8")),
+    ).toEqual(body.analysis);
+  });
+
+  test("analysis routes return safe status codes for unknown image and recalculation validation failures", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const folderName = "selected-stack-sequence_T01";
+    await writeImage(imageRoot, folderName, "frame001.tif");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const unknownResponse = await request(app, "/api/images/missing_T01/analysis");
+    expect(unknownResponse.status).toBe(404);
+    await expect(unknownResponse.json()).resolves.toEqual({ error: "Image not found." });
+
+    const missingBoundsResponse = await jsonRequest(app, `/api/images/${folderName}/analysis/recalculate`, {
+      method: "POST",
+      body: {},
+    });
+    expect(missingBoundsResponse.status).toBe(409);
+    await expect(missingBoundsResponse.json()).resolves.toEqual({ error: "Saved bounds are required before analysis." });
+
+    await writeBounds(imageRoot, folderName, validBounds(folderName));
+    const missingMaskResponse = await jsonRequest(app, `/api/images/${folderName}/analysis/recalculate`, {
+      method: "POST",
+      body: {},
+    });
+    expect(missingMaskResponse.status).toBe(409);
+    await expect(missingMaskResponse.json()).resolves.toEqual({ error: "Mask image is required before analysis." });
+
+    await writeMask(imageRoot, folderName, "frame001.png");
+    const invalidBandsResponse = await jsonRequest(app, `/api/images/${folderName}/analysis/recalculate`, {
+      method: "POST",
+      body: {
+        roiBands: [
+          { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+          { id: "mid", label: "Mid", fromPx: 2, toPx: 3 },
+          { id: "far", label: "Far", fromPx: 3, toPx: 4 },
+        ],
+      },
+    });
+    expect(invalidBandsResponse.status).toBe(400);
+    await expect(invalidBandsResponse.json()).resolves.toEqual({ error: "Invalid ROI bands." });
+  });
+
+  test("GET analysis strips stale internal saved fields and returns safe malformed-analysis errors", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const folderName = "selected-stack-sequence_T01";
+    await writeImage(imageRoot, folderName, "frame001.tif");
+    await mkdir(path.join(imageRoot, folderName, "analysis"), { recursive: true });
+    await writeFile(
+      path.join(imageRoot, folderName, "analysis", `${folderName}.analysis.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        imageFolder: folderName,
+        imageFile: "frame001.tif",
+        boundsFile: `${folderName}.bounds.json`,
+        maskSource: {
+          file: "frame001.png",
+          format: "png",
+          width: 2,
+          height: 2,
+          mtimeMs: 12,
+          path: path.join(imageRoot, folderName, "mask", "frame001.png"),
+        },
+        skeletonFile: `${folderName}.skeleton.png`,
+        skeletonPath: path.join(imageRoot, folderName, "Skeletonize", `${folderName}.skeleton.png`),
+        roiBands: [
+          { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+          { id: "mid", label: "Mid", fromPx: 1, toPx: 2 },
+          { id: "far", label: "Far", fromPx: 2, toPx: 3 },
+        ],
+        groups: [{ groupId: "cell", groupName: null, color: null, bands: {}, allBands: {} }],
+        imageSummary: {},
+        warnings: [],
+        updatedAt: "2026-07-05T00:00:00.000Z",
+        staleAbsolutePath: imageRoot,
+      }),
+    );
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const response = await request(app, `/api/images/${folderName}/analysis`);
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.analysis.maskSource).toEqual({ file: "frame001.png", format: "png", width: 2, height: 2, mtimeMs: 12 });
+    expect(JSON.stringify(body)).not.toContain(imageRoot);
+
+    await writeFile(
+      path.join(imageRoot, folderName, "analysis", `${folderName}.analysis.json`),
+      JSON.stringify({ schemaVersion: 1, groups: "bad" }),
+    );
+
+    const malformedResponse = await request(app, `/api/images/${folderName}/analysis`);
+
+    expect(malformedResponse.status).toBe(422);
+    await expect(malformedResponse.json()).resolves.toEqual({ error: "Saved analysis JSON is invalid." });
   });
 });
