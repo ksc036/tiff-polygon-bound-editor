@@ -466,28 +466,68 @@ input[type="range"] {
 
 .roi-limit-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(132px, 1fr));
+  grid-template-columns: repeat(3, minmax(168px, 1fr));
   gap: 8px;
   min-width: 0;
 }
 
-.roi-limit-grid label {
+.roi-limit-field {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 76px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
   min-width: 0;
   color: #aab7c3;
 }
 
-.roi-limit-grid span {
+.roi-limit-field label {
+  min-width: 0;
+}
+
+.roi-limit-field span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.roi-limit-grid input {
-  width: 76px;
+.roi-stepper {
+  display: grid;
+  grid-template-columns: 24px 62px 24px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.roi-stepper button,
+.roi-stepper input {
+  height: 32px;
+  border-radius: 0;
+}
+
+.roi-stepper button {
+  padding: 0;
+  border-color: #334151;
+}
+
+.roi-stepper button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.roi-stepper button:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.roi-stepper input {
+  width: 62px;
+  border-right: 0;
+  border-left: 0;
+  text-align: center;
+  appearance: textfield;
+}
+
+.roi-stepper input::-webkit-outer-spin-button,
+.roi-stepper input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
 }
 
 .analysis-meta {

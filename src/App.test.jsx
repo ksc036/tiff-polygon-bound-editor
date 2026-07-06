@@ -312,7 +312,7 @@ describe("App", () => {
     render(<App />);
     await screen.findByRole("button", { name: "Saved Tissue" });
 
-    fireEvent.change(screen.getByLabelText(/가까움 upper/i), { target: { value: "18" } });
+    fireEvent.change(screen.getByLabelText("가까움 upper"), { target: { value: "18" } });
     fireEvent.click(screen.getByRole("button", { name: /recalculate/i }));
 
     await waitFor(() =>
@@ -363,7 +363,7 @@ describe("App", () => {
     render(<App />);
     await screen.findByRole("button", { name: "Saved Tissue" });
 
-    fireEvent.change(screen.getByLabelText(/가까움 upper/i), { target: { value: "18" } });
+    fireEvent.change(screen.getByLabelText("가까움 upper"), { target: { value: "18" } });
 
     await waitFor(() => expect(screen.getByLabelText("ROI preview near")).toHaveAttribute("stroke-width", "36"));
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/roi-overlay"))).toBe(false);
@@ -375,7 +375,7 @@ describe("App", () => {
     render(<App />);
     await screen.findByRole("button", { name: "Saved Tissue" });
 
-    const nearInput = screen.getByLabelText(/가까움 upper/i);
+    const nearInput = screen.getByLabelText("가까움 upper");
     fireEvent.change(nearInput, { target: { value: "" } });
 
     expect(nearInput.value).toBe("");
@@ -384,6 +384,53 @@ describe("App", () => {
 
     expect(nearInput.value).toBe("30");
     expect(screen.getByLabelText("ROI preview near")).toHaveAttribute("stroke-width", "60");
+  });
+
+  test("normalizes typed ROI limits only after editing is committed", async () => {
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const nearInput = screen.getByLabelText("가까움 upper");
+    const midInput = screen.getByLabelText("중간 upper");
+    const farInput = screen.getByLabelText("멀리 upper");
+
+    fireEvent.change(nearInput, { target: { value: "80" } });
+
+    expect(nearInput.value).toBe("80");
+    expect(midInput.value).toBe("50");
+    expect(farInput.value).toBe("100");
+
+    fireEvent.blur(nearInput);
+
+    expect(nearInput.value).toBe("80");
+    expect(midInput.value).toBe("81");
+    expect(farInput.value).toBe("100");
+  });
+
+  test("step buttons normalize ROI boundaries immediately while adjusting", async () => {
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const nearInput = screen.getByLabelText("가까움 upper");
+    const midInput = screen.getByLabelText("중간 upper");
+    const farInput = screen.getByLabelText("멀리 upper");
+
+    fireEvent.change(nearInput, { target: { value: "49" } });
+    fireEvent.blur(nearInput);
+
+    expect(nearInput.value).toBe("49");
+    expect(midInput.value).toBe("50");
+    expect(farInput.value).toBe("100");
+
+    fireEvent.click(screen.getByRole("button", { name: "Increase 가까움 upper" }));
+
+    expect(nearInput.value).toBe("50");
+    expect(midInput.value).toBe("51");
+    expect(farInput.value).toBe("100");
   });
 
   test("shows and hides local ROI preview from current bounds and ROI bands", async () => {

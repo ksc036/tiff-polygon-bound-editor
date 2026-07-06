@@ -23,6 +23,8 @@ const DEFAULT_ROI_LIMITS = { near: 20, mid: 50, far: 100 };
 const ROI_BAND_IDS = ["near", "mid", "far"];
 const ROI_BAND_LABELS = { near: "가까움", mid: "중간", far: "멀리" };
 const ROI_BAND_COLORS = { near: "#ef4444", mid: "#f59e0b", far: "#3b82f6" };
+const ROI_MIN_LIMIT = 1;
+const ROI_LIMIT_STEP = 1;
 
 export default function App() {
   const canvasRef = useRef(null);
@@ -489,6 +491,26 @@ export default function App() {
     setRoiLimits((currentLimits) => ({ ...currentLimits, [bandId]: nextValue }));
   }
 
+  function handleRoiLimitCommit() {
+    setRoiLimits((currentLimits) => normalizeRoiLimits(currentLimits));
+  }
+
+  function handleRoiLimitStep(bandId, delta) {
+    setRoiLimits((currentLimits) =>
+      normalizeRoiLimits({
+        ...currentLimits,
+        [bandId]: roiLimitNumber(currentLimits[bandId], DEFAULT_ROI_LIMITS[bandId]) + delta,
+      }),
+    );
+  }
+
+  function handleRoiLimitKeyDown(event) {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+      handleRoiLimitCommit();
+    }
+  }
+
   const polygons = useMemo(() => {
     if (!bounds) return [];
     return bounds.groups.map((group) => {
@@ -845,39 +867,42 @@ export default function App() {
           </div>
 
           <div className="roi-limit-grid">
-            <label htmlFor="roi-near-upper">
-              <span>가까움 upper</span>
-              <input
-                id="roi-near-upper"
-                type="number"
-                min="1"
-                step="1"
-                value={roiLimits.near}
-                onChange={(event) => handleRoiLimitChange("near", event.target.value)}
-              />
-            </label>
-            <label htmlFor="roi-mid-upper">
-              <span>중간 upper</span>
-              <input
-                id="roi-mid-upper"
-                type="number"
-                min="1"
-                step="1"
-                value={roiLimits.mid}
-                onChange={(event) => handleRoiLimitChange("mid", event.target.value)}
-              />
-            </label>
-            <label htmlFor="roi-far-upper">
-              <span>멀리 upper</span>
-              <input
-                id="roi-far-upper"
-                type="number"
-                min="1"
-                step="1"
-                value={roiLimits.far}
-                onChange={(event) => handleRoiLimitChange("far", event.target.value)}
-              />
-            </label>
+            {ROI_BAND_IDS.map((bandId) => {
+              const label = ROI_BAND_LABELS[bandId];
+              return (
+                <div className="roi-limit-field" key={bandId}>
+                  <label htmlFor={`roi-${bandId}-upper`}>
+                    <span>{label} upper</span>
+                  </label>
+                  <div className="roi-stepper">
+                    <button
+                      type="button"
+                      aria-label={`Decrease ${label} upper`}
+                      onClick={() => handleRoiLimitStep(bandId, -ROI_LIMIT_STEP)}
+                    >
+                      -
+                    </button>
+                    <input
+                      id={`roi-${bandId}-upper`}
+                      type="number"
+                      min={ROI_MIN_LIMIT}
+                      step={ROI_LIMIT_STEP}
+                      value={roiLimits[bandId]}
+                      onBlur={handleRoiLimitCommit}
+                      onChange={(event) => handleRoiLimitChange(bandId, event.target.value)}
+                      onKeyDown={handleRoiLimitKeyDown}
+                    />
+                    <button
+                      type="button"
+                      aria-label={`Increase ${label} upper`}
+                      onClick={() => handleRoiLimitStep(bandId, ROI_LIMIT_STEP)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           {analysisError ? <p className="analysis-error">{analysisError}</p> : null}
@@ -999,16 +1024,34 @@ function normalizeAndClampBounds(bounds, image) {
 }
 
 function deriveRoiBands(limits) {
-  const near = positiveNumber(limits.near, DEFAULT_ROI_LIMITS.near);
-  const mid = positiveNumber(limits.mid, DEFAULT_ROI_LIMITS.mid);
-  const far = positiveNumber(limits.far, DEFAULT_ROI_LIMITS.far);
-  const ordered = [near, mid, far].sort((left, right) => left - right);
+  const { near, mid, far } = normalizeRoiLimits(limits);
 
   return [
-    { id: "near", label: ROI_BAND_LABELS.near, fromPx: 0, toPx: ordered[0] },
-    { id: "mid", label: ROI_BAND_LABELS.mid, fromPx: ordered[0], toPx: ordered[1] },
-    { id: "far", label: ROI_BAND_LABELS.far, fromPx: ordered[1], toPx: ordered[2] },
+    { id: "near", label: ROI_BAND_LABELS.near, fromPx: 0, toPx: near },
+    { id: "mid", label: ROI_BAND_LABELS.mid, fromPx: near, toPx: mid },
+    { id: "far", label: ROI_BAND_LABELS.far, fromPx: mid, toPx: far },
   ];
+}
+
+function normalizeRoiLimits(limits) {
+  const near = roiLimitNumber(limits?.near, DEFAULT_ROI_LIMITS.near);
+  const mid = Math.max(
+    roiLimitNumber(limits?.mid, DEFAULT_ROI_LIMITS.mid),
+    near + ROI_LIMIT_STEP,
+  );
+  const far = Math.max(
+    roiLimitNumber(limits?.far, DEFAULT_ROI_LIMITS.far),
+    mid + ROI_LIMIT_STEP,
+  );
+
+  return { near, mid, far };
+}
+
+function roiLimitNumber(value, fallback) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue >= ROI_MIN_LIMIT
+    ? Math.round(numericValue)
+    : fallback;
 }
 
 function roiLimitsFromBands(roiBands) {
@@ -1019,11 +1062,6 @@ function roiLimitsFromBands(roiBands) {
     }
   }
   return nextLimits;
-}
-
-function positiveNumber(value, fallback) {
-  const numericValue = Number(value);
-  return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : fallback;
 }
 
 function analysisRows(analysis) {
