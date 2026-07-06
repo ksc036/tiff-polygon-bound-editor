@@ -350,6 +350,9 @@ describe("App", () => {
     await screen.findByRole("button", { name: "Saved Tissue" });
 
     await waitFor(() => expect(screen.getByLabelText("ROI preview near")).toBeInTheDocument());
+    expect(screen.getByLabelText("ROI preview near")).toHaveAttribute("stroke", "#ef4444");
+    expect(screen.getByLabelText("ROI preview mid")).toHaveAttribute("stroke", "#f59e0b");
+    expect(screen.getByLabelText("ROI preview far")).toHaveAttribute("stroke", "#3b82f6");
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/roi-overlay"))).toBe(false);
     expect(screen.getByText(/ROI preview local/i)).toBeInTheDocument();
   });
@@ -364,6 +367,23 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByLabelText("ROI preview near")).toHaveAttribute("stroke-width", "36"));
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/roi-overlay"))).toBe(false);
+  });
+
+  test("allows ROI limit inputs to be cleared before typing replacement values", async () => {
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const nearInput = screen.getByLabelText(/가까움 upper/i);
+    fireEvent.change(nearInput, { target: { value: "" } });
+
+    expect(nearInput.value).toBe("");
+
+    fireEvent.change(nearInput, { target: { value: "30" } });
+
+    expect(nearInput.value).toBe("30");
+    expect(screen.getByLabelText("ROI preview near")).toHaveAttribute("stroke-width", "60");
   });
 
   test("shows and hides local ROI preview from current bounds and ROI bands", async () => {

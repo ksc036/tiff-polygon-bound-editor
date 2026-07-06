@@ -329,15 +329,15 @@ input[type="range"] {
 }
 
 .roi-preview-band.far {
-  opacity: 0.08;
+  opacity: 0.22;
 }
 
 .roi-preview-band.mid {
-  opacity: 0.14;
+  opacity: 0.28;
 }
 
 .roi-preview-band.near {
-  opacity: 0.22;
+  opacity: 0.34;
 }
 
 .overlay circle {

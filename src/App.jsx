@@ -22,6 +22,7 @@ const GROUP_COLORS = ["#e11d48", "#2563eb", "#16a34a", "#ca8a04", "#9333ea"];
 const DEFAULT_ROI_LIMITS = { near: 20, mid: 50, far: 100 };
 const ROI_BAND_IDS = ["near", "mid", "far"];
 const ROI_BAND_LABELS = { near: "가까움", mid: "중간", far: "멀리" };
+const ROI_BAND_COLORS = { near: "#ef4444", mid: "#f59e0b", far: "#3b82f6" };
 
 export default function App() {
   const canvasRef = useRef(null);
@@ -478,6 +479,11 @@ export default function App() {
   }
 
   function handleRoiLimitChange(bandId, value) {
+    if (value === "") {
+      setRoiLimits((currentLimits) => ({ ...currentLimits, [bandId]: "" }));
+      return;
+    }
+
     const nextValue = Number(value);
     if (!Number.isFinite(nextValue)) return;
     setRoiLimits((currentLimits) => ({ ...currentLimits, [bandId]: nextValue }));
@@ -952,7 +958,7 @@ function buildRoiPreviewGroups(polygons, roiBands, image) {
             key: `${group.id}-${band.id}`,
             bandId: band.id,
             label: band.label,
-            color: group.color,
+            color: ROI_BAND_COLORS[band.id] ?? group.color,
             path: group.path,
             strokeWidth: Math.max(1, band.toPx * 2),
           })),
