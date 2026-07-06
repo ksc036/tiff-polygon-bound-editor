@@ -322,6 +322,24 @@ input[type="range"] {
   pointer-events: none;
 }
 
+.roi-preview-band {
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+}
+
+.roi-preview-band.far {
+  opacity: 0.08;
+}
+
+.roi-preview-band.mid {
+  opacity: 0.14;
+}
+
+.roi-preview-band.near {
+  opacity: 0.22;
+}
+
 .overlay circle {
   pointer-events: auto;
   cursor: grab;

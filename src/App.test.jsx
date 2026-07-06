@@ -343,27 +343,42 @@ describe("App", () => {
     expect(screen.getByAltText("mask preview")).toHaveAttribute("src", "/api/images/scan-a/mask-preview");
   });
 
-  test("shows and hides an ROI overlay generated from current bounds and ROI bands", async () => {
+  test("renders ROI preview locally without requesting a server overlay", async () => {
     const { fetchMock } = mockApi();
 
     render(<App />);
     await screen.findByRole("button", { name: "Saved Tissue" });
 
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/images/scan-a/roi-overlay",
-        expect.objectContaining({ method: "POST" }),
-      ),
-    );
-    const call = fetchMock.mock.calls.find(([url]) => url === "/api/images/scan-a/roi-overlay");
-    const body = JSON.parse(call[1].body);
-    expect(body.bounds.groups[0].id).toBe("group-saved");
-    expect(body.roiBands).toEqual(savedAnalysis.roiBands);
-    expect(await screen.findByAltText("ROI overlay")).toHaveAttribute("src", "blob:roi-overlay");
+    await waitFor(() => expect(screen.getByLabelText("ROI preview near")).toBeInTheDocument());
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/roi-overlay"))).toBe(false);
+    expect(screen.getByText(/ROI preview local/i)).toBeInTheDocument();
+  });
+
+  test("changing ROI limits updates local ROI preview without server overlay recalculation", async () => {
+    const { fetchMock } = mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    fireEvent.change(screen.getByLabelText(/가까움 upper/i), { target: { value: "18" } });
+
+    await waitFor(() => expect(screen.getByLabelText("ROI preview near")).toHaveAttribute("stroke-width", "36"));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/roi-overlay"))).toBe(false);
+  });
+
+  test("shows and hides local ROI preview from current bounds and ROI bands", async () => {
+    const { fetchMock } = mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    expect(await screen.findByLabelText("ROI preview near")).toHaveAttribute("points", "10,12 40,14 20,36");
+    expect(screen.getByLabelText("ROI preview mid")).toHaveAttribute("stroke-width", "100");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/roi-overlay"))).toBe(false);
 
     fireEvent.click(screen.getByLabelText(/show roi/i));
 
-    expect(screen.queryByAltText("ROI overlay")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("ROI preview near")).not.toBeInTheDocument();
   });
 
   test("draws polygon connections in the stored point order", async () => {

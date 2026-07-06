@@ -6,6 +6,7 @@ import {
   buildSkeletonSamples,
   countSkeletonTopology,
   polygonSelfIntersects,
+  roiScanWindows,
   validateRoiBands,
 } from "./analysisGeometry.js";
 
@@ -138,6 +139,38 @@ describe("analysis geometry", () => {
       boundaryPoint: { x: 2, y: 1 },
     });
     expect(assignments.has("2,2")).toBe(false);
+  });
+
+  test("roiScanWindows expands each polygon by the max ROI distance", () => {
+    expect(
+      roiScanWindows({
+        width: 100,
+        height: 100,
+        groups: [square("cell", 40, 40, 45, 45)],
+        roiBands: [
+          { id: "near", label: "가까움", fromPx: 0, toPx: 2 },
+          { id: "mid", label: "중간", fromPx: 2, toPx: 4 },
+          { id: "far", label: "멀리", fromPx: 4, toPx: 6 },
+        ],
+      }),
+    ).toEqual([{ groupId: "cell", minX: 34, maxX: 51, minY: 34, maxY: 51 }]);
+  });
+
+  test("assignOutwardRoiPixels preserves assignments when using max-distance scan windows", () => {
+    const assignments = assignOutwardRoiPixels({
+      width: 100,
+      height: 100,
+      groups: [square("cell", 40, 40, 45, 45)],
+      roiBands: [
+        { id: "near", label: "가까움", fromPx: 0, toPx: 2 },
+        { id: "mid", label: "중간", fromPx: 2, toPx: 4 },
+        { id: "far", label: "멀리", fromPx: 4, toPx: 6 },
+      ],
+    });
+
+    expect(assignments.has("0,0")).toBe(false);
+    expect(assignments.get("39,42")).toMatchObject({ groupId: "cell", bandId: "near" });
+    expect(assignments.get("34,42")).toMatchObject({ groupId: "cell", bandId: "far" });
   });
 
   test("polygonSelfIntersects detects bow-tie self intersections", () => {

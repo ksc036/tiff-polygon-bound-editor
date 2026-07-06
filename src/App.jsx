@@ -27,7 +27,6 @@ export default function App() {
   const canvasRef = useRef(null);
   const loadRequestRef = useRef(0);
   const pointerRef = useRef(null);
-  const roiOverlayUrlRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [images, setImages] = useState([]);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -50,8 +49,6 @@ export default function App() {
   const [roiLimits, setRoiLimits] = useState(DEFAULT_ROI_LIMITS);
   const [imageLayer, setImageLayer] = useState("original");
   const [showRoiOverlay, setShowRoiOverlay] = useState(true);
-  const [roiOverlayUrl, setRoiOverlayUrl] = useState(null);
-  const [roiOverlayStatus, setRoiOverlayStatus] = useState("ROI overlay pending");
   const [pointOpacity, setPointOpacity] = useState(() => {
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_OPACITY;
@@ -182,63 +179,6 @@ export default function App() {
     });
   }, [displayMax, displayMin, rawPixels]);
 
-  useEffect(() => {
-    if (!showRoiOverlay || !activeImage || !bounds || !hasActiveImageDimensions) {
-      setRoiOverlayStatus(showRoiOverlay ? "ROI overlay unavailable" : "ROI overlay hidden");
-      replaceRoiOverlayUrl(null);
-      return undefined;
-    }
-
-    if (!bounds.groups.some((group) => group.points.length >= 3)) {
-      setRoiOverlayStatus("ROI overlay needs polygon");
-      replaceRoiOverlayUrl(null);
-      return undefined;
-    }
-
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      try {
-        setRoiOverlayStatus("Loading ROI overlay");
-        const response = await fetch(`/api/images/${activeImage.id}/roi-overlay`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            bounds: normalizeAndClampBounds(bounds, activeImage),
-            roiBands: deriveRoiBands(roiLimits),
-          }),
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error("Unable to load ROI overlay.");
-        }
-
-        const objectUrl = URL.createObjectURL(await response.blob());
-        replaceRoiOverlayUrl(objectUrl);
-        setRoiOverlayStatus("ROI overlay loaded");
-      } catch (error) {
-        if (error.name === "AbortError") return;
-        setRoiOverlayStatus(`ROI overlay failed: ${error.message}`);
-        replaceRoiOverlayUrl(null);
-      }
-    }, 120);
-
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [activeImage?.height, activeImage?.id, activeImage?.width, bounds, hasActiveImageDimensions, roiLimits, showRoiOverlay]);
-
-  useEffect(
-    () => () => {
-      if (roiOverlayUrlRef.current) {
-        URL.revokeObjectURL(roiOverlayUrlRef.current);
-        roiOverlayUrlRef.current = null;
-      }
-    },
-    [],
-  );
-
   const replaceRoot = async (endpoint, body) => {
     if (!confirmReplaceDirty()) return;
 
@@ -327,15 +267,6 @@ export default function App() {
   function clearPointer() {
     pointerRef.current = null;
     setPointer(null);
-  }
-
-  function replaceRoiOverlayUrl(nextUrl) {
-    if (roiOverlayUrlRef.current && roiOverlayUrlRef.current !== nextUrl) {
-      URL.revokeObjectURL(roiOverlayUrlRef.current);
-    }
-
-    roiOverlayUrlRef.current = nextUrl;
-    setRoiOverlayUrl(nextUrl);
   }
 
   function clearAnalysisState(nextStatus = "No analysis") {
@@ -563,6 +494,19 @@ export default function App() {
       };
     });
   }, [bounds]);
+  const roiPreviewGroups = useMemo(
+    () =>
+      showRoiOverlay && activeImage && hasActiveImageDimensions
+        ? buildRoiPreviewGroups(polygons, deriveRoiBands(roiLimits), activeImage)
+        : [],
+    [activeImage?.height, activeImage?.width, hasActiveImageDimensions, polygons, roiLimits, showRoiOverlay],
+  );
+  const roiPreviewStatus = useMemo(() => {
+    if (!showRoiOverlay) return "ROI preview hidden";
+    if (!activeImage || !bounds || !hasActiveImageDimensions) return "ROI preview unavailable";
+    if (!bounds.groups.some((group) => group.points.length >= 3)) return "ROI preview needs polygon";
+    return "ROI preview local";
+  }, [activeImage, bounds, hasActiveImageDimensions, showRoiOverlay]);
 
   return (
     <main className="app-shell">
@@ -721,7 +665,7 @@ export default function App() {
             {dirty ? "Unsaved" : "Clean"}
           </span>
           <span className="status-chip">{hasBounds ? "Saved bound" : "No saved file"}</span>
-          <span className="status-chip">{roiOverlayStatus}</span>
+          <span className="status-chip">{roiPreviewStatus}</span>
           <span className="status-line">{status}</span>
         </div>
 
@@ -754,9 +698,6 @@ export default function App() {
               src={`/api/images/${activeImage.id}/mask-preview`}
             />
           ) : null}
-          {showRoiOverlay && roiOverlayUrl ? (
-            <img className="layer-image roi-overlay" alt="ROI overlay" src={roiOverlayUrl} />
-          ) : null}
           {activeImage && hasActiveImageDimensions && bounds ? (
             <svg
               className="overlay"
@@ -764,6 +705,29 @@ export default function App() {
               role="img"
               aria-label="Bounds overlay"
             >
+              {roiPreviewGroups.length ? (
+                <defs>
+                  {roiPreviewGroups.map((group) => (
+                    <clipPath id={group.clipId} key={group.clipId} clipPathUnits="userSpaceOnUse">
+                      <path d={group.outsidePath} clipRule="evenodd" />
+                    </clipPath>
+                  ))}
+                </defs>
+              ) : null}
+              {roiPreviewGroups.flatMap((group) =>
+                group.bands.map((band) => (
+                  <polygon
+                    key={band.key}
+                    aria-label={`ROI preview ${band.bandId}`}
+                    className={`roi-preview-band ${band.bandId}`}
+                    points={band.path}
+                    fill="none"
+                    stroke={band.color}
+                    strokeWidth={band.strokeWidth}
+                    clipPath={`url(#${group.clipId})`}
+                  />
+                )),
+              )}
               {polygons.map((group) => (
                 <g key={group.id} opacity={pointOpacity}>
                   {group.ordered.length >= 3 ? (
@@ -972,6 +936,38 @@ export default function App() {
       </section>
     </main>
   );
+}
+
+function buildRoiPreviewGroups(polygons, roiBands, image) {
+  return polygons
+    .filter((group) => group.ordered.length >= 3)
+    .map((group, groupIndex) => {
+      const clipId = `roi-preview-clip-${svgIdPart(group.id)}-${groupIndex}`;
+      return {
+        clipId,
+        outsidePath: `M 0 0 H ${image.width} V ${image.height} H 0 Z ${polygonPath(group.ordered)} Z`,
+        bands: [...roiBands]
+          .sort((left, right) => right.toPx - left.toPx)
+          .map((band) => ({
+            key: `${group.id}-${band.id}`,
+            bandId: band.id,
+            label: band.label,
+            color: group.color,
+            path: group.path,
+            strokeWidth: Math.max(1, band.toPx * 2),
+          })),
+      };
+    });
+}
+
+function polygonPath(points) {
+  if (!points.length) return "";
+  const [first, ...rest] = points;
+  return `M ${first.x} ${first.y} ${rest.map((point) => `L ${point.x} ${point.y}`).join(" ")}`;
+}
+
+function svgIdPart(value) {
+  return String(value ?? "group").replace(/[^a-zA-Z0-9_-]/g, "-");
 }
 
 async function readJsonResponse(response) {

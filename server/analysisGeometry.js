@@ -229,6 +229,63 @@ function sortedGroupTie(left, right) {
   return String(left).localeCompare(String(right));
 }
 
+function normalizeAnalysisPolygons(groups) {
+  return Array.isArray(groups)
+    ? groups
+        .filter((group) => Array.isArray(group?.points) && group.points.length >= 3)
+        .map((group) => ({ ...group, points: ensurePolygon(group) }))
+    : [];
+}
+
+function validateImageDimensions(width, height) {
+  if (!Number.isInteger(width) || width < 0 || !Number.isInteger(height) || height < 0) {
+    throw new Error("Invalid image dimensions.");
+  }
+}
+
+function maxBandDistance(bands) {
+  return Math.max(...bands.map((band) => band.toPx));
+}
+
+function polygonBounds(points) {
+  return points.reduce(
+    (bounds, point) => ({
+      minX: Math.min(bounds.minX, point.x),
+      maxX: Math.max(bounds.maxX, point.x),
+      minY: Math.min(bounds.minY, point.y),
+      maxY: Math.max(bounds.maxY, point.y),
+    }),
+    {
+      minX: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      minY: Number.POSITIVE_INFINITY,
+      maxY: Number.NEGATIVE_INFINITY,
+    },
+  );
+}
+
+function clampInteger(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function scanWindowsForPolygons(polygons, bands, width, height) {
+  if (width === 0 || height === 0) {
+    return [];
+  }
+
+  const maxDistancePx = maxBandDistance(bands);
+  return polygons.map((group) => {
+    const bounds = polygonBounds(group.points);
+    return {
+      groupId: group?.id ?? null,
+      minX: clampInteger(Math.floor(bounds.minX - maxDistancePx), 0, width - 1),
+      maxX: clampInteger(Math.ceil(bounds.maxX + maxDistancePx), 0, width - 1),
+      minY: clampInteger(Math.floor(bounds.minY - maxDistancePx), 0, height - 1),
+      maxY: clampInteger(Math.ceil(bounds.maxY + maxDistancePx), 0, height - 1),
+    };
+  });
+}
+
 function collectSkeletonPixels(skeleton, width, height) {
   const pixels = new Set();
   const data = skeleton?.data ?? skeleton;
@@ -434,55 +491,65 @@ export function nearestBoundary(point, group) {
   return nearest;
 }
 
+export function roiScanWindows({ width, height, groups, roiBands } = {}) {
+  const bands = validateRoiBands(roiBands);
+  validateImageDimensions(width, height);
+  return scanWindowsForPolygons(normalizeAnalysisPolygons(groups), bands, width, height);
+}
+
 export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {}) {
   const bands = validateRoiBands(roiBands);
-  if (!Number.isInteger(width) || width < 0 || !Number.isInteger(height) || height < 0) {
-    throw new Error("Invalid image dimensions.");
-  }
+  validateImageDimensions(width, height);
 
-  const polygons = Array.isArray(groups)
-    ? groups
-        .filter((group) => Array.isArray(group?.points) && group.points.length >= 3)
-        .map((group) => ({ ...group, points: ensurePolygon(group) }))
-    : [];
+  const polygons = normalizeAnalysisPolygons(groups);
   const assignments = new Map();
 
   if (polygons.length === 0) {
     return assignments;
   }
 
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const pixel = { x, y };
-      if (polygons.some((group) => pointStrictlyInPolygon(pixel, group.points))) {
-        continue;
-      }
-
-      let nearest = null;
-      for (const group of polygons) {
-        const candidate = nearestBoundary(pixel, group);
-        if (
-          !nearest ||
-          candidate.distancePx < nearest.distancePx - EPSILON ||
-          (almostEqual(candidate.distancePx, nearest.distancePx) && sortedGroupTie(candidate.groupId, nearest.groupId) < 0)
-        ) {
-          nearest = candidate;
+  const visitedPixels = new Set();
+  for (const window of scanWindowsForPolygons(polygons, bands, width, height)) {
+    for (let y = window.minY; y <= window.maxY; y += 1) {
+      for (let x = window.minX; x <= window.maxX; x += 1) {
+        const pixelKey = keyFor(x, y);
+        if (visitedPixels.has(pixelKey)) {
+          continue;
         }
-      }
+        visitedPixels.add(pixelKey);
 
-      const band = nearest ? bandForDistance(nearest.distancePx, bands) : null;
-      if (!band) {
-        continue;
-      }
+        const pixel = { x, y };
+        if (polygons.some((group) => pointStrictlyInPolygon(pixel, group.points))) {
+          continue;
+        }
 
-      assignments.set(keyFor(x, y), {
-        groupId: nearest.groupId,
-        bandId: band.id,
-        distancePx: nearest.distancePx,
-        boundaryPoint: nearest.boundaryPoint,
-        tangent: nearest.tangent,
-        outwardNormal: nearest.outwardNormal,
-      });
+        let nearest = null;
+        for (const group of polygons) {
+          const candidate = nearestBoundary(pixel, group);
+          if (
+            !nearest ||
+            candidate.distancePx < nearest.distancePx - EPSILON ||
+            (almostEqual(candidate.distancePx, nearest.distancePx) &&
+              sortedGroupTie(candidate.groupId, nearest.groupId) < 0)
+          ) {
+            nearest = candidate;
+          }
+        }
+
+        const band = nearest ? bandForDistance(nearest.distancePx, bands) : null;
+        if (!band) {
+          continue;
+        }
+
+        assignments.set(pixelKey, {
+          groupId: nearest.groupId,
+          bandId: band.id,
+          distancePx: nearest.distancePx,
+          boundaryPoint: nearest.boundaryPoint,
+          tangent: nearest.tangent,
+          outwardNormal: nearest.outwardNormal,
+        });
+      }
     }
   }
 
