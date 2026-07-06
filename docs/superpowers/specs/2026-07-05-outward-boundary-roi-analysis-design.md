@@ -56,7 +56,7 @@ The app creates `Skeletonize/` and `analysis/` on demand.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "imageFolder": "selected-stack-sequence_T01",
   "imageFile": "selected-stack-sequence_T01.tif",
   "boundsFile": "selected-stack-sequence_T01.bounds.json",
@@ -81,43 +81,33 @@ The app creates `Skeletonize/` and `analysis/` on demand.
       "bands": {
         "near": {
           "roiAreaPx": 12035,
-          "skeletonPixelCount": 840,
-          "skeletonLengthPx": 906.4,
-          "density": 0.07532,
-          "coverage": 0.0698,
+          "maskPixelCount": 840,
+          "density": 0.0698,
           "globalAlignment": 0.61,
           "globalOrientationDeg": 32.7,
           "radialNormalAlignment": 0.74,
           "tangentialAlignment": 0.26,
           "orientationDispersion": 0.39,
-          "endpointCount": 18,
-          "branchpointCount": 6,
           "empty": false
         }
       },
       "allBands": {
         "roiAreaPx": 50240,
-        "skeletonPixelCount": 2400,
-        "skeletonLengthPx": 2612.8,
-        "density": 0.05201,
-        "coverage": 0.0478,
+        "maskPixelCount": 2400,
+        "density": 0.0478,
         "globalAlignment": 0.57,
         "globalOrientationDeg": 29.3,
         "radialNormalAlignment": 0.69,
         "tangentialAlignment": 0.31,
         "orientationDispersion": 0.43,
-        "endpointCount": 52,
-        "branchpointCount": 17,
         "empty": false
       }
     }
   ],
   "imageSummary": {
     "roiAreaPx": 50240,
-    "skeletonPixelCount": 2400,
-    "skeletonLengthPx": 2612.8,
-    "density": 0.05201,
-    "coverage": 0.0478,
+    "maskPixelCount": 2400,
+    "density": 0.0478,
     "globalAlignment": 0.57,
     "radialNormalAlignment": 0.69,
     "tangentialAlignment": 0.31
@@ -142,7 +132,7 @@ A pixel belongs to an outward band when:
 2. its nearest distance to the group polygon boundary falls within the band,
 3. it is inside the image bounds.
 
-For multiple boundary groups, ROI area and skeleton metrics use the same
+For multiple boundary groups, ROI area and mask metrics use the same
 exclusive assignment rule:
 
 1. exclude pixels that are inside any saved cell polygon,
@@ -151,30 +141,22 @@ exclusive assignment rule:
 3. if the distance falls within one of the configured outward bands, assign the
    pixel to that one group and that one band.
 
-This avoids double-counting both ROI area and skeleton pixels in image-level
+This avoids double-counting both ROI area and mask pixels in image-level
 summaries. Self-intersecting polygons are invalid for analysis because inside
 and outside are ambiguous; boundary editing can still exist, but recalculation
 should fail with a safe validation error until the polygon is corrected.
 
-### Skeleton Pixel Count And Length
+### Mask Pixel Count
 
-`skeletonPixelCount` is the count of skeleton foreground pixels assigned to the
-ROI. `skeletonLengthPx` estimates geometric length by summing traced skeleton
-segment steps: horizontal/vertical steps count as `1`, diagonal steps count as
-`sqrt(2)`.
+`maskPixelCount` is the count of original binary mask foreground pixels assigned
+to the ROI. Skeletonized masks are not used for this count.
 
 ### Density
 
-`density = skeletonLengthPx / roiAreaPx`.
+`density = maskPixelCount / roiAreaPx`.
 
-If `roiAreaPx` is zero, density is `null` and the band gets an `empty` flag.
-
-### Coverage
-
-`coverage = skeletonPixelCount / roiAreaPx`.
-
-Coverage is a more direct occupancy ratio than density and is useful for quick
-quality checks.
+If `roiAreaPx` is zero, density is `null`; otherwise a band with no mask pixels
+has density `0`.
 
 ### Global Alignment
 
@@ -264,7 +246,7 @@ Response:
 
 ```json
 {
-  "analysis": { "schemaVersion": 1 },
+  "analysis": { "schemaVersion": 2 },
   "hasAnalysis": true
 }
 ```
@@ -311,7 +293,7 @@ Response:
 
 ```json
 {
-  "analysis": { "schemaVersion": 1 },
+  "analysis": { "schemaVersion": 2 },
   "hasAnalysis": true
 }
 ```

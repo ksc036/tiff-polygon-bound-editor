@@ -25,6 +25,44 @@ const ROI_BAND_LABELS = { near: "가까움", mid: "중간", far: "멀리" };
 const ROI_BAND_COLORS = { near: "#ef4444", mid: "#f59e0b", far: "#3b82f6" };
 const ROI_MIN_LIMIT = 1;
 const ROI_LIMIT_STEP = 1;
+const ANALYSIS_COLUMNS = [
+  {
+    key: "roiAreaPx",
+    label: "Area",
+    help: "ROI area in pixels for this boundary distance band.",
+    format: formatInteger,
+  },
+  {
+    key: "maskPixelCount",
+    label: "Pixels",
+    help: "Foreground mask pixels inside this ROI.",
+    format: formatInteger,
+  },
+  {
+    key: "density",
+    label: "Density",
+    help: "Mask pixels divided by ROI area.",
+    format: formatMetric,
+  },
+  {
+    key: "globalAlignment",
+    label: "Global",
+    help: "Overall skeleton orientation consistency inside this ROI.",
+    format: formatMetric,
+  },
+  {
+    key: "radialNormalAlignment",
+    label: "Radial",
+    help: "Skeleton alignment with the outward normal from the boundary.",
+    format: formatMetric,
+  },
+  {
+    key: "tangentialAlignment",
+    label: "Tangent",
+    help: "Skeleton alignment with the boundary tangent direction.",
+    format: formatMetric,
+  },
+];
 
 export default function App() {
   const canvasRef = useRef(null);
@@ -49,6 +87,7 @@ export default function App() {
   const [analysisStatus, setAnalysisStatus] = useState("No analysis");
   const [analysisError, setAnalysisError] = useState("");
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [activeMetricHelp, setActiveMetricHelp] = useState(null);
   const [roiLimits, setRoiLimits] = useState(DEFAULT_ROI_LIMITS);
   const [imageLayer, setImageLayer] = useState("original");
   const [showRoiOverlay, setShowRoiOverlay] = useState(true);
@@ -927,36 +966,32 @@ export default function App() {
               ) : null}
               <div className="analysis-table-wrap">
                 <table className="analysis-table">
-                  <thead>
-                    <tr>
-                      <th>Group</th>
-                      <th>ROI</th>
-                      <th>Area</th>
-                      <th>Pixels</th>
-                      <th>Length</th>
-                      <th>Density</th>
-                      <th>Coverage</th>
-                      <th>Global</th>
-                      <th>Radial</th>
-                      <th>Tangent</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {analysisRows(analysis).map((row) => (
-                      <tr key={row.id}>
-                        <td>{row.groupName}</td>
-                        <td>{row.bandLabel}</td>
-                        <td>{formatInteger(row.metrics.roiAreaPx)}</td>
-                        <td>{formatInteger(row.metrics.skeletonPixelCount)}</td>
-                        <td>{formatMetric(row.metrics.skeletonLengthPx)}</td>
-                        <td>{formatMetric(row.metrics.density)}</td>
-                        <td>{formatMetric(row.metrics.coverage)}</td>
-                        <td>{formatMetric(row.metrics.globalAlignment)}</td>
-                        <td>{formatMetric(row.metrics.radialNormalAlignment)}</td>
-                        <td>{formatMetric(row.metrics.tangentialAlignment)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
+	                  <thead>
+	                    <tr>
+	                      <th>Group</th>
+	                      <th>ROI</th>
+	                      {ANALYSIS_COLUMNS.map((column) => (
+	                        <MetricColumnHeader
+	                          activeMetricHelp={activeMetricHelp}
+	                          column={column}
+	                          key={column.key}
+	                          onHide={() => setActiveMetricHelp(null)}
+	                          onShow={() => setActiveMetricHelp(column.key)}
+	                        />
+	                      ))}
+	                    </tr>
+	                  </thead>
+	                  <tbody>
+	                    {analysisRows(analysis).map((row) => (
+	                      <tr key={row.id}>
+	                        <td>{row.groupName}</td>
+	                        <td>{row.bandLabel}</td>
+	                        {ANALYSIS_COLUMNS.map((column) => (
+	                          <td key={column.key}>{column.format(row.metrics[column.key])}</td>
+	                        ))}
+	                      </tr>
+	                    ))}
+	                  </tbody>
                 </table>
               </div>
             </>
@@ -966,6 +1001,32 @@ export default function App() {
         </div>
       </section>
     </main>
+  );
+}
+
+function MetricColumnHeader({ activeMetricHelp, column, onHide, onShow }) {
+  const tooltipId = `metric-help-${column.key}`;
+  const isActive = activeMetricHelp === column.key;
+
+  return (
+    <th className="metric-header">
+      <button
+        type="button"
+        className="metric-help-trigger"
+        aria-describedby={isActive ? tooltipId : undefined}
+        onBlur={onHide}
+        onFocus={onShow}
+        onMouseEnter={onShow}
+        onMouseLeave={onHide}
+      >
+        {column.label}
+      </button>
+      {isActive ? (
+        <span className="metric-tooltip" id={tooltipId} role="tooltip">
+          {column.help}
+        </span>
+      ) : null}
+    </th>
   );
 }
 

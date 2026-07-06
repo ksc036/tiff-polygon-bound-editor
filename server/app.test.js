@@ -584,7 +584,7 @@ describe("createApp", () => {
     await expect(missingResponse.json()).resolves.toEqual({ analysis: null, hasAnalysis: false });
 
     const analysis = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       imageFolder: "selected-stack-sequence_T01",
       imageFile: "frame001.tif",
       boundsFile: "selected-stack-sequence_T01.bounds.json",
@@ -704,7 +704,7 @@ describe("createApp", () => {
     await writeFile(
       path.join(imageRoot, folderName, "analysis", `${folderName}.analysis.json`),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         imageFolder: folderName,
         imageFile: "frame001.tif",
         boundsFile: `${folderName}.bounds.json`,
@@ -741,7 +741,7 @@ describe("createApp", () => {
 
     await writeFile(
       path.join(imageRoot, folderName, "analysis", `${folderName}.analysis.json`),
-      JSON.stringify({ schemaVersion: 1, groups: "bad" }),
+      JSON.stringify({ schemaVersion: 2, groups: "bad" }),
     );
 
     const malformedResponse = await request(app, `/api/images/${folderName}/analysis`);

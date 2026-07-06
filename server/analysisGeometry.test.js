@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 
 import {
-  aggregateSkeletonMetrics,
+  aggregateRoiMetrics,
   assignOutwardRoiPixels,
+  buildMaskSamples,
   buildSkeletonSamples,
-  countSkeletonTopology,
   polygonSelfIntersects,
   roiScanWindows,
   validateRoiBands,
@@ -225,16 +225,7 @@ describe("analysis geometry", () => {
     });
   });
 
-  test("countSkeletonTopology counts endpoints and branchpoints from 8-neighborhood skeleton pixels", () => {
-    const pixels = new Set(["3,2", "3,3", "2,4", "4,4"]);
-
-    expect(countSkeletonTopology(pixels)).toEqual({
-      endpointCount: 3,
-      branchpointCount: 1,
-    });
-  });
-
-  test("aggregateSkeletonMetrics distinguishes radial and tangential skeletons and computes shared metrics", () => {
+  test("aggregateRoiMetrics counts mask pixels for density while skeletons drive orientation", () => {
     const group = square("cell", 4, 3, 6, 7);
     const roiBands = [
       { id: "near", label: "가까움", fromPx: 0, toPx: 2 },
@@ -242,23 +233,34 @@ describe("analysis geometry", () => {
       { id: "far", label: "멀리", fromPx: 4, toPx: 6 },
     ];
     const assignments = assignOutwardRoiPixels({ width: 11, height: 11, groups: [group], roiBands });
+    const maskSamples = buildMaskSamples({
+      mask: new Set(["5,0", "5,1", "5,2", "5,5"]),
+      width: 11,
+      height: 11,
+      assignments,
+    });
     const radialSkeleton = new Set(["5,0", "5,1", "5,2"]);
     const tangentialSkeleton = new Set(["3,4", "3,5", "3,6"]);
 
-    const radialMetrics = aggregateSkeletonMetrics({
+    const radialMetrics = aggregateRoiMetrics({
       assignments,
-      samples: buildSkeletonSamples({ skeleton: radialSkeleton, width: 11, height: 11, assignments }),
+      maskSamples,
+      skeletonSamples: buildSkeletonSamples({ skeleton: radialSkeleton, width: 11, height: 11, assignments }),
     });
-    const tangentialMetrics = aggregateSkeletonMetrics({
+    const tangentialMetrics = aggregateRoiMetrics({
       assignments,
-      samples: buildSkeletonSamples({ skeleton: tangentialSkeleton, width: 11, height: 11, assignments }),
+      maskSamples,
+      skeletonSamples: buildSkeletonSamples({ skeleton: tangentialSkeleton, width: 11, height: 11, assignments }),
     });
 
     expect(radialMetrics.overall.roiAreaPx).toBe(assignments.size);
-    expect(radialMetrics.overall.skeletonPixelCount).toBe(3);
-    expect(radialMetrics.overall.skeletonLengthPx).toBeCloseTo(2);
-    expect(radialMetrics.overall.density).toBeCloseTo(2 / assignments.size);
-    expect(radialMetrics.overall.coverage).toBeCloseTo(3 / assignments.size);
+    expect(radialMetrics.overall.maskPixelCount).toBe(3);
+    expect(radialMetrics.overall.density).toBeCloseTo(3 / assignments.size);
+    expect(radialMetrics.overall).not.toHaveProperty("skeletonPixelCount");
+    expect(radialMetrics.overall).not.toHaveProperty("skeletonLengthPx");
+    expect(radialMetrics.overall).not.toHaveProperty("coverage");
+    expect(radialMetrics.overall).not.toHaveProperty("endpointCount");
+    expect(radialMetrics.overall).not.toHaveProperty("branchpointCount");
     expect(radialMetrics.overall.globalAlignment).toBeCloseTo(1);
     expect(radialMetrics.overall.globalOrientationDeg).toBeCloseTo(90);
     expect(radialMetrics.overall.radialNormalAlignment).toBeGreaterThan(0.95);
@@ -271,7 +273,7 @@ describe("analysis geometry", () => {
     expect(tangentialMetrics.overall.tangentialAlignment).toBeGreaterThan(0.95);
   });
 
-  test("aggregateSkeletonMetrics allocates cross-band skeleton edges to both endpoint bands", () => {
+  test("aggregateRoiMetrics allocates mask density by ROI band", () => {
     const group = square("cell", 4, 3, 6, 7);
     const roiBands = [
       { id: "near", label: "가까움", fromPx: 0, toPx: 2 },
@@ -279,26 +281,26 @@ describe("analysis geometry", () => {
       { id: "far", label: "멀리", fromPx: 4, toPx: 6 },
     ];
     const assignments = assignOutwardRoiPixels({ width: 11, height: 11, groups: [group], roiBands });
-    const samples = buildSkeletonSamples({ skeleton: new Set(["5,1", "5,2", "5,3"]), width: 11, height: 11, assignments });
+    const maskSamples = buildMaskSamples({ mask: new Set(["5,1", "5,2", "5,3"]), width: 11, height: 11, assignments });
 
-    expect(samples.map((sample) => [sample.x, sample.y, sample.bandId])).toEqual([
+    expect(maskSamples.map((sample) => [sample.x, sample.y, sample.bandId])).toEqual([
       [5, 1, "mid"],
       [5, 2, "near"],
       [5, 3, "near"],
     ]);
 
-    const metrics = aggregateSkeletonMetrics({ assignments, samples });
+    const metrics = aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples: [] });
 
-    expect(metrics.overall.skeletonLengthPx).toBeCloseTo(2);
-    expect(metrics.bands.near.skeletonLengthPx).toBeCloseTo(1.5);
-    expect(metrics.bands.mid.skeletonLengthPx).toBeCloseTo(0.5);
-    expect(metrics.bands.far.skeletonLengthPx).toBeNull();
-    expect(metrics.bands.near.skeletonLengthPx + metrics.bands.mid.skeletonLengthPx).toBeCloseTo(
-      metrics.overall.skeletonLengthPx,
-    );
+    expect(metrics.overall.maskPixelCount).toBe(3);
+    expect(metrics.bands.near.maskPixelCount).toBe(2);
+    expect(metrics.bands.near.density).toBeCloseTo(2 / metrics.bands.near.roiAreaPx);
+    expect(metrics.bands.mid.maskPixelCount).toBe(1);
+    expect(metrics.bands.mid.density).toBeCloseTo(1 / metrics.bands.mid.roiAreaPx);
+    expect(metrics.bands.far.maskPixelCount).toBe(0);
+    expect(metrics.bands.far.density).toBe(0);
   });
 
-  test("aggregateSkeletonMetrics counts isolated assigned skeleton pixels without fabricating orientation metrics", () => {
+  test("aggregateRoiMetrics keeps mask occupancy even when skeleton has no orientation", () => {
     const group = square("cell", 4, 3, 6, 7);
     const roiBands = [
       { id: "near", label: "가까움", fromPx: 0, toPx: 2 },
@@ -306,10 +308,11 @@ describe("analysis geometry", () => {
       { id: "far", label: "멀리", fromPx: 4, toPx: 6 },
     ];
     const assignments = assignOutwardRoiPixels({ width: 11, height: 11, groups: [group], roiBands });
-    const samples = buildSkeletonSamples({ skeleton: new Set(["5,0"]), width: 11, height: 11, assignments });
-    const metrics = aggregateSkeletonMetrics({ assignments, samples });
+    const maskSamples = buildMaskSamples({ mask: new Set(["5,0"]), width: 11, height: 11, assignments });
+    const skeletonSamples = buildSkeletonSamples({ skeleton: new Set(["5,0"]), width: 11, height: 11, assignments });
+    const metrics = aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples });
 
-    expect(samples).toEqual([
+    expect(skeletonSamples).toEqual([
       expect.objectContaining({
         x: 5,
         y: 0,
@@ -318,10 +321,8 @@ describe("analysis geometry", () => {
       }),
     ]);
     expect(metrics.overall.roiAreaPx).toBe(assignments.size);
-    expect(metrics.overall.skeletonPixelCount).toBe(1);
-    expect(metrics.overall.skeletonLengthPx).toBe(0);
-    expect(metrics.overall.density).toBe(0);
-    expect(metrics.overall.coverage).toBeCloseTo(1 / assignments.size);
+    expect(metrics.overall.maskPixelCount).toBe(1);
+    expect(metrics.overall.density).toBeCloseTo(1 / assignments.size);
     expect(metrics.overall.globalAlignment).toBeNull();
     expect(metrics.overall.globalOrientationDeg).toBeNull();
     expect(metrics.overall.radialNormalAlignment).toBeNull();

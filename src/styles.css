@@ -583,7 +583,7 @@ input[type="range"] {
 
 .analysis-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 640px;
   border-collapse: collapse;
   font-size: 0.86rem;
 }
@@ -609,6 +609,47 @@ input[type="range"] {
   color: #b7c5d1;
   background: #182029;
   font-weight: 700;
+}
+
+.analysis-table th.metric-header {
+  overflow: visible;
+}
+
+.metric-help-trigger {
+  min-height: 22px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 2px;
+  color: inherit;
+  background: transparent;
+  font-weight: 700;
+  cursor: help;
+}
+
+.metric-help-trigger:hover,
+.metric-help-trigger:focus-visible {
+  color: #f3f7fa;
+  background: #25303b;
+}
+
+.metric-tooltip {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 6px;
+  z-index: 12;
+  width: 220px;
+  border: 1px solid #465666;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #e8edf2;
+  background: #101821;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
 }
 
 .analysis-table tbody tr:last-child td {

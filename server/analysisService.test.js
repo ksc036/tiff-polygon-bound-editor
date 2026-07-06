@@ -91,17 +91,13 @@ function metric(overrides = {}) {
   return {
     bandId: null,
     roiAreaPx: 0,
-    skeletonPixelCount: 0,
-    skeletonLengthPx: null,
+    maskPixelCount: 0,
     density: null,
-    coverage: null,
     globalAlignment: null,
     globalOrientationDeg: null,
     radialNormalAlignment: null,
     tangentialAlignment: null,
     orientationDispersion: null,
-    endpointCount: 0,
-    branchpointCount: 0,
     empty: true,
     ...overrides,
   };
@@ -165,7 +161,7 @@ describe("recalculateAnalysis", () => {
 
     expect(result.hasAnalysis).toBe(true);
     expect(result.analysis).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       imageFolder: folderName,
       imageFile: "frame001.tif",
       boundsFile: `${folderName}.bounds.json`,
@@ -182,15 +178,15 @@ describe("recalculateAnalysis", () => {
           groupName: "Cell",
           color: "#44aa99",
           bands: {
-            near: expect.objectContaining({ bandId: "near", skeletonPixelCount: expect.any(Number) }),
+            near: expect.objectContaining({ bandId: "near", maskPixelCount: expect.any(Number) }),
             mid: expect.objectContaining({ bandId: "mid" }),
             far: expect.objectContaining({ bandId: "far" }),
           },
-          allBands: expect.objectContaining({ skeletonPixelCount: expect.any(Number) }),
+          allBands: expect.objectContaining({ maskPixelCount: expect.any(Number) }),
         },
       ],
       imageSummary: expect.objectContaining({
-        skeletonPixelCount: expect.any(Number),
+        maskPixelCount: expect.any(Number),
         roiAreaPx: expect.any(Number),
       }),
       warnings: [],
@@ -198,8 +194,14 @@ describe("recalculateAnalysis", () => {
     const maskStat = await stat(maskPath);
     expect(result.analysis.maskSource.mtimeMs).toBeCloseTo(maskStat.mtimeMs, 3);
     expect(Date.parse(result.analysis.updatedAt)).not.toBeNaN();
-    expect(result.analysis.groups[0].allBands.skeletonPixelCount).toBeGreaterThan(0);
-    expect(result.analysis.imageSummary.skeletonPixelCount).toBe(result.analysis.groups[0].allBands.skeletonPixelCount);
+    expect(result.analysis.groups[0].allBands.maskPixelCount).toBe(3);
+    expect(result.analysis.groups[0].allBands.density).toBeCloseTo(
+      result.analysis.groups[0].allBands.maskPixelCount / result.analysis.groups[0].allBands.roiAreaPx,
+    );
+    expect(result.analysis.groups[0].allBands).not.toHaveProperty("skeletonPixelCount");
+    expect(result.analysis.groups[0].allBands).not.toHaveProperty("skeletonLengthPx");
+    expect(result.analysis.groups[0].allBands).not.toHaveProperty("coverage");
+    expect(result.analysis.imageSummary.maskPixelCount).toBe(result.analysis.groups[0].allBands.maskPixelCount);
 
     const { skeletonPath, analysisPath } = storage.imagePaths(folderName);
     await expect(access(skeletonPath)).resolves.toBeUndefined();
@@ -339,11 +341,46 @@ describe("recalculateAnalysis", () => {
     await expectRejectCode(recalculateAnalysis(storage, folderName), "INVALID_BOUNDS");
   });
 
+  test("treats older saved analysis schema as missing to avoid stale metric meanings", async () => {
+    const { rootDir, folderName, storage } = await setupStorage();
+    const { analysisDir, analysisPath } = storage.imagePaths(folderName);
+    await mkdir(analysisDir, { recursive: true });
+    await writeFile(
+      analysisPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        imageFolder: folderName,
+        imageFile: "frame001.tif",
+        boundsFile: `${folderName}.bounds.json`,
+        maskSource: { file: "frame001.png", format: "png", width: 8, height: 8, mtimeMs: 1 },
+        skeletonFile: `${folderName}.skeleton.png`,
+        roiBands: [
+          { id: "near", label: "Near", fromPx: 0, toPx: 2 },
+          { id: "mid", label: "Mid", fromPx: 2, toPx: 4 },
+          { id: "far", label: "Far", fromPx: 4, toPx: 6 },
+        ],
+        groups: [
+          {
+            groupId: "cell",
+            groupName: "Cell",
+            color: null,
+            bands: { near: { roiAreaPx: 25, skeletonPixelCount: 5, skeletonLengthPx: 6, density: 0.24, coverage: 0.2 } },
+            allBands: { roiAreaPx: 25, skeletonPixelCount: 5, skeletonLengthPx: 6, density: 0.24, coverage: 0.2 },
+          },
+        ],
+        imageSummary: { roiAreaPx: 25, skeletonPixelCount: 5, skeletonLengthPx: 6, density: 0.24, coverage: 0.2 },
+        warnings: [],
+      }),
+    );
+
+    await expect(loadAnalysis(storage, folderName)).resolves.toEqual({ analysis: null, hasAnalysis: false });
+  });
+
   test("loads saved analysis through a public DTO sanitizer", async () => {
     const { rootDir, folderName, storage } = await setupStorage();
     const { analysisDir, analysisPath } = storage.imagePaths(folderName);
     const saved = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       imageFolder: path.join(rootDir, folderName),
       imageFile: path.join(rootDir, folderName, "image", "frame001.tif"),
       boundsFile: path.join(rootDir, folderName, "bound", `${folderName}.bounds.json`),
@@ -368,7 +405,7 @@ describe("recalculateAnalysis", () => {
           groupName: "Cell",
           color: null,
           bands: { near: metric({ bandId: "near" }) },
-          allBands: metric(),
+          allBands: { ...metric(), skeletonLengthPx: 10, coverage: 0.5, endpointCount: 2, branchpointCount: 1 },
           absolutePath: path.join(rootDir, "leak"),
         },
       ],
@@ -384,7 +421,7 @@ describe("recalculateAnalysis", () => {
 
     expect(result.hasAnalysis).toBe(true);
     expect(result.analysis).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       imageFolder: folderName,
       imageFile: "frame001.tif",
       boundsFile: `${folderName}.bounds.json`,
@@ -418,7 +455,7 @@ describe("recalculateAnalysis", () => {
     const { folderName, storage } = await setupStorage();
     const { analysisDir, analysisPath } = storage.imagePaths(folderName);
     await mkdir(analysisDir, { recursive: true });
-    await writeFile(analysisPath, JSON.stringify({ schemaVersion: 1, groups: "not an array" }));
+    await writeFile(analysisPath, JSON.stringify({ schemaVersion: 2, groups: "not an array" }));
 
     await expectRejectCode(loadAnalysis(storage, folderName), "INVALID_ANALYSIS");
   });

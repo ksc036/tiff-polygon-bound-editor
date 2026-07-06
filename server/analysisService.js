@@ -3,30 +3,27 @@ import { randomUUID } from "node:crypto";
 import { readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import {
-  aggregateSkeletonMetrics,
+  aggregateRoiMetrics,
   assignOutwardRoiPixels,
+  buildMaskSamples,
   buildSkeletonSamples,
   polygonSelfIntersects,
   validateRoiBands,
 } from "./analysisGeometry.js";
 import { readBinaryMask, thinBinaryMask, writeSkeletonPng } from "./maskSkeleton.js";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const REQUIRED_BAND_IDS = ["near", "mid", "far"];
 const METRIC_FIELDS = [
   "bandId",
   "roiAreaPx",
-  "skeletonPixelCount",
-  "skeletonLengthPx",
+  "maskPixelCount",
   "density",
-  "coverage",
   "globalAlignment",
   "globalOrientationDeg",
   "radialNormalAlignment",
   "tangentialAlignment",
   "orientationDispersion",
-  "endpointCount",
-  "branchpointCount",
   "empty",
 ];
 
@@ -178,13 +175,15 @@ function sourceForJson(source) {
   };
 }
 
-function buildGroupAnalyses({ groups, assignments, samples }) {
+function buildGroupAnalyses({ groups, assignments, maskSamples, skeletonSamples }) {
   return groups.map((group) => {
     const groupAssignments = filterAssignments(assignments, group.id ?? null);
-    const groupSamples = filterSamples(samples, group.id ?? null);
-    const metrics = aggregateSkeletonMetrics({
+    const groupMaskSamples = filterSamples(maskSamples, group.id ?? null);
+    const groupSkeletonSamples = filterSamples(skeletonSamples, group.id ?? null);
+    const metrics = aggregateRoiMetrics({
       assignments: groupAssignments,
-      samples: groupSamples,
+      maskSamples: groupMaskSamples,
+      skeletonSamples: groupSkeletonSamples,
     });
 
     return {
@@ -325,9 +324,10 @@ async function writeSkeletonAtomically(outputPath, skeleton, writeSkeleton) {
   }
 }
 
-function buildAnalysis({ image, paths, bounds, maskSource, skeleton, roiBands, groups }) {
+function buildAnalysis({ image, paths, bounds, maskSource, mask, skeleton, roiBands, groups }) {
   let assignments;
-  let samples;
+  let maskSamples;
+  let skeletonSamples;
   let imageMetrics;
 
   try {
@@ -337,13 +337,19 @@ function buildAnalysis({ image, paths, bounds, maskSource, skeleton, roiBands, g
       groups,
       roiBands,
     });
-    samples = buildSkeletonSamples({
+    maskSamples = buildMaskSamples({
+      mask: mask.data,
+      width: mask.width,
+      height: mask.height,
+      assignments,
+    });
+    skeletonSamples = buildSkeletonSamples({
       skeleton: skeleton.data,
       width: skeleton.width,
       height: skeleton.height,
       assignments,
     });
-    imageMetrics = aggregateSkeletonMetrics({ assignments, samples });
+    imageMetrics = aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples });
   } catch (error) {
     throw analysisError("CALCULATION_FAILED", "Unable to calculate analysis metrics.", 422, error);
   }
@@ -356,7 +362,7 @@ function buildAnalysis({ image, paths, bounds, maskSource, skeleton, roiBands, g
     maskSource: sourceForJson(maskSource),
     skeletonFile: path.basename(paths.skeletonPath),
     roiBands,
-    groups: buildGroupAnalyses({ groups, assignments, samples }),
+    groups: buildGroupAnalyses({ groups, assignments, maskSamples, skeletonSamples }),
     imageSummary: {
       width: skeleton.width,
       height: skeleton.height,
@@ -370,7 +376,11 @@ function buildAnalysis({ image, paths, bounds, maskSource, skeleton, roiBands, g
 
 export async function loadAnalysis(storage, id) {
   const analysis = await storage.loadAnalysis(id);
-  return { analysis: analysis === null ? null : sanitizeAnalysis(analysis), hasAnalysis: analysis !== null };
+  if (analysis === null || analysis.schemaVersion !== SCHEMA_VERSION) {
+    return { analysis: null, hasAnalysis: false };
+  }
+
+  return { analysis: sanitizeAnalysis(analysis), hasAnalysis: true };
 }
 
 export async function recalculateAnalysis(storage, id, { roiBands, maxImagePixels, writeSkeleton = writeSkeletonPng } = {}) {
@@ -431,6 +441,7 @@ export async function recalculateAnalysis(storage, id, { roiBands, maxImagePixel
     paths,
     bounds,
     maskSource: maskSourceWithDimensions,
+    mask,
     skeleton,
     roiBands: normalizedBands,
     groups,

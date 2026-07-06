@@ -92,7 +92,7 @@ const legacyBounds = {
 };
 
 const savedAnalysis = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   imageFolder: "plate-a",
   imageFile: "a.tif",
   boundsFile: "plate-a.bounds.json",
@@ -111,10 +111,8 @@ const savedAnalysis = {
       bands: {
         near: {
           roiAreaPx: 25,
-          skeletonPixelCount: 5,
-          skeletonLengthPx: 6,
-          density: 0.24,
-          coverage: 0.2,
+          maskPixelCount: 5,
+          density: 0.2,
           globalAlignment: 0.8,
           radialNormalAlignment: 0.7,
           tangentialAlignment: 0.3,
@@ -123,10 +121,8 @@ const savedAnalysis = {
       },
       allBands: {
         roiAreaPx: 25,
-        skeletonPixelCount: 5,
-        skeletonLengthPx: 6,
-        density: 0.24,
-        coverage: 0.2,
+        maskPixelCount: 5,
+        density: 0.2,
         globalAlignment: 0.8,
         radialNormalAlignment: 0.7,
         tangentialAlignment: 0.3,
@@ -136,10 +132,8 @@ const savedAnalysis = {
   ],
   imageSummary: {
     roiAreaPx: 25,
-    skeletonPixelCount: 5,
-    skeletonLengthPx: 6,
-    density: 0.24,
-    coverage: 0.2,
+    maskPixelCount: 5,
+    density: 0.2,
     globalAlignment: 0.8,
     radialNormalAlignment: 0.7,
     tangentialAlignment: 0.3,
@@ -303,7 +297,23 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
     expect(screen.getByText("plate-a.png")).toBeInTheDocument();
-    expect(screen.getAllByText("0.2400").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("0.2000").length).toBeGreaterThan(0);
+    expect(screen.getByRole("columnheader", { name: "Pixels" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Length" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Coverage" })).not.toBeInTheDocument();
+  });
+
+  test("shows metric meaning when hovering an analysis header", async () => {
+    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "Density" }));
+
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/mask pixels divided by roi area/i);
   });
 
   test("recalculates analysis with edited contiguous ROI bands", async () => {

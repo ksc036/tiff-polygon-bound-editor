@@ -185,7 +185,7 @@ describe("createStorage", () => {
       imageFolder: "selected-stack-sequence_T01",
       imageFile: "frame001.tif",
       groups: [],
-      imageSummary: { skeletonPixelCount: 0 },
+      imageSummary: { maskPixelCount: 0 },
     };
 
     const saved = await storage.saveAnalysis("selected-stack-sequence_T01", analysis);

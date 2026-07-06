@@ -11,12 +11,6 @@ const DEFAULT_BAND_LABELS = {
   far: "멀리",
 };
 const EPSILON = 1e-9;
-const SKELETON_EDGE_DIRECTIONS = [
-  { dx: 1, dy: 0, weight: 1 },
-  { dx: 0, dy: 1, weight: 1 },
-  { dx: 1, dy: 1, weight: Math.SQRT2 },
-  { dx: 1, dy: -1, weight: Math.SQRT2 },
-];
 
 function cloneBand(band) {
   return { id: band.id, label: band.label, fromPx: band.fromPx, toPx: band.toPx };
@@ -286,14 +280,14 @@ function scanWindowsForPolygons(polygons, bands, width, height) {
   });
 }
 
-function collectSkeletonPixels(skeleton, width, height) {
+function collectForegroundPixels(image, width, height) {
   const pixels = new Set();
-  const data = skeleton?.data ?? skeleton;
-  const resolvedWidth = width ?? skeleton?.width;
-  const resolvedHeight = height ?? skeleton?.height;
+  const data = image?.data ?? image;
+  const resolvedWidth = width ?? image?.width;
+  const resolvedHeight = height ?? image?.height;
 
-  if (skeleton instanceof Set) {
-    for (const value of skeleton) {
+  if (image instanceof Set) {
+    for (const value of image) {
       if (typeof value === "string") {
         pixels.add(value);
       } else if (validPoint(value)) {
@@ -338,17 +332,13 @@ function emptyMetricValues({ roiAreaPx = 0, bandId = null } = {}) {
   return {
     bandId,
     roiAreaPx,
-    skeletonPixelCount: 0,
-    skeletonLengthPx: null,
-    density: null,
-    coverage: null,
+    maskPixelCount: 0,
+    density: roiAreaPx > 0 ? 0 : null,
     globalAlignment: null,
     globalOrientationDeg: null,
     radialNormalAlignment: null,
     tangentialAlignment: null,
     orientationDispersion: null,
-    endpointCount: 0,
-    branchpointCount: 0,
     empty: true,
   };
 }
@@ -556,54 +546,8 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
   return assignments;
 }
 
-export function countSkeletonTopology(skeletonPixels) {
-  const pixels = skeletonPixels instanceof Set ? skeletonPixels : collectSkeletonPixels(skeletonPixels);
-  let endpointCount = 0;
-  let branchpointCount = 0;
-
-  for (const key of pixels) {
-    const { x, y } = parseKey(key);
-    let neighborCount = 0;
-
-    for (let dy = -1; dy <= 1; dy += 1) {
-      for (let dx = -1; dx <= 1; dx += 1) {
-        if (dx === 0 && dy === 0) {
-          continue;
-        }
-        if (pixels.has(keyFor(x + dx, y + dy))) {
-          neighborCount += 1;
-        }
-      }
-    }
-
-    if (neighborCount === 1) {
-      endpointCount += 1;
-    } else if (neighborCount >= 3) {
-      branchpointCount += 1;
-    }
-  }
-
-  return { endpointCount, branchpointCount };
-}
-
-export function estimateSkeletonLength(skeletonPixels) {
-  const pixels = skeletonPixels instanceof Set ? skeletonPixels : collectSkeletonPixels(skeletonPixels);
-  let length = 0;
-
-  for (const key of pixels) {
-    const { x, y } = parseKey(key);
-    for (const direction of SKELETON_EDGE_DIRECTIONS) {
-      if (pixels.has(keyFor(x + direction.dx, y + direction.dy))) {
-        length += direction.weight;
-      }
-    }
-  }
-
-  return length;
-}
-
 export function buildSkeletonSamples({ skeleton, width, height, assignments } = {}) {
-  const pixels = collectSkeletonPixels(skeleton, width, height);
+  const pixels = collectForegroundPixels(skeleton, width, height);
   const samples = [];
 
   for (const key of pixels) {
@@ -651,52 +595,62 @@ export function buildSkeletonSamples({ skeleton, width, height, assignments } = 
   return samples;
 }
 
+export function buildMaskSamples({ mask, width, height, assignments } = {}) {
+  const pixels = collectForegroundPixels(mask, width, height);
+  const samples = [];
+
+  for (const key of pixels) {
+    const assignment = assignments?.get(key);
+    if (!assignment) {
+      continue;
+    }
+
+    const { x, y } = parseKey(key);
+    samples.push({
+      x,
+      y,
+      groupId: assignment.groupId,
+      bandId: assignment.bandId,
+    });
+  }
+
+  return samples;
+}
+
 export function createEmptyBandMetrics(options = {}) {
   return emptyMetricValues(options);
 }
 
-export function aggregateSkeletonMetrics({ assignments, samples } = {}) {
+export function aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples } = {}) {
   const assignmentList = [...(assignments?.values?.() ?? [])];
-  const sampleList = Array.isArray(samples) ? samples : [];
+  const maskSampleList = Array.isArray(maskSamples) ? maskSamples : [];
+  const skeletonSampleList = Array.isArray(skeletonSamples) ? skeletonSamples : [];
   const bandArea = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, 0]));
-  const sampleByBand = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, []]));
-  const bandLengths = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, 0]));
+  const maskByBand = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, []]));
+  const skeletonByBand = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, []]));
 
   for (const assignment of assignmentList) {
     bandArea.set(assignment.bandId, (bandArea.get(assignment.bandId) ?? 0) + 1);
   }
 
-  for (const sample of sampleList) {
-    if (!sampleByBand.has(sample.bandId)) {
-      sampleByBand.set(sample.bandId, []);
+  for (const sample of maskSampleList) {
+    if (!maskByBand.has(sample.bandId)) {
+      maskByBand.set(sample.bandId, []);
     }
-    sampleByBand.get(sample.bandId).push(sample);
+    maskByBand.get(sample.bandId).push(sample);
   }
 
-  const samplesByKey = new Map(sampleList.map((sample) => [keyFor(sample.x, sample.y), sample]));
-  for (const sample of sampleList) {
-    for (const direction of SKELETON_EDGE_DIRECTIONS) {
-      const neighbor = samplesByKey.get(keyFor(sample.x + direction.dx, sample.y + direction.dy));
-      if (!neighbor) {
-        continue;
-      }
-
-      if (sample.bandId === neighbor.bandId) {
-        bandLengths.set(sample.bandId, (bandLengths.get(sample.bandId) ?? 0) + direction.weight);
-      } else {
-        bandLengths.set(sample.bandId, (bandLengths.get(sample.bandId) ?? 0) + direction.weight / 2);
-        bandLengths.set(neighbor.bandId, (bandLengths.get(neighbor.bandId) ?? 0) + direction.weight / 2);
-      }
+  for (const sample of skeletonSampleList) {
+    if (!skeletonByBand.has(sample.bandId)) {
+      skeletonByBand.set(sample.bandId, []);
     }
+    skeletonByBand.get(sample.bandId).push(sample);
   }
 
-  function metricsFor(nextSamples, roiAreaPx, bandId = null, skeletonLengthOverride = null) {
-    if (nextSamples.length === 0) {
-      return emptyMetricValues({ roiAreaPx, bandId });
-    }
-
-    const pixelSet = new Set(nextSamples.map((sample) => keyFor(sample.x, sample.y)));
-    const orientedSamples = nextSamples.filter((sample) => sample.orientation);
+  function metricsFor(nextMaskSamples, nextSkeletonSamples, roiAreaPx, bandId = null) {
+    const maskPixelSet = new Set(nextMaskSamples.map((sample) => keyFor(sample.x, sample.y)));
+    const maskPixelCount = maskPixelSet.size;
+    const orientedSamples = nextSkeletonSamples.filter((sample) => sample.orientation);
     let cos2 = 0;
     let sin2 = 0;
     let radial = 0;
@@ -713,33 +667,27 @@ export function aggregateSkeletonMetrics({ assignments, samples } = {}) {
     const doubledMagnitude = Math.hypot(cos2, sin2);
     const globalAlignment = orientedSamples.length > 0 ? doubledMagnitude / orientedSamples.length : null;
     const meanAngle = orientedSamples.length > 0 ? 0.5 * Math.atan2(sin2, cos2) : null;
-    const topology = countSkeletonTopology(pixelSet);
-    const skeletonLengthPx = skeletonLengthOverride ?? estimateSkeletonLength(pixelSet);
 
     return {
       bandId,
       roiAreaPx,
-      skeletonPixelCount: nextSamples.length,
-      skeletonLengthPx,
-      density: roiAreaPx > 0 ? skeletonLengthPx / roiAreaPx : null,
-      coverage: roiAreaPx > 0 ? pixelSet.size / roiAreaPx : null,
+      maskPixelCount,
+      density: roiAreaPx > 0 ? maskPixelCount / roiAreaPx : null,
       globalAlignment,
       globalOrientationDeg: meanAngle === null ? null : canonicalUndirectedAngle(meanAngle),
       radialNormalAlignment: orientedSamples.length > 0 ? radial / orientedSamples.length : null,
       tangentialAlignment: orientedSamples.length > 0 ? tangential / orientedSamples.length : null,
       orientationDispersion: globalAlignment === null ? null : 1 - globalAlignment,
-      endpointCount: topology.endpointCount,
-      branchpointCount: topology.branchpointCount,
-      empty: false,
+      empty: maskPixelCount === 0 && nextSkeletonSamples.length === 0,
     };
   }
 
   return {
-    overall: metricsFor(sampleList, assignmentList.length),
+    overall: metricsFor(maskSampleList, skeletonSampleList, assignmentList.length),
     bands: Object.fromEntries(
       REQUIRED_BAND_IDS.map((bandId) => [
         bandId,
-        metricsFor(sampleByBand.get(bandId) ?? [], bandArea.get(bandId) ?? 0, bandId, bandLengths.get(bandId) ?? 0),
+        metricsFor(maskByBand.get(bandId) ?? [], skeletonByBand.get(bandId) ?? [], bandArea.get(bandId) ?? 0, bandId),
       ]),
     ),
   };

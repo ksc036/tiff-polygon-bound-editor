@@ -17,14 +17,16 @@ details before coding:
   avoid internal-only names like `minPx`/`maxPx` in normalized or persisted band
   payloads. Approved default labels are exactly `near: 가까움`, `mid: 중간`, and
   `far: 멀리`.
-- Skeleton density is length-based: `skeletonLengthPx / roiAreaPx`. Coverage is
-  the pixel-count ratio: `skeletonPixelCount / roiAreaPx`.
-- Per-band skeleton length must preserve edges crossing ROI band boundaries.
-  Allocate same-band edges fully to that band, and split cross-band edge length
-  equally between endpoint bands; overall length still counts each edge once.
-- ROI-assigned skeleton pixels must count even when isolated. If a skeleton
-  pixel has no neighbors, include it in `skeletonPixelCount` and coverage, but
-  leave orientation-dependent metrics null instead of inventing an orientation.
+- Mask density is mask-occupancy based: `maskPixelCount / roiAreaPx`, where
+  `maskPixelCount` comes from the original binary mask, not the skeletonized
+  image. Do not keep a separate coverage metric with the same meaning.
+- Skeletonized masks are only for orientation metrics such as global, radial,
+  and tangential alignment. Do not use skeleton length, topology, or skeleton
+  pixel counts as the primary occupancy outputs when the analysis goal is mask
+  coverage within ROI bands.
+- ROI-assigned skeleton pixels may have no neighbors. In that case, keep
+  orientation-dependent metrics null instead of inventing an orientation; mask
+  density still comes from the original mask pixels.
 - Mask foreground detection should not assume the first color channel. Treat any
   non-zero non-alpha channel as foreground for RGB/RGBA masks.
 - Boundary normals must not depend on polygon winding. Choose the segment normal
