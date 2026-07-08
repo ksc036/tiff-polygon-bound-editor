@@ -11,6 +11,17 @@ const DEFAULT_BAND_LABELS = {
   far: "멀리",
 };
 const EPSILON = 1e-9;
+const DEFAULT_SEGMENT_LENGTH_PX = 4;
+const SKELETON_NEIGHBOR_OFFSETS = [
+  { dx: -1, dy: -1 },
+  { dx: 0, dy: -1 },
+  { dx: 1, dy: -1 },
+  { dx: -1, dy: 0 },
+  { dx: 1, dy: 0 },
+  { dx: -1, dy: 1 },
+  { dx: 0, dy: 1 },
+  { dx: 1, dy: 1 },
+];
 
 function cloneBand(band) {
   return { id: band.id, label: band.label, fromPx: band.fromPx, toPx: band.toPx };
@@ -23,6 +34,29 @@ function keyFor(x, y) {
 function parseKey(key) {
   const [x, y] = key.split(",").map(Number);
   return { x, y };
+}
+
+function comparePixelKeys(left, right) {
+  const leftPoint = parseKey(left);
+  const rightPoint = parseKey(right);
+  if (leftPoint.y !== rightPoint.y) {
+    return leftPoint.y - rightPoint.y;
+  }
+
+  return leftPoint.x - rightPoint.x;
+}
+
+function cleanNumber(value) {
+  const rounded = Math.round(value);
+  return Math.abs(value - rounded) <= EPSILON ? rounded : value;
+}
+
+function cleanPoint(point) {
+  return { x: cleanNumber(point.x), y: cleanNumber(point.y) };
+}
+
+function distanceBetween(left, right) {
+  return Math.hypot(right.x - left.x, right.y - left.y);
 }
 
 function vectorLength(vector) {
@@ -56,6 +90,27 @@ function cleanVector(vector) {
 
 function dot(left, right) {
   return left.x * right.x + left.y * right.y;
+}
+
+function targetAngleAlignment(axis, targetAxis) {
+  const normalizedAxis = canonicalVector(normalizeVector(axis));
+  const normalizedTarget = canonicalVector(normalizeVector(targetAxis));
+  if (!normalizedAxis || !normalizedTarget) {
+    return null;
+  }
+
+  const axisDot = dot(normalizedAxis, normalizedTarget);
+  return 2 * axisDot * axisDot - 1;
+}
+
+function migrationVectorFor(group) {
+  const start = group?.migrationVector?.start;
+  const end = group?.migrationVector?.end;
+  if (!validPoint(start) || !validPoint(end)) {
+    return null;
+  }
+
+  return canonicalVector(normalizeVector({ x: end.x - start.x, y: end.y - start.y }));
 }
 
 function canonicalUndirectedAngle(angle) {
@@ -328,6 +383,198 @@ function collectForegroundPixels(image, width, height) {
   return pixels;
 }
 
+function hasPixel(pixels, x, y) {
+  return pixels.has(keyFor(x, y));
+}
+
+function skeletonNeighborKeys(point, pixels) {
+  return SKELETON_NEIGHBOR_OFFSETS.flatMap(({ dx, dy }) => {
+    const x = point.x + dx;
+    const y = point.y + dy;
+    if (!hasPixel(pixels, x, y)) {
+      return [];
+    }
+
+    if (dx !== 0 && dy !== 0 && (hasPixel(pixels, point.x + dx, point.y) || hasPixel(pixels, point.x, point.y + dy))) {
+      return [];
+    }
+
+    return [keyFor(x, y)];
+  }).sort(comparePixelKeys);
+}
+
+function edgeKey(leftKey, rightKey) {
+  return leftKey < rightKey ? `${leftKey}|${rightKey}` : `${rightKey}|${leftKey}`;
+}
+
+function buildNeighborMap(pixels) {
+  return new Map([...pixels].sort(comparePixelKeys).map((key) => [key, skeletonNeighborKeys(parseKey(key), pixels)]));
+}
+
+function traceCenterlinePath(startKey, nextKey, neighborsByKey, visitedEdges) {
+  const path = [parseKey(startKey)];
+  let previousKey = startKey;
+  let currentKey = nextKey;
+
+  visitedEdges.add(edgeKey(previousKey, currentKey));
+
+  while (true) {
+    path.push(parseKey(currentKey));
+    const neighbors = neighborsByKey.get(currentKey) ?? [];
+    if (neighbors.length !== 2) {
+      break;
+    }
+
+    const nextCandidates = neighbors.filter((neighborKey) => neighborKey !== previousKey);
+    if (nextCandidates.length !== 1) {
+      break;
+    }
+
+    const candidateKey = nextCandidates[0];
+    const nextEdgeKey = edgeKey(currentKey, candidateKey);
+    if (visitedEdges.has(nextEdgeKey)) {
+      break;
+    }
+
+    visitedEdges.add(nextEdgeKey);
+    previousKey = currentKey;
+    currentKey = candidateKey;
+  }
+
+  return path;
+}
+
+function traceCenterlineCycle(startKey, nextKey, neighborsByKey, visitedEdges) {
+  const path = [parseKey(startKey)];
+  let previousKey = startKey;
+  let currentKey = nextKey;
+
+  visitedEdges.add(edgeKey(previousKey, currentKey));
+
+  while (currentKey !== startKey) {
+    path.push(parseKey(currentKey));
+    const neighbors = neighborsByKey.get(currentKey) ?? [];
+    const nextCandidates = neighbors.filter((neighborKey) => neighborKey !== previousKey);
+    if (nextCandidates.length === 0) {
+      break;
+    }
+
+    const candidateKey = nextCandidates[0];
+    const nextEdgeKey = edgeKey(currentKey, candidateKey);
+    if (visitedEdges.has(nextEdgeKey)) {
+      break;
+    }
+
+    visitedEdges.add(nextEdgeKey);
+    previousKey = currentKey;
+    currentKey = candidateKey;
+  }
+
+  if (currentKey === startKey) {
+    path.push(parseKey(startKey));
+  }
+
+  return path;
+}
+
+function buildCenterlinePaths(pixels) {
+  const neighborsByKey = buildNeighborMap(pixels);
+  const visitedEdges = new Set();
+  const paths = [];
+  const sortedKeys = [...pixels].sort(comparePixelKeys);
+
+  for (const key of sortedKeys) {
+    const neighbors = neighborsByKey.get(key) ?? [];
+    if (neighbors.length === 0) {
+      paths.push([parseKey(key)]);
+      continue;
+    }
+
+    if (neighbors.length === 2) {
+      continue;
+    }
+
+    for (const neighborKey of neighbors) {
+      const nextEdgeKey = edgeKey(key, neighborKey);
+      if (!visitedEdges.has(nextEdgeKey)) {
+        paths.push(traceCenterlinePath(key, neighborKey, neighborsByKey, visitedEdges));
+      }
+    }
+  }
+
+  for (const key of sortedKeys) {
+    const neighbors = neighborsByKey.get(key) ?? [];
+    for (const neighborKey of neighbors) {
+      const nextEdgeKey = edgeKey(key, neighborKey);
+      if (!visitedEdges.has(nextEdgeKey)) {
+        paths.push(traceCenterlineCycle(key, neighborKey, neighborsByKey, visitedEdges));
+      }
+    }
+  }
+
+  return { paths, neighborsByKey };
+}
+
+function pathDistances(path) {
+  const distances = [0];
+  for (let index = 1; index < path.length; index += 1) {
+    distances.push(distances[index - 1] + distanceBetween(path[index - 1], path[index]));
+  }
+
+  return distances;
+}
+
+function pointAtPathDistance(path, distances, targetDistance) {
+  if (targetDistance <= 0) {
+    return path[0];
+  }
+
+  const totalDistance = distances[distances.length - 1] ?? 0;
+  if (targetDistance >= totalDistance) {
+    return path[path.length - 1];
+  }
+
+  for (let index = 1; index < distances.length; index += 1) {
+    if (targetDistance <= distances[index] + EPSILON) {
+      const start = path[index - 1];
+      const end = path[index];
+      const segmentDistance = distances[index] - distances[index - 1];
+      const ratio = segmentDistance <= EPSILON ? 0 : (targetDistance - distances[index - 1]) / segmentDistance;
+      return {
+        x: start.x + (end.x - start.x) * ratio,
+        y: start.y + (end.y - start.y) * ratio,
+      };
+    }
+  }
+
+  return path[path.length - 1];
+}
+
+function assignmentNearPoint(point, assignments) {
+  const xCandidates = [...new Set([Math.round(point.x), Math.floor(point.x), Math.ceil(point.x)])];
+  const yCandidates = [...new Set([Math.round(point.y), Math.floor(point.y), Math.ceil(point.y)])];
+  const candidates = [];
+
+  for (const [yIndex, y] of yCandidates.entries()) {
+    for (const [xIndex, x] of xCandidates.entries()) {
+      const assignment = assignments?.get(keyFor(x, y));
+      if (assignment) {
+        candidates.push({ x, y, assignment, distancePx: Math.hypot(point.x - x, point.y - y), candidateIndex: yIndex * 3 + xIndex });
+      }
+    }
+  }
+
+  candidates.sort(
+    (left, right) => left.distancePx - right.distancePx || left.candidateIndex - right.candidateIndex || left.y - right.y || left.x - right.x,
+  );
+  return candidates[0] ?? null;
+}
+
+function segmentLengthFor(sample) {
+  const weight = sample?.segmentLengthPx ?? sample?.weight ?? 1;
+  return typeof weight === "number" && Number.isFinite(weight) && weight > EPSILON ? weight : 1;
+}
+
 function emptyMetricValues({ roiAreaPx = 0, bandId = null } = {}) {
   return {
     bandId,
@@ -336,8 +583,10 @@ function emptyMetricValues({ roiAreaPx = 0, bandId = null } = {}) {
     density: roiAreaPx > 0 ? 0 : null,
     globalAlignment: null,
     globalOrientationDeg: null,
+    circularVariance: null,
     radialNormalAlignment: null,
     tangentialAlignment: null,
+    migrationAlignment: null,
     orientationDispersion: null,
     empty: true,
   };
@@ -492,6 +741,10 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
   validateImageDimensions(width, height);
 
   const polygons = normalizeAnalysisPolygons(groups);
+  const polygonById = new Map(polygons.map((group) => [group.id, group]));
+  const bandsByGroupId = new Map(
+    polygons.map((group) => [group.id, validateRoiBands(group.roiBands ?? bands)]),
+  );
   const assignments = new Map();
 
   if (polygons.length === 0) {
@@ -499,7 +752,11 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
   }
 
   const visitedPixels = new Set();
-  for (const window of scanWindowsForPolygons(polygons, bands, width, height)) {
+  const windows = polygons.flatMap((group) =>
+    scanWindowsForPolygons([group], bandsByGroupId.get(group.id) ?? bands, width, height),
+  );
+
+  for (const window of windows) {
     for (let y = window.minY; y <= window.maxY; y += 1) {
       for (let x = window.minX; x <= window.maxX; x += 1) {
         const pixelKey = keyFor(x, y);
@@ -526,7 +783,7 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
           }
         }
 
-        const band = nearest ? bandForDistance(nearest.distancePx, bands) : null;
+        const band = nearest ? bandForDistance(nearest.distancePx, bandsByGroupId.get(nearest.groupId) ?? bands) : null;
         if (!band) {
           continue;
         }
@@ -538,6 +795,7 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
           boundaryPoint: nearest.boundaryPoint,
           tangent: nearest.tangent,
           outwardNormal: nearest.outwardNormal,
+          migrationVector: migrationVectorFor(polygonById.get(nearest.groupId)),
         });
       }
     }
@@ -546,50 +804,129 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
   return assignments;
 }
 
-export function buildSkeletonSamples({ skeleton, width, height, assignments } = {}) {
-  const pixels = collectForegroundPixels(skeleton, width, height);
-  const samples = [];
+export function assignInsideRoiPixels({ width, height, groups } = {}) {
+  validateImageDimensions(width, height);
 
-  for (const key of pixels) {
-    const assignment = assignments?.get(key);
-    if (!assignment) {
-      continue;
-    }
+  const polygons = normalizeAnalysisPolygons(groups);
+  const assignments = new Map();
 
-    const { x, y } = parseKey(key);
-    let cos2 = 0;
-    let sin2 = 0;
-    let neighborCount = 0;
+  if (polygons.length === 0 || width === 0 || height === 0) {
+    return assignments;
+  }
 
-    for (let dy = -1; dy <= 1; dy += 1) {
-      for (let dx = -1; dx <= 1; dx += 1) {
-        if (dx === 0 && dy === 0) {
+  for (const group of polygons) {
+    const bounds = polygonBounds(group.points);
+    const minX = clampInteger(Math.floor(bounds.minX), 0, width - 1);
+    const maxX = clampInteger(Math.ceil(bounds.maxX), 0, width - 1);
+    const minY = clampInteger(Math.floor(bounds.minY), 0, height - 1);
+    const maxY = clampInteger(Math.ceil(bounds.maxY), 0, height - 1);
+
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const pixel = { x, y };
+        if (!pointInPolygon(pixel, group.points)) {
           continue;
         }
 
-        if (pixels.has(keyFor(x + dx, y + dy))) {
-          const angle = Math.atan2(dy, dx);
-          cos2 += Math.cos(2 * angle);
-          sin2 += Math.sin(2 * angle);
-          neighborCount += 1;
+        const pixelKey = keyFor(x, y);
+        const existing = assignments.get(pixelKey);
+        if (existing && sortedGroupTie(existing.groupId, group.id) <= 0) {
+          continue;
         }
+
+        assignments.set(pixelKey, {
+          groupId: group?.id ?? null,
+          bandId: "inside",
+          migrationVector: migrationVectorFor(group),
+        });
       }
     }
+  }
 
-    const orientationAngle = neighborCount === 0 ? null : 0.5 * Math.atan2(sin2, cos2);
-    const orientation = orientationAngle === null ? null : canonicalVector({ x: Math.cos(orientationAngle), y: Math.sin(orientationAngle) });
+  return assignments;
+}
 
-    samples.push({
-      x,
-      y,
-      orientation,
-      groupId: assignment.groupId,
-      bandId: assignment.bandId,
-      boundaryPoint: assignment.boundaryPoint,
-      tangent: assignment.tangent,
-      outwardNormal: assignment.outwardNormal,
-      neighborCount,
-    });
+export function buildSkeletonSamples({ skeleton, width, height, assignments, segmentLengthPx = DEFAULT_SEGMENT_LENGTH_PX } = {}) {
+  const pixels = collectForegroundPixels(skeleton, width, height);
+  const samples = [];
+  const resolvedSegmentLength =
+    typeof segmentLengthPx === "number" && Number.isFinite(segmentLengthPx) && segmentLengthPx > EPSILON
+      ? segmentLengthPx
+      : DEFAULT_SEGMENT_LENGTH_PX;
+  const { paths, neighborsByKey } = buildCenterlinePaths(pixels);
+
+  for (const path of paths) {
+    if (path.length === 1) {
+      const point = path[0];
+      const pointKey = keyFor(point.x, point.y);
+      const assignment = assignments?.get(pointKey);
+      if (!assignment) {
+        continue;
+      }
+
+      samples.push({
+        x: point.x,
+        y: point.y,
+        orientation: null,
+        groupId: assignment.groupId,
+        bandId: assignment.bandId,
+        boundaryPoint: assignment.boundaryPoint,
+        tangent: assignment.tangent,
+        outwardNormal: assignment.outwardNormal,
+        migrationVector: assignment.migrationVector,
+        neighborCount: 0,
+        segmentLengthPx: 0,
+      });
+      continue;
+    }
+
+    const distances = pathDistances(path);
+    const totalLength = distances[distances.length - 1] ?? 0;
+    if (totalLength <= EPSILON) {
+      continue;
+    }
+
+    for (let startDistance = 0; startDistance < totalLength - EPSILON; startDistance += resolvedSegmentLength) {
+      const endDistance = Math.min(startDistance + resolvedSegmentLength, totalLength);
+      const segmentLength = endDistance - startDistance;
+      if (segmentLength <= EPSILON) {
+        continue;
+      }
+
+      const segmentStart = pointAtPathDistance(path, distances, startDistance);
+      const segmentEnd = pointAtPathDistance(path, distances, endDistance);
+      const midpoint = pointAtPathDistance(path, distances, startDistance + segmentLength / 2);
+      const assignmentCandidate = assignmentNearPoint(midpoint, assignments);
+      if (!assignmentCandidate) {
+        continue;
+      }
+
+      const orientation = canonicalVector(
+        normalizeVector({
+          x: segmentEnd.x - segmentStart.x,
+          y: segmentEnd.y - segmentStart.y,
+        }),
+      );
+      const assignment = assignmentCandidate.assignment;
+      const representativeKey = keyFor(assignmentCandidate.x, assignmentCandidate.y);
+      const neighborCount = neighborsByKey.get(representativeKey)?.length ?? null;
+
+      samples.push({
+        x: assignmentCandidate.x,
+        y: assignmentCandidate.y,
+        orientation,
+        groupId: assignment.groupId,
+        bandId: assignment.bandId,
+        boundaryPoint: assignment.boundaryPoint,
+        tangent: assignment.tangent,
+        outwardNormal: assignment.outwardNormal,
+        migrationVector: assignment.migrationVector,
+        neighborCount,
+        segmentStart: cleanPoint(segmentStart),
+        segmentEnd: cleanPoint(segmentEnd),
+        segmentLengthPx: cleanNumber(segmentLength),
+      });
+    }
   }
 
   return samples;
@@ -621,13 +958,14 @@ export function createEmptyBandMetrics(options = {}) {
   return emptyMetricValues(options);
 }
 
-export function aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples } = {}) {
+export function aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples, bandIds = REQUIRED_BAND_IDS } = {}) {
   const assignmentList = [...(assignments?.values?.() ?? [])];
   const maskSampleList = Array.isArray(maskSamples) ? maskSamples : [];
   const skeletonSampleList = Array.isArray(skeletonSamples) ? skeletonSamples : [];
-  const bandArea = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, 0]));
-  const maskByBand = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, []]));
-  const skeletonByBand = new Map(REQUIRED_BAND_IDS.map((bandId) => [bandId, []]));
+  const metricBandIds = Array.isArray(bandIds) ? bandIds : REQUIRED_BAND_IDS;
+  const bandArea = new Map(metricBandIds.map((bandId) => [bandId, 0]));
+  const maskByBand = new Map(metricBandIds.map((bandId) => [bandId, []]));
+  const skeletonByBand = new Map(metricBandIds.map((bandId) => [bandId, []]));
 
   for (const assignment of assignmentList) {
     bandArea.set(assignment.bandId, (bandArea.get(assignment.bandId) ?? 0) + 1);
@@ -655,18 +993,45 @@ export function aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples 
     let sin2 = 0;
     let radial = 0;
     let tangential = 0;
+    let migration = 0;
+    let totalOrientationWeight = 0;
+    let radialSampleWeight = 0;
+    let tangentialSampleWeight = 0;
+    let migrationSampleWeight = 0;
 
     for (const sample of orientedSamples) {
+      const weight = segmentLengthFor(sample);
       const angle = Math.atan2(sample.orientation.y, sample.orientation.x);
-      cos2 += Math.cos(2 * angle);
-      sin2 += Math.sin(2 * angle);
-      radial += Math.abs(dot(sample.orientation, sample.outwardNormal));
-      tangential += Math.abs(dot(sample.orientation, sample.tangent));
+      cos2 += Math.cos(2 * angle) * weight;
+      sin2 += Math.sin(2 * angle) * weight;
+      totalOrientationWeight += weight;
+      if (sample.outwardNormal) {
+        const radialAlignment = targetAngleAlignment(sample.orientation, sample.outwardNormal);
+        if (radialAlignment !== null) {
+          radial += radialAlignment * weight;
+          radialSampleWeight += weight;
+        }
+      }
+      if (sample.tangent) {
+        const tangentialAlignment = targetAngleAlignment(sample.orientation, sample.tangent);
+        if (tangentialAlignment !== null) {
+          tangential += tangentialAlignment * weight;
+          tangentialSampleWeight += weight;
+        }
+      }
+      if (sample.migrationVector) {
+        const nextMigrationAlignment = targetAngleAlignment(sample.orientation, sample.migrationVector);
+        if (nextMigrationAlignment !== null) {
+          migration += nextMigrationAlignment * weight;
+          migrationSampleWeight += weight;
+        }
+      }
     }
 
     const doubledMagnitude = Math.hypot(cos2, sin2);
-    const globalAlignment = orientedSamples.length > 0 ? doubledMagnitude / orientedSamples.length : null;
-    const meanAngle = orientedSamples.length > 0 ? 0.5 * Math.atan2(sin2, cos2) : null;
+    const globalAlignment = totalOrientationWeight > 0 ? doubledMagnitude / totalOrientationWeight : null;
+    const meanAngle = totalOrientationWeight > 0 ? 0.5 * Math.atan2(sin2, cos2) : null;
+    const circularVariance = globalAlignment === null ? null : 1 - globalAlignment;
 
     return {
       bandId,
@@ -675,9 +1040,11 @@ export function aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples 
       density: roiAreaPx > 0 ? maskPixelCount / roiAreaPx : null,
       globalAlignment,
       globalOrientationDeg: meanAngle === null ? null : canonicalUndirectedAngle(meanAngle),
-      radialNormalAlignment: orientedSamples.length > 0 ? radial / orientedSamples.length : null,
-      tangentialAlignment: orientedSamples.length > 0 ? tangential / orientedSamples.length : null,
-      orientationDispersion: globalAlignment === null ? null : 1 - globalAlignment,
+      circularVariance,
+      radialNormalAlignment: radialSampleWeight > 0 ? radial / radialSampleWeight : null,
+      tangentialAlignment: tangentialSampleWeight > 0 ? tangential / tangentialSampleWeight : null,
+      migrationAlignment: migrationSampleWeight > 0 ? migration / migrationSampleWeight : null,
+      orientationDispersion: circularVariance,
       empty: maskPixelCount === 0 && nextSkeletonSamples.length === 0,
     };
   }
@@ -685,7 +1052,7 @@ export function aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples 
   return {
     overall: metricsFor(maskSampleList, skeletonSampleList, assignmentList.length),
     bands: Object.fromEntries(
-      REQUIRED_BAND_IDS.map((bandId) => [
+      metricBandIds.map((bandId) => [
         bandId,
         metricsFor(maskByBand.get(bandId) ?? [], skeletonByBand.get(bandId) ?? [], bandArea.get(bandId) ?? 0, bandId),
       ]),

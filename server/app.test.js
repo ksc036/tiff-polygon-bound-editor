@@ -59,7 +59,9 @@ function uint16Tiff({ width, height, pixels }) {
 
 async function writeImage(rootDir, folderName, imageName = "frame.tif", pixels = [100, 200, 300, 400]) {
   const imageDir = path.join(rootDir, folderName, "image");
+  const maskDir = path.join(rootDir, folderName, "mask");
   await mkdir(imageDir, { recursive: true });
+  await mkdir(maskDir, { recursive: true });
   await writeFile(path.join(imageDir, imageName), uint16Tiff({ width: 2, height: 2, pixels }));
 }
 
@@ -69,6 +71,14 @@ async function writeMask(rootDir, folderName, fileName = "frame001.png") {
   await sharp(Buffer.from([0, 255, 0, 0]), { raw: { width: 2, height: 2, channels: 1 } })
     .png()
     .toFile(path.join(maskDir, fileName));
+}
+
+async function writeSkeleton(rootDir, folderName) {
+  const skeletonDir = path.join(rootDir, folderName, "Skeletonize");
+  await mkdir(skeletonDir, { recursive: true });
+  await sharp(Buffer.from([0, 0, 255, 0]), { raw: { width: 2, height: 2, channels: 1 } })
+    .png()
+    .toFile(path.join(skeletonDir, `${folderName}.skeleton.png`));
 }
 
 async function writeBounds(rootDir, folderName, bounds) {
@@ -499,6 +509,35 @@ describe("createApp", () => {
     expect([...bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
+  test("GET /api/images/:id/skeleton-preview returns the saved skeleton as a red transparent PNG", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const folderName = "selected-stack-sequence_T01";
+    await writeImage(imageRoot, folderName, "frame001.tif");
+    await writeMask(imageRoot, folderName, "frame001.png");
+    await writeSkeleton(imageRoot, folderName);
+
+    const response = await request(
+      createApp({ rootDir: appRoot, initialRoot: imageRoot }),
+      `/api/images/${folderName}/skeleton-preview`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("image/png");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-skeleton-file")).toBe(`${folderName}.skeleton.png`);
+    expect(response.headers.get("x-image-width")).toBe("2");
+    expect(response.headers.get("x-image-height")).toBe("2");
+
+    const decoded = await sharp(Buffer.from(await response.arrayBuffer())).raw().ensureAlpha().toBuffer();
+    expect([...decoded]).toEqual([
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+      255, 0, 0, 255,
+      0, 0, 0, 0,
+    ]);
+  });
+
   test("POST /api/images/:id/roi-overlay renders current bounds and ROI bands as a PNG", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
@@ -558,7 +597,9 @@ describe("createApp", () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
     const imageDir = path.join(imageRoot, "selected-stack-sequence_T01", "image");
+    const maskDir = path.join(imageRoot, "selected-stack-sequence_T01", "mask");
     await mkdir(imageDir, { recursive: true });
+    await mkdir(maskDir, { recursive: true });
     await writeFile(path.join(imageDir, "frame001.tif"), "not a tiff");
 
     const response = await request(
@@ -584,7 +625,7 @@ describe("createApp", () => {
     await expect(missingResponse.json()).resolves.toEqual({ analysis: null, hasAnalysis: false });
 
     const analysis = {
-      schemaVersion: 2,
+      schemaVersion: 5,
       imageFolder: "selected-stack-sequence_T01",
       imageFile: "frame001.tif",
       boundsFile: "selected-stack-sequence_T01.bounds.json",
@@ -704,7 +745,7 @@ describe("createApp", () => {
     await writeFile(
       path.join(imageRoot, folderName, "analysis", `${folderName}.analysis.json`),
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 5,
         imageFolder: folderName,
         imageFile: "frame001.tif",
         boundsFile: `${folderName}.bounds.json`,
@@ -723,7 +764,7 @@ describe("createApp", () => {
           { id: "mid", label: "Mid", fromPx: 1, toPx: 2 },
           { id: "far", label: "Far", fromPx: 2, toPx: 3 },
         ],
-        groups: [{ groupId: "cell", groupName: null, color: null, bands: {}, allBands: {} }],
+        groups: [{ groupId: "cell", groupName: null, color: null, analysisMode: "outside", migrationVector: null, bands: {}, allBands: {} }],
         imageSummary: {},
         warnings: [],
         updatedAt: "2026-07-05T00:00:00.000Z",
@@ -741,7 +782,7 @@ describe("createApp", () => {
 
     await writeFile(
       path.join(imageRoot, folderName, "analysis", `${folderName}.analysis.json`),
-      JSON.stringify({ schemaVersion: 2, groups: "bad" }),
+	      JSON.stringify({ schemaVersion: 5, groups: "bad" }),
     );
 
     const malformedResponse = await request(app, `/api/images/${folderName}/analysis`);

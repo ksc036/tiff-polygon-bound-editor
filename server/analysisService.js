@@ -4,6 +4,7 @@ import { readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   aggregateRoiMetrics,
+  assignInsideRoiPixels,
   assignOutwardRoiPixels,
   buildMaskSamples,
   buildSkeletonSamples,
@@ -12,8 +13,9 @@ import {
 } from "./analysisGeometry.js";
 import { readBinaryMask, thinBinaryMask, writeSkeletonPng } from "./maskSkeleton.js";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 5;
 const REQUIRED_BAND_IDS = ["near", "mid", "far"];
+const ANALYSIS_MODES = new Set(["outside", "inside"]);
 const METRIC_FIELDS = [
   "bandId",
   "roiAreaPx",
@@ -21,8 +23,10 @@ const METRIC_FIELDS = [
   "density",
   "globalAlignment",
   "globalOrientationDeg",
+  "circularVariance",
   "radialNormalAlignment",
   "tangentialAlignment",
+  "migrationAlignment",
   "orientationDispersion",
   "empty",
 ];
@@ -104,6 +108,14 @@ function isFinitePoint(point) {
   return isPlainObject(point) && typeof point.x === "number" && Number.isFinite(point.x) && typeof point.y === "number" && Number.isFinite(point.y);
 }
 
+function isOptionalMigrationVector(value) {
+  return value === undefined || value === null || (isPlainObject(value) && isFinitePoint(value.start) && isFinitePoint(value.end));
+}
+
+function normalizeAnalysisMode(value) {
+  return value === undefined ? "outside" : value;
+}
+
 function validateBoundsPayload(bounds) {
   if (!bounds || typeof bounds !== "object" || !Array.isArray(bounds.groups)) {
     throw analysisError("INVALID_BOUNDS", "Saved bounds are invalid.");
@@ -115,6 +127,7 @@ function validateBoundsPayload(bounds) {
 
   const ids = new Set();
   for (const group of bounds.groups) {
+    const analysisMode = normalizeAnalysisMode(group.analysisMode);
     if (
       !isPlainObject(group) ||
       typeof group.id !== "string" ||
@@ -122,6 +135,8 @@ function validateBoundsPayload(bounds) {
       ids.has(group.id) ||
       !isOptionalString(group.name) ||
       !isOptionalString(group.color) ||
+      !isOptionalMigrationVector(group.migrationVector) ||
+      !ANALYSIS_MODES.has(analysisMode) ||
       !Array.isArray(group.points) ||
       group.points.length < 3 ||
       !group.points.every(isFinitePoint)
@@ -136,7 +151,7 @@ function validateBoundsPayload(bounds) {
     }
   }
 
-  return bounds.groups;
+  return bounds.groups.map((group) => ({ ...group, analysisMode: normalizeAnalysisMode(group.analysisMode) }));
 }
 
 function resolveDimensions(bounds, mask) {
@@ -175,21 +190,39 @@ function sourceForJson(source) {
   };
 }
 
-function buildGroupAnalyses({ groups, assignments, maskSamples, skeletonSamples }) {
+function buildGroupAnalyses({ groups, outsideAssignments, insideAssignments, maskSamples, skeletonSamples }) {
   return groups.map((group) => {
-    const groupAssignments = filterAssignments(assignments, group.id ?? null);
+    const groupAssignments = filterAssignments(
+      group.analysisMode === "inside" ? insideAssignments : outsideAssignments,
+      group.id ?? null,
+    );
     const groupMaskSamples = filterSamples(maskSamples, group.id ?? null);
     const groupSkeletonSamples = filterSamples(skeletonSamples, group.id ?? null);
     const metrics = aggregateRoiMetrics({
       assignments: groupAssignments,
       maskSamples: groupMaskSamples,
       skeletonSamples: groupSkeletonSamples,
+      bandIds: group.analysisMode === "inside" ? ["inside"] : REQUIRED_BAND_IDS,
     });
 
-    return {
+    const base = {
       groupId: group.id,
       groupName: group.name ?? null,
       color: group.color ?? null,
+      analysisMode: group.analysisMode,
+      migrationVector: group.migrationVector ?? null,
+    };
+
+    if (group.analysisMode === "inside") {
+      return {
+        ...base,
+        area: metrics.bands.inside,
+      };
+    }
+
+    return {
+      ...base,
+      ...(group.roiBands ? { roiBands: group.roiBands } : {}),
       bands: metrics.bands,
       allBands: metrics.overall,
     };
@@ -219,6 +252,21 @@ function sanitizeMetric(value) {
   }
 
   return metric;
+}
+
+function sanitizeMigrationVector(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (!isPlainObject(value) || !isFinitePoint(value.start) || !isFinitePoint(value.end)) {
+    throw analysisError("INVALID_ANALYSIS", "Saved analysis JSON is invalid.");
+  }
+
+  return {
+    start: { x: value.start.x, y: value.start.y },
+    end: { x: value.end.x, y: value.end.y },
+  };
 }
 
 function sanitizeImageSummary(value) {
@@ -269,17 +317,51 @@ function sanitizeMaskSource(value) {
 }
 
 function sanitizeGroupAnalysis(value) {
-  if (!isPlainObject(value) || typeof value.groupId !== "string" || !isPlainObject(value.bands) || !isPlainObject(value.allBands)) {
+  const analysisMode = normalizeAnalysisMode(value?.analysisMode);
+  if (!isPlainObject(value) || typeof value.groupId !== "string" || !ANALYSIS_MODES.has(analysisMode)) {
+    throw analysisError("INVALID_ANALYSIS", "Saved analysis JSON is invalid.");
+  }
+
+  const base = {
+    groupId: value.groupId,
+    groupName: typeof value.groupName === "string" ? value.groupName : null,
+    color: typeof value.color === "string" ? value.color : null,
+    analysisMode,
+    migrationVector: sanitizeMigrationVector(value.migrationVector),
+  };
+
+  if (analysisMode === "inside") {
+    if (!isPlainObject(value.area)) {
+      throw analysisError("INVALID_ANALYSIS", "Saved analysis JSON is invalid.");
+    }
+    return {
+      ...base,
+      area: sanitizeMetric(value.area),
+    };
+  }
+
+  if (!isPlainObject(value.bands) || !isPlainObject(value.allBands)) {
     throw analysisError("INVALID_ANALYSIS", "Saved analysis JSON is invalid.");
   }
 
   return {
-    groupId: value.groupId,
-    groupName: typeof value.groupName === "string" ? value.groupName : null,
-    color: typeof value.color === "string" ? value.color : null,
+    ...base,
+    ...(value.roiBands === undefined || value.roiBands === null ? {} : { roiBands: sanitizeRoiBands(value.roiBands) }),
     bands: sanitizeBands(value.bands),
     allBands: sanitizeMetric(value.allBands),
   };
+}
+
+function mergeAssignments(...assignmentMaps) {
+  const merged = new Map();
+  for (const assignmentMap of assignmentMaps) {
+    for (const [key, assignment] of assignmentMap ?? []) {
+      if (!merged.has(key)) {
+        merged.set(key, assignment);
+      }
+    }
+  }
+  return merged;
 }
 
 function sanitizeRoiBands(value) {
@@ -288,6 +370,35 @@ function sanitizeRoiBands(value) {
   } catch (error) {
     throw analysisError("INVALID_ANALYSIS", "Saved analysis JSON is invalid.", 422, error);
   }
+}
+
+function normalizeRoiBandsByGroup(value) {
+  if (value === undefined || value === null) {
+    return new Map();
+  }
+
+  if (!isPlainObject(value)) {
+    throw analysisError("INVALID_ROI_BANDS", "Invalid ROI bands.", 400);
+  }
+
+  const bandsByGroup = new Map();
+  for (const [groupId, groupBands] of Object.entries(value)) {
+    try {
+      bandsByGroup.set(groupId, validateRoiBands(groupBands));
+    } catch (error) {
+      throw analysisError("INVALID_ROI_BANDS", "Invalid ROI bands.", 400, error);
+    }
+  }
+
+  return bandsByGroup;
+}
+
+function applyGroupRoiBands(groups, roiBandsByGroup) {
+  return groups.map((group) =>
+    group.analysisMode === "outside" && roiBandsByGroup.has(group.id)
+      ? { ...group, roiBands: roiBandsByGroup.get(group.id) }
+      : group,
+  );
 }
 
 function sanitizeAnalysis(analysis) {
@@ -325,31 +436,69 @@ async function writeSkeletonAtomically(outputPath, skeleton, writeSkeleton) {
 }
 
 function buildAnalysis({ image, paths, bounds, maskSource, mask, skeleton, roiBands, groups }) {
+  let outsideAssignments;
+  let insideAssignments;
   let assignments;
   let maskSamples;
   let skeletonSamples;
   let imageMetrics;
 
   try {
-    assignments = assignOutwardRoiPixels({
+    const outsideGroups = groups.filter((group) => group.analysisMode === "outside");
+    const insideGroups = groups.filter((group) => group.analysisMode === "inside");
+    outsideAssignments = assignOutwardRoiPixels({
       width: skeleton.width,
       height: skeleton.height,
-      groups,
+      groups: outsideGroups,
       roiBands,
     });
-    maskSamples = buildMaskSamples({
+    insideAssignments = assignInsideRoiPixels({
+      width: skeleton.width,
+      height: skeleton.height,
+      groups: insideGroups,
+    });
+    assignments = mergeAssignments(outsideAssignments, insideAssignments);
+    const outsideMaskSamples = buildMaskSamples({
       mask: mask.data,
       width: mask.width,
       height: mask.height,
-      assignments,
+      assignments: outsideAssignments,
     });
-    skeletonSamples = buildSkeletonSamples({
+    const insideMaskSamples = buildMaskSamples({
+      mask: mask.data,
+      width: mask.width,
+      height: mask.height,
+      assignments: insideAssignments,
+    });
+    const outsideSkeletonSamples = buildSkeletonSamples({
       skeleton: skeleton.data,
       width: skeleton.width,
       height: skeleton.height,
-      assignments,
+      assignments: outsideAssignments,
     });
-    imageMetrics = aggregateRoiMetrics({ assignments, maskSamples, skeletonSamples });
+    const insideSkeletonSamples = buildSkeletonSamples({
+      skeleton: skeleton.data,
+      width: skeleton.width,
+      height: skeleton.height,
+      assignments: insideAssignments,
+    });
+    maskSamples = [...outsideMaskSamples, ...insideMaskSamples];
+    skeletonSamples = [...outsideSkeletonSamples, ...insideSkeletonSamples];
+    imageMetrics = aggregateRoiMetrics({
+      assignments,
+      maskSamples: buildMaskSamples({
+        mask: mask.data,
+        width: mask.width,
+        height: mask.height,
+        assignments,
+      }),
+      skeletonSamples: buildSkeletonSamples({
+        skeleton: skeleton.data,
+        width: skeleton.width,
+        height: skeleton.height,
+        assignments,
+      }),
+    });
   } catch (error) {
     throw analysisError("CALCULATION_FAILED", "Unable to calculate analysis metrics.", 422, error);
   }
@@ -362,7 +511,7 @@ function buildAnalysis({ image, paths, bounds, maskSource, mask, skeleton, roiBa
     maskSource: sourceForJson(maskSource),
     skeletonFile: path.basename(paths.skeletonPath),
     roiBands,
-    groups: buildGroupAnalyses({ groups, assignments, maskSamples, skeletonSamples }),
+    groups: buildGroupAnalyses({ groups, outsideAssignments, insideAssignments, maskSamples, skeletonSamples }),
     imageSummary: {
       width: skeleton.width,
       height: skeleton.height,
@@ -383,13 +532,18 @@ export async function loadAnalysis(storage, id) {
   return { analysis: sanitizeAnalysis(analysis), hasAnalysis: true };
 }
 
-export async function recalculateAnalysis(storage, id, { roiBands, maxImagePixels, writeSkeleton = writeSkeletonPng } = {}) {
+export async function recalculateAnalysis(storage, id, { roiBands, roiBandsByGroup, maxImagePixels, writeSkeleton = writeSkeletonPng } = {}) {
   const image = storage.getImage(id);
   const paths = storage.imagePaths(id);
   let normalizedBands;
+  let normalizedBandsByGroup;
   try {
     normalizedBands = validateRoiBands(roiBands);
+    normalizedBandsByGroup = normalizeRoiBandsByGroup(roiBandsByGroup);
   } catch (error) {
+    if (error instanceof AnalysisError) {
+      throw error;
+    }
     throw analysisError("INVALID_ROI_BANDS", "Invalid ROI bands.", 400, error);
   }
 
@@ -408,7 +562,7 @@ export async function recalculateAnalysis(storage, id, { roiBands, maxImagePixel
     throw error;
   }
 
-  const groups = validateBoundsPayload(bounds);
+  const groups = applyGroupRoiBands(validateBoundsPayload(bounds), normalizedBandsByGroup);
   const maskSource = await selectMaskSource(image, paths.maskDir);
   if (!maskSource) {
     throw analysisError("MISSING_MASK", "Mask image is required before analysis.", 409);

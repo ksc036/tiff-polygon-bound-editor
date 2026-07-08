@@ -3,16 +3,22 @@ import {
   addGroup,
   addPoint,
   clampBoundsToImage,
+  clearGroupMigrationVector,
   createEmptyBounds,
   deleteGroup,
   deleteNearestPoint,
+  deletePoint,
   moveNearestPoint,
   movePoint,
   movePointOrder,
   renameGroup,
+  setGroupAnalysisMode,
+  setGroupMigrationVector,
+  setGroupRoiLimits,
 } from "./lib/editorState.js";
 import { findNearestSegment } from "./lib/geometry.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
+import { fitAspectToBox } from "./lib/stageFit.js";
 
 const OPACITY_KEY = "raw16-editor-point-opacity";
 const DEFAULT_OPACITY = 0.85;
@@ -25,6 +31,13 @@ const ROI_BAND_LABELS = { near: "가까움", mid: "중간", far: "멀리" };
 const ROI_BAND_COLORS = { near: "#ef4444", mid: "#f59e0b", far: "#3b82f6" };
 const ROI_MIN_LIMIT = 1;
 const ROI_LIMIT_STEP = 1;
+const POINT_ORDER_COLLAPSED_STAGE_GAIN = 24;
+const ROI_SETTINGS_COLLAPSED_STAGE_GAIN = 56;
+const ANALYSIS_PANEL_HEIGHT_KEY = "raw16-editor-analysis-panel-height";
+const DEFAULT_ANALYSIS_PANEL_HEIGHT = 210;
+const MIN_ANALYSIS_PANEL_HEIGHT = 120;
+const MAX_ANALYSIS_PANEL_HEIGHT = 520;
+const ANALYSIS_MODE_LABELS = { outside: "Outside ROI", inside: "Inside area" };
 const ANALYSIS_COLUMNS = [
   {
     key: "roiAreaPx",
@@ -46,26 +59,39 @@ const ANALYSIS_COLUMNS = [
   },
   {
     key: "globalAlignment",
-    label: "Global",
-    help: "Overall skeleton orientation consistency inside this ROI.",
+    label: "Alignment",
+    help: "ROI-wide nematic order parameter from all fiber segment angles. Higher means angles concentrate around one axis.",
+    format: formatMetric,
+  },
+  {
+    key: "circularVariance",
+    label: "Circ Var",
+    help: "Circular variance, calculated as 1 minus Alignment. Lower means stronger alignment.",
     format: formatMetric,
   },
   {
     key: "radialNormalAlignment",
     label: "Radial",
-    help: "Skeleton alignment with the outward normal from the boundary.",
+    help: "Signed target-angle alignment with the outward boundary normal. 1 parallel, 0 random, -1 perpendicular.",
     format: formatMetric,
   },
   {
     key: "tangentialAlignment",
     label: "Tangent",
-    help: "Skeleton alignment with the boundary tangent direction.",
+    help: "Signed target-angle alignment with the nearest boundary tangent. 1 parallel, 0 random, -1 perpendicular.",
+    format: formatMetric,
+  },
+  {
+    key: "migrationAlignment",
+    label: "Migration",
+    help: "Signed target-angle alignment with the group migration vector. 1 parallel, 0 random, -1 perpendicular.",
     format: formatMetric,
   },
 ];
 
 export default function App() {
   const canvasRef = useRef(null);
+  const stageFrameRef = useRef(null);
   const loadRequestRef = useRef(0);
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
@@ -88,9 +114,25 @@ export default function App() {
   const [analysisError, setAnalysisError] = useState("");
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [activeMetricHelp, setActiveMetricHelp] = useState(null);
-  const [roiLimits, setRoiLimits] = useState(DEFAULT_ROI_LIMITS);
   const [imageLayer, setImageLayer] = useState("original");
   const [showRoiOverlay, setShowRoiOverlay] = useState(true);
+  const [pointOrderOpen, setPointOrderOpen] = useState(true);
+  const [roiSettingsOpen, setRoiSettingsOpen] = useState(true);
+  const [migrationDraft, setMigrationDraft] = useState(null);
+  const [groupDrawVisibility, setGroupDrawVisibility] = useState({});
+  const [groupStatsVisibility, setGroupStatsVisibility] = useState({});
+  const [groupVectorVisibility, setGroupVectorVisibility] = useState({});
+  const [stageDisplaySize, setStageDisplaySize] = useState(null);
+  const [analysisPanelHeight, setAnalysisPanelHeight] = useState(() => {
+    const storedValue = localStorage.getItem(ANALYSIS_PANEL_HEIGHT_KEY);
+    if (storedValue === null) return DEFAULT_ANALYSIS_PANEL_HEIGHT;
+
+    const stored = Number(storedValue);
+    return Number.isFinite(stored)
+      ? clamp(stored, MIN_ANALYSIS_PANEL_HEIGHT, MAX_ANALYSIS_PANEL_HEIGHT)
+      : DEFAULT_ANALYSIS_PANEL_HEIGHT;
+  });
+  const [analysisResizeDrag, setAnalysisResizeDrag] = useState(null);
   const [pointOpacity, setPointOpacity] = useState(() => {
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_OPACITY;
@@ -98,8 +140,14 @@ export default function App() {
 
   const activeImage = activeIndex >= 0 ? resolveImageDimensions(images[activeIndex], rawPixels, bounds) : null;
   const activeGroup = bounds?.groups.find((group) => group.id === activeGroupId) ?? null;
+  const activeRoiLimits = groupRoiLimits(activeGroup);
+  const activeGroupUsesOutsideRoi = (activeGroup?.analysisMode ?? "outside") === "outside";
   const hasActiveImageDimensions = hasImageDimensions(activeImage);
   const activeImageAspect = hasActiveImageDimensions ? activeImage.width / activeImage.height : 4 / 3;
+  const collapsedPanelSpacePx =
+    (pointOrderOpen ? 0 : POINT_ORDER_COLLAPSED_STAGE_GAIN) +
+    (roiSettingsOpen ? 0 : ROI_SETTINGS_COLLAPSED_STAGE_GAIN);
+  const analysisPanelStageAdjustPx = DEFAULT_ANALYSIS_PANEL_HEIGHT - analysisPanelHeight;
 
   const loadImage = useCallback(
     async (index, nextImages) => {
@@ -110,12 +158,20 @@ export default function App() {
         setActiveIndex(-1);
         setBounds(null);
         setActiveGroupId(null);
+        setMigrationDraft(null);
+        setGroupDrawVisibility({});
+        setGroupStatsVisibility({});
+        setGroupVectorVisibility({});
         clearAnalysisState();
         return;
       }
 
       setActiveIndex(index);
       clearPointer();
+      setMigrationDraft(null);
+      setGroupDrawVisibility({});
+      setGroupStatsVisibility({});
+      setGroupVectorVisibility({});
       setRawPixels(null);
       setStatus("Loading image");
       clearAnalysisState("Loading analysis");
@@ -209,6 +265,67 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(OPACITY_KEY, String(pointOpacity));
   }, [pointOpacity]);
+
+  useEffect(() => {
+    localStorage.setItem(ANALYSIS_PANEL_HEIGHT_KEY, String(analysisPanelHeight));
+  }, [analysisPanelHeight]);
+
+  useEffect(() => {
+    if (!analysisResizeDrag) return undefined;
+
+    function handleResizeMove(event) {
+      const clientY = eventClientY(event);
+      if (clientY === null) return;
+
+      const nextHeight = analysisResizeDrag.startHeight + (analysisResizeDrag.startY - clientY);
+      setAnalysisPanelHeight(
+        clamp(Math.round(nextHeight), MIN_ANALYSIS_PANEL_HEIGHT, MAX_ANALYSIS_PANEL_HEIGHT),
+      );
+    }
+
+    function handleResizeEnd() {
+      setAnalysisResizeDrag(null);
+    }
+
+    window.addEventListener("pointermove", handleResizeMove);
+    window.addEventListener("pointerup", handleResizeEnd);
+    window.addEventListener("pointercancel", handleResizeEnd);
+
+    return () => {
+      window.removeEventListener("pointermove", handleResizeMove);
+      window.removeEventListener("pointerup", handleResizeEnd);
+      window.removeEventListener("pointercancel", handleResizeEnd);
+    };
+  }, [analysisResizeDrag]);
+
+  useEffect(() => {
+    const frame = stageFrameRef.current;
+    if (!frame || typeof ResizeObserver === "undefined") {
+      setStageDisplaySize(null);
+      return undefined;
+    }
+
+    function updateStageDisplaySize(contentRect) {
+      const nextSize = fitAspectToBox({
+        boxWidth: contentRect.width,
+        boxHeight: contentRect.height,
+        aspectRatio: activeImageAspect,
+      });
+      setStageDisplaySize((current) => (sameStageDisplaySize(current, nextSize) ? current : nextSize));
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries.find((candidate) => candidate.target === frame) ?? entries[0];
+      if (entry?.contentRect) {
+        updateStageDisplaySize(entry.contentRect);
+      }
+    });
+
+    observer.observe(frame);
+    updateStageDisplaySize(frame.getBoundingClientRect());
+
+    return () => observer.disconnect();
+  }, [activeImageAspect]);
 
   useEffect(() => {
     if (!canvasRef.current || !rawPixels) return;
@@ -317,7 +434,6 @@ export default function App() {
     setAnalysisStatus(nextStatus);
     setAnalysisError("");
     setAnalysisLoading(false);
-    setRoiLimits(DEFAULT_ROI_LIMITS);
   }
 
   function applyAnalysisPayload(payload, nextStatus) {
@@ -326,7 +442,6 @@ export default function App() {
     setHasAnalysis(Boolean(payload?.hasAnalysis && nextAnalysis));
     setAnalysisStatus(nextAnalysis ? nextStatus : "No analysis");
     setAnalysisError("");
-    setRoiLimits(nextAnalysis?.roiBands ? roiLimitsFromBands(nextAnalysis.roiBands) : DEFAULT_ROI_LIMITS);
   }
 
   function addPointAtPointer(point = pointerRef.current) {
@@ -405,8 +520,64 @@ export default function App() {
     mutateBounds((current) => renameGroup(current, activeGroupId, name), "Group renamed");
   }
 
+  function handleGroupAnalysisMode(analysisMode) {
+    mutateBounds((current) => {
+      let nextBounds = current;
+      let groupId = activeGroupId;
+
+      if (!groupId) {
+        nextBounds = addGroup(current);
+        groupId = nextBounds.groups[nextBounds.groups.length - 1]?.id ?? null;
+        setActiveGroupId(groupId);
+      }
+
+      return groupId ? setGroupAnalysisMode(nextBounds, groupId, analysisMode) : nextBounds;
+    }, "Group analysis mode changed");
+  }
+
+  function handleActiveGroupDrawVisibility(visible) {
+    if (!activeGroupId) return;
+    setGroupDrawVisibility((current) => ({ ...current, [activeGroupId]: visible }));
+  }
+
+  function handleActiveGroupStatsVisibility(visible) {
+    if (!activeGroupId) return;
+    setGroupStatsVisibility((current) => ({ ...current, [activeGroupId]: visible }));
+  }
+
+  function handleActiveGroupVectorVisibility(visible) {
+    if (!activeGroupId) return;
+    setGroupVectorVisibility((current) => ({ ...current, [activeGroupId]: visible }));
+  }
+
+  function handleAllGroupDisplayVisibility(visible) {
+    if (!bounds?.groups.length) return;
+
+    const nextVisibility = Object.fromEntries(bounds.groups.map((group) => [group.id, visible]));
+    setGroupDrawVisibility(nextVisibility);
+    setGroupStatsVisibility(nextVisibility);
+  }
+
+  function handleGroupDisplayVisibility(groupId, visible) {
+    setGroupDrawVisibility((current) => ({ ...current, [groupId]: visible }));
+    setGroupStatsVisibility((current) => ({ ...current, [groupId]: visible }));
+  }
+
+  function handleStartMigrationVector() {
+    if (!activeGroupId) return;
+    setMigrationDraft({ groupId: activeGroupId, start: null });
+    setStatus("Click migration start");
+  }
+
+  function handleClearMigrationVector() {
+    if (!activeGroupId) return;
+    setMigrationDraft(null);
+    mutateBounds((current) => clearGroupMigrationVector(current, activeGroupId), "Migration vector cleared");
+  }
+
   function handleDeleteGroup() {
     if (!activeGroupId) return;
+    setMigrationDraft(null);
     mutateBounds((current) => {
       const nextBounds = deleteGroup(current, activeGroupId);
       setActiveGroupId(nextBounds.groups[0]?.id ?? null);
@@ -422,6 +593,40 @@ export default function App() {
     );
   }
 
+  function handleDeletePoint(pointId) {
+    if (!activeGroupId) return;
+    mutateBounds((current) => deletePoint(current, activeGroupId, pointId), "Point deleted");
+    setHoverPointId(null);
+  }
+
+  function handleAnalysisResizeStart(event) {
+    const clientY = eventClientY(event);
+    if (clientY === null) return;
+
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setAnalysisResizeDrag({
+      startY: clientY,
+      startHeight: analysisPanelHeight,
+    });
+  }
+
+  function handleAnalysisResizeKeyDown(event) {
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setAnalysisPanelHeight((current) =>
+        clamp(current + 20, MIN_ANALYSIS_PANEL_HEIGHT, MAX_ANALYSIS_PANEL_HEIGHT),
+      );
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setAnalysisPanelHeight((current) =>
+        clamp(current - 20, MIN_ANALYSIS_PANEL_HEIGHT, MAX_ANALYSIS_PANEL_HEIGHT),
+      );
+    }
+  }
+
   function handleStageClick(event) {
     if (!hasActiveImageDimensions) return;
     const clickPoint = eventToImagePoint(event, activeImage, {
@@ -430,6 +635,26 @@ export default function App() {
     if (!clickPoint) return;
 
     setCurrentPointer(clickPoint);
+    if (migrationDraft) {
+      if (!migrationDraft.start) {
+        setMigrationDraft({ ...migrationDraft, start: clickPoint });
+        setStatus("Click migration end");
+        return;
+      }
+
+      const targetGroupId = migrationDraft.groupId;
+      mutateBounds(
+        (current) =>
+          setGroupMigrationVector(current, targetGroupId, {
+            start: migrationDraft.start,
+            end: clickPoint,
+          }),
+        "Migration vector set",
+      );
+      setMigrationDraft(null);
+      return;
+    }
+
     addPointAtPointer(clickPoint);
   }
 
@@ -477,25 +702,6 @@ export default function App() {
     }
   }
 
-  async function handleLoadAnalysis() {
-    if (!activeImage) return;
-    setAnalysisLoading(true);
-    setAnalysisStatus("Loading analysis");
-    setAnalysisError("");
-
-    try {
-      const payload = await readJsonResponse(await fetch(`/api/images/${activeImage.id}/analysis`));
-      applyAnalysisPayload(payload, payload.hasAnalysis ? "Analysis loaded" : "No analysis");
-    } catch (error) {
-      setAnalysis(null);
-      setHasAnalysis(false);
-      setAnalysisError(error.message);
-      setAnalysisStatus(`Analysis load failed: ${error.message}`);
-    } finally {
-      setAnalysisLoading(false);
-    }
-  }
-
   async function handleRecalculateAnalysis() {
     if (!activeImage) return;
     setAnalysisLoading(true);
@@ -507,7 +713,10 @@ export default function App() {
         await fetch(`/api/images/${activeImage.id}/analysis/recalculate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ roiBands: deriveRoiBands(roiLimits) }),
+          body: JSON.stringify({
+            roiBands: deriveRoiBands(activeRoiLimits),
+            roiBandsByGroup: roiBandsByGroup(bounds),
+          }),
         }),
       );
       applyAnalysisPayload(payload, "Analysis recalculated");
@@ -520,26 +729,45 @@ export default function App() {
   }
 
   function handleRoiLimitChange(bandId, value) {
+    if (!activeGroupId) return;
     if (value === "") {
-      setRoiLimits((currentLimits) => ({ ...currentLimits, [bandId]: "" }));
+      mutateBounds(
+        (current) => setGroupRoiLimits(current, activeGroupId, { ...groupRoiLimits(activeGroup), [bandId]: "" }),
+        "ROI settings changed",
+      );
       return;
     }
 
     const nextValue = Number(value);
     if (!Number.isFinite(nextValue)) return;
-    setRoiLimits((currentLimits) => ({ ...currentLimits, [bandId]: nextValue }));
+    mutateBounds(
+      (current) => setGroupRoiLimits(current, activeGroupId, { ...groupRoiLimits(activeGroup), [bandId]: nextValue }),
+      "ROI settings changed",
+    );
   }
 
   function handleRoiLimitCommit() {
-    setRoiLimits((currentLimits) => normalizeRoiLimits(currentLimits));
+    if (!activeGroupId) return;
+    mutateBounds(
+      (current) => setGroupRoiLimits(current, activeGroupId, normalizeRoiLimits(groupRoiLimits(activeGroup))),
+      "ROI settings changed",
+    );
   }
 
   function handleRoiLimitStep(bandId, delta) {
-    setRoiLimits((currentLimits) =>
-      normalizeRoiLimits({
-        ...currentLimits,
-        [bandId]: roiLimitNumber(currentLimits[bandId], DEFAULT_ROI_LIMITS[bandId]) + delta,
-      }),
+    if (!activeGroupId) return;
+    const currentLimits = groupRoiLimits(activeGroup);
+    mutateBounds(
+      (current) =>
+        setGroupRoiLimits(
+          current,
+          activeGroupId,
+          normalizeRoiLimits({
+            ...currentLimits,
+            [bandId]: roiLimitNumber(currentLimits[bandId], DEFAULT_ROI_LIMITS[bandId]) + delta,
+          }),
+        ),
+      "ROI settings changed",
     );
   }
 
@@ -561,19 +789,30 @@ export default function App() {
       };
     });
   }, [bounds]);
+  const visiblePolygons = useMemo(
+    () => polygons.filter((group) => groupVisible(groupDrawVisibility, group.id)),
+    [groupDrawVisibility, polygons],
+  );
+  const visibleMigrationPolygons = useMemo(
+    () =>
+      visiblePolygons.filter(
+        (group) => groupVisible(groupVectorVisibility, group.id) && validMigrationVector(group.migrationVector),
+      ),
+    [groupVectorVisibility, visiblePolygons],
+  );
   const roiPreviewGroups = useMemo(
     () =>
       showRoiOverlay && activeImage && hasActiveImageDimensions
-        ? buildRoiPreviewGroups(polygons, deriveRoiBands(roiLimits), activeImage)
+        ? buildRoiPreviewGroups(visiblePolygons, activeImage)
         : [],
-    [activeImage?.height, activeImage?.width, hasActiveImageDimensions, polygons, roiLimits, showRoiOverlay],
+    [activeImage?.height, activeImage?.width, hasActiveImageDimensions, showRoiOverlay, visiblePolygons],
   );
   const roiPreviewStatus = useMemo(() => {
     if (!showRoiOverlay) return "ROI preview hidden";
     if (!activeImage || !bounds || !hasActiveImageDimensions) return "ROI preview unavailable";
-    if (!bounds.groups.some((group) => group.points.length >= 3)) return "ROI preview needs polygon";
+    if (!visiblePolygons.some((group) => group.points.length >= 3)) return "ROI preview needs polygon";
     return "ROI preview local";
-  }, [activeImage, bounds, hasActiveImageDimensions, showRoiOverlay]);
+  }, [activeImage, bounds, hasActiveImageDimensions, showRoiOverlay, visiblePolygons]);
 
   return (
     <main className="app-shell">
@@ -598,6 +837,7 @@ export default function App() {
             onChange={(event) => setRootPath(event.target.value)}
           />
         </label>
+        <button type="submit">Set root</button>
         <button
           type="button"
           aria-label="Previous image"
@@ -631,26 +871,65 @@ export default function App() {
 
       <aside className="side-panel" aria-label="Groups">
         <div className="panel-heading">
-          <h1>Groups</h1>
-          <span className="status-chip">{activeGroup ? activeGroup.name : "No active group"}</span>
-        </div>
-        <div className="group-list">
-          {bounds?.groups.map((group) => (
+          <div className="panel-title-row">
+            <h1>Groups</h1>
+            <span className="status-chip">{activeGroup ? activeGroup.name : "No active group"}</span>
+          </div>
+          <div className="group-display-actions">
             <button
               type="button"
-              aria-label={group.name}
-              className={group.id === activeGroupId ? "group-row active" : "group-row"}
-              key={group.id}
-              onClick={() => {
-                setActiveGroupId(group.id);
-                setHoverPointId(null);
-              }}
+              aria-label="Show all group display"
+              disabled={!bounds?.groups.length}
+              onClick={() => handleAllGroupDisplayVisibility(true)}
             >
-              <span className="swatch" style={{ backgroundColor: group.color }} />
-              <span>{group.name}</span>
-              <small>{group.points.length}</small>
+              All on
             </button>
-          ))}
+            <button
+              type="button"
+              aria-label="Hide all group display"
+              disabled={!bounds?.groups.length}
+              onClick={() => handleAllGroupDisplayVisibility(false)}
+            >
+              All off
+            </button>
+          </div>
+        </div>
+        <div className="group-list">
+          {bounds?.groups.map((group) => {
+            const displayVisible = groupDisplayVisible(groupDrawVisibility, groupStatsVisibility, group.id);
+            return (
+              <div className={group.id === activeGroupId ? "group-row active" : "group-row"} key={group.id}>
+                <button
+                  type="button"
+                  aria-label={group.name}
+                  className="group-select-button"
+                  onClick={() => {
+                    setActiveGroupId(group.id);
+                    setHoverPointId(null);
+                    setMigrationDraft(null);
+                  }}
+                >
+                  <span className="swatch" style={{ backgroundColor: group.color }} />
+                  <span>{group.name}</span>
+                  <small>{group.points.length} / {ANALYSIS_MODE_LABELS[group.analysisMode] ?? ANALYSIS_MODE_LABELS.outside}</small>
+                  <span className={groupVisible(groupDrawVisibility, group.id) ? "group-state on" : "group-state off"}>
+                    {groupVisible(groupDrawVisibility, group.id) ? "Draw on" : "Draw off"}
+                  </span>
+                  <span className={groupVisible(groupStatsVisibility, group.id) ? "group-state on" : "group-state off"}>
+                    {groupVisible(groupStatsVisibility, group.id) ? "Stats on" : "Stats off"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={displayVisible ? "group-display-toggle active" : "group-display-toggle"}
+                  aria-label={`${displayVisible ? "Hide" : "Show"} ${group.name} display`}
+                  onClick={() => handleGroupDisplayVisibility(group.id, !displayVisible)}
+                >
+                  {displayVisible ? "Hide" : "Show"}
+                </button>
+              </div>
+            );
+          })}
         </div>
         <button type="button" onClick={handleAddGroup} disabled={!bounds}>
           Add group
@@ -665,13 +944,115 @@ export default function App() {
             onChange={(event) => handleRenameGroup(event.target.value)}
           />
         </label>
+        <div className="field-stack">
+          <span>Analysis mode</span>
+          <div className="segmented-control group-mode-control" aria-label="Analysis mode">
+            <button
+              type="button"
+              disabled={!bounds}
+              aria-pressed={(activeGroup?.analysisMode ?? "outside") === "outside"}
+              onClick={() => handleGroupAnalysisMode("outside")}
+            >
+              Outside ROI
+            </button>
+            <button
+              type="button"
+              disabled={!bounds}
+              aria-pressed={activeGroup?.analysisMode === "inside"}
+              onClick={() => handleGroupAnalysisMode("inside")}
+            >
+              Inside area
+            </button>
+          </div>
+        </div>
+        <div className="field-stack">
+          <span>Client display</span>
+          <label className="toggle-field" htmlFor="draw-active-group">
+            <input
+              id="draw-active-group"
+              type="checkbox"
+              disabled={!activeGroup}
+              checked={groupVisible(groupDrawVisibility, activeGroupId)}
+              onChange={(event) => handleActiveGroupDrawVisibility(event.target.checked)}
+            />
+            Draw active group
+          </label>
+          <label className="toggle-field" htmlFor="show-active-group-stats">
+            <input
+              id="show-active-group-stats"
+              type="checkbox"
+              disabled={!activeGroup}
+              checked={groupVisible(groupStatsVisibility, activeGroupId)}
+              onChange={(event) => handleActiveGroupStatsVisibility(event.target.checked)}
+            />
+            Show active group stats
+          </label>
+          <label className="toggle-field" htmlFor="show-migration-vector">
+            <input
+              id="show-migration-vector"
+              type="checkbox"
+              disabled={!activeGroup?.migrationVector}
+              checked={groupVisible(groupVectorVisibility, activeGroupId)}
+              onChange={(event) => handleActiveGroupVectorVisibility(event.target.checked)}
+            />
+            Show migration vector
+          </label>
+        </div>
+        <div className="field-stack">
+          <span>Migration vector</span>
+          <div className="button-row">
+            <button type="button" onClick={handleStartMigrationVector} disabled={!activeGroup}>
+              Set migration
+            </button>
+            <button type="button" onClick={handleClearMigrationVector} disabled={!activeGroup?.migrationVector}>
+              Clear migration
+            </button>
+          </div>
+          <small className="muted-line">{formatMigrationVector(activeGroup?.migrationVector)}</small>
+        </div>
         <button type="button" className="danger" onClick={handleDeleteGroup} disabled={!activeGroup}>
           Delete active group
         </button>
       </aside>
 
-      <section className="stage-shell" aria-label="Image editor">
+      <section
+        className="stage-shell"
+        aria-label="Image editor"
+        data-point-order-open={pointOrderOpen ? "true" : "false"}
+        data-roi-settings-open={roiSettingsOpen ? "true" : "false"}
+        data-analysis-resizing={analysisResizeDrag ? "true" : "false"}
+        style={{
+          "--stage-collapsed-space": `${collapsedPanelSpacePx}px`,
+          "--analysis-panel-height": `${analysisPanelHeight}px`,
+          "--analysis-panel-stage-adjust": `${analysisPanelStageAdjustPx}px`,
+        }}
+      >
         <div className="stage-tools">
+          <div className="segmented-control layer-control" aria-label="Image layer">
+            <button
+              type="button"
+              aria-pressed={imageLayer === "original"}
+              onClick={() => setImageLayer("original")}
+            >
+              Original
+            </button>
+            <button
+              type="button"
+              aria-pressed={imageLayer === "mask"}
+              onClick={() => setImageLayer("mask")}
+              disabled={!activeImage}
+            >
+              Mask
+            </button>
+            <button
+              type="button"
+              aria-pressed={imageLayer === "fiber-qc"}
+              onClick={() => setImageLayer("fiber-qc")}
+              disabled={!activeImage}
+            >
+              Fiber QC
+            </button>
+          </div>
           <label htmlFor="point-opacity">
             Point opacity
             <input
@@ -702,23 +1083,6 @@ export default function App() {
               onChange={(event) => setDisplayMax(Number(event.target.value))}
             />
           </label>
-          <div className="segmented-control" aria-label="Image layer">
-            <button
-              type="button"
-              aria-pressed={imageLayer === "original"}
-              onClick={() => setImageLayer("original")}
-            >
-              Original
-            </button>
-            <button
-              type="button"
-              aria-pressed={imageLayer === "mask"}
-              onClick={() => setImageLayer("mask")}
-              disabled={!activeImage}
-            >
-              Mask
-            </button>
-          </div>
           <label className="toggle-field" htmlFor="show-roi-overlay">
             <input
               id="show-roi-overlay"
@@ -736,48 +1100,74 @@ export default function App() {
           <span className="status-line">{status}</span>
         </div>
 
-        <div
-          className="image-stage"
-          data-testid="image-stage"
-          onPointerMove={handleStagePointerMove}
-          onMouseMove={handleStagePointerMove}
-          onPointerLeave={() => {
-            clearPointer();
-            setDragPoint(null);
-          }}
-          onPointerUp={() => setDragPoint(null)}
-          onPointerCancel={() => setDragPoint(null)}
-          onClick={handleStageClick}
-          style={{
-            aspectRatio: hasActiveImageDimensions ? `${activeImage.width} / ${activeImage.height}` : "4 / 3",
-            "--image-aspect": String(activeImageAspect),
-          }}
-        >
-          <canvas
-            ref={canvasRef}
-            className={imageLayer === "original" ? "raw-canvas" : "raw-canvas hidden-layer"}
-            aria-label="raw16 image"
-          />
-          {activeImage && imageLayer === "mask" ? (
-            <img
-              className="layer-image mask-preview"
-              alt="mask preview"
-              src={`/api/images/${activeImage.id}/mask-preview`}
+        <div className="image-stage-frame" data-testid="image-stage-frame" ref={stageFrameRef}>
+          <div
+            className="image-stage"
+            data-testid="image-stage"
+            onPointerMove={handleStagePointerMove}
+            onMouseMove={handleStagePointerMove}
+            onPointerLeave={() => {
+              clearPointer();
+              setDragPoint(null);
+            }}
+            onPointerUp={() => setDragPoint(null)}
+            onPointerCancel={() => setDragPoint(null)}
+            onClick={handleStageClick}
+            style={{
+              aspectRatio: hasActiveImageDimensions ? `${activeImage.width} / ${activeImage.height}` : "4 / 3",
+              "--image-aspect": String(activeImageAspect),
+              ...(stageDisplaySize
+                ? { width: `${stageDisplaySize.width}px`, height: `${stageDisplaySize.height}px` }
+                : {}),
+            }}
+          >
+            <canvas
+              ref={canvasRef}
+              className={imageLayer === "original" ? "raw-canvas" : "raw-canvas hidden-layer"}
+              aria-label="raw16 image"
             />
-          ) : null}
-          {activeImage && hasActiveImageDimensions && bounds ? (
-            <svg
-              className="overlay"
-              viewBox={`0 0 ${activeImage.width} ${activeImage.height}`}
-              role="img"
-              aria-label="Bounds overlay"
-            >
-              {roiPreviewGroups.length ? (
+            {activeImage && (imageLayer === "mask" || imageLayer === "fiber-qc") ? (
+              <img
+                className="layer-image mask-preview"
+                alt="mask preview"
+                src={`/api/images/${activeImage.id}/mask-preview`}
+              />
+            ) : null}
+            {activeImage && imageLayer === "fiber-qc" ? (
+              <img
+                className="layer-image skeleton-preview"
+                alt="skeleton preview"
+                src={`/api/images/${activeImage.id}/skeleton-preview`}
+              />
+            ) : null}
+            {activeImage && hasActiveImageDimensions && bounds ? (
+              <svg
+                className="overlay"
+                viewBox={`0 0 ${activeImage.width} ${activeImage.height}`}
+                role="img"
+                aria-label="Bounds overlay"
+              >
+              {roiPreviewGroups.length || visibleMigrationPolygons.length ? (
                 <defs>
                   {roiPreviewGroups.map((group) => (
                     <clipPath id={group.clipId} key={group.clipId} clipPathUnits="userSpaceOnUse">
                       <path d={group.outsidePath} clipRule="evenodd" />
                     </clipPath>
+                  ))}
+                  {visibleMigrationPolygons.map((group) => (
+                    <marker
+                      id={migrationMarkerId(group.id)}
+                      key={`${group.id}-migration-marker`}
+                      markerHeight="7"
+                      markerUnits="strokeWidth"
+                      markerWidth="8"
+                      orient="auto"
+                      refX="7"
+                      refY="3.5"
+                      viewBox="0 0 8 7"
+                    >
+                      <path d="M 0 0 L 8 3.5 L 0 7 Z" fill={group.color} />
+                    </marker>
                   ))}
                 </defs>
               ) : null}
@@ -795,7 +1185,30 @@ export default function App() {
                   />
                 )),
               )}
-              {polygons.map((group) => (
+              {visibleMigrationPolygons.map((group) => (
+                <g key={`${group.id}-migration`} className="migration-vector">
+                  <line
+                    aria-label={`Migration vector ${group.name}`}
+                    x1={group.migrationVector.start.x}
+                    y1={group.migrationVector.start.y}
+                    x2={group.migrationVector.end.x}
+                    y2={group.migrationVector.end.y}
+                    stroke={group.color}
+                    strokeWidth="2.5"
+                    markerEnd={`url(#${migrationMarkerId(group.id)})`}
+                  />
+                  <circle
+                    aria-label={`Migration vector start ${group.name}`}
+                    cx={group.migrationVector.start.x}
+                    cy={group.migrationVector.start.y}
+                    r="3"
+                    fill={group.color}
+                    stroke="#ffffff"
+                    strokeWidth="1"
+                  />
+                </g>
+              ))}
+              {visiblePolygons.map((group) => (
                 <g key={group.id} opacity={pointOpacity}>
                   {group.ordered.length >= 3 ? (
                     <polygon
@@ -834,21 +1247,39 @@ export default function App() {
                   ))}
                 </g>
               ))}
-            </svg>
-          ) : null}
+              </svg>
+            ) : null}
+          </div>
         </div>
 
-        <div className="point-order-panel" aria-label="Point order">
-          <div className="point-order-heading">
-            <strong>{activeGroup?.name ?? "Point order"}</strong>
-            <span>{activeGroup ? `${activeGroup.points.length} points` : "No active group"}</span>
-          </div>
-          <div className="point-order-list">
+        <div
+          className={pointOrderOpen ? "point-order-panel" : "point-order-panel is-collapsed"}
+          aria-label="Point order"
+        >
+          <button
+            type="button"
+            className="point-order-heading panel-heading-toggle"
+            aria-label="Toggle point order panel"
+            aria-expanded={pointOrderOpen}
+            aria-controls="point-order-list"
+            onClick={() => setPointOrderOpen((current) => !current)}
+          >
+            <span className="panel-toggle-icon" aria-hidden="true">{pointOrderOpen ? "v" : ">"}</span>
+            <span className="panel-heading-copy">
+              <strong>{activeGroup?.name ?? "Point order"}</strong>
+              <span>{activeGroup ? `${activeGroup.points.length} points` : "No active group"}</span>
+            </span>
+          </button>
+          {pointOrderOpen ? <div className="point-order-list" id="point-order-list">
             {activeGroup?.points.length ? (
               activeGroup.points.map((point, index) => (
                 <div
                   className={hoverPointId === point.id ? "point-order-item active" : "point-order-item"}
                   key={point.id}
+                  onMouseEnter={() => setHoverPointId(point.id)}
+                  onMouseLeave={() => setHoverPointId(null)}
+                  onPointerEnter={() => setHoverPointId(point.id)}
+                  onPointerLeave={() => setHoverPointId(null)}
                 >
                   <button
                     type="button"
@@ -864,17 +1295,24 @@ export default function App() {
                     className="point-order-token"
                     aria-label={`Point ${index + 1} ${point.id}`}
                     onClick={() => setHoverPointId(point.id)}
-                    onMouseEnter={() => setHoverPointId(point.id)}
-                    onMouseLeave={() => setHoverPointId(null)}
                     onMouseMove={() => setHoverPointId(point.id)}
-                    onPointerEnter={() => setHoverPointId(point.id)}
                     onPointerMove={() => setHoverPointId(point.id)}
                     onFocus={() => setHoverPointId(point.id)}
-                    onBlur={() => setHoverPointId(null)}
                   >
                     <span>{index + 1}</span>
                     <small>{point.id}</small>
                   </button>
+                  {hoverPointId === point.id ? (
+                    <button
+                      type="button"
+                      className="point-delete"
+                      aria-label={`Delete ${point.id}`}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => handleDeletePoint(point.id)}
+                    >
+                      Delete
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="order-nudge"
@@ -889,60 +1327,95 @@ export default function App() {
             ) : (
               <span className="point-order-empty">No points</span>
             )}
-          </div>
+          </div> : null}
         </div>
 
-        <div className="analysis-panel" aria-label="Analysis">
+        <button
+          type="button"
+          className="analysis-resize-handle"
+          aria-label="Resize analysis panel"
+          aria-valuemin={MIN_ANALYSIS_PANEL_HEIGHT}
+          aria-valuemax={MAX_ANALYSIS_PANEL_HEIGHT}
+          aria-valuenow={analysisPanelHeight}
+          onKeyDown={handleAnalysisResizeKeyDown}
+          onPointerDown={handleAnalysisResizeStart}
+          title="Resize analysis panel"
+        >
+          <span aria-hidden="true" />
+        </button>
+
+        <div
+          className={roiSettingsOpen ? "analysis-panel" : "analysis-panel roi-settings-collapsed"}
+          aria-label="Analysis"
+          style={{ height: `${analysisPanelHeight}px`, maxHeight: `${analysisPanelHeight}px` }}
+        >
           <div className="analysis-toolbar">
             <strong>Analysis</strong>
             <span className="status-chip">{hasAnalysis ? "Saved analysis" : "No saved analysis"}</span>
             <span className="status-line">{analysisStatus}</span>
-            <button type="button" disabled={!activeImage || analysisLoading} onClick={handleLoadAnalysis}>
-              Load analysis
-            </button>
             <button type="button" disabled={!activeImage || analysisLoading} onClick={handleRecalculateAnalysis}>
               {analysisLoading ? "Working" : "Recalculate"}
             </button>
+            <button
+              type="button"
+              className="compact-panel-toggle"
+              aria-label="Toggle outside ROI settings"
+              aria-expanded={roiSettingsOpen}
+              aria-controls="roi-settings-body"
+              onClick={() => setRoiSettingsOpen((current) => !current)}
+            >
+              <span className="panel-toggle-icon" aria-hidden="true">{roiSettingsOpen ? "v" : ">"}</span>
+              <span>ROI settings</span>
+            </button>
           </div>
 
-          <div className="roi-limit-grid">
-            {ROI_BAND_IDS.map((bandId) => {
-              const label = ROI_BAND_LABELS[bandId];
-              return (
-                <div className="roi-limit-field" key={bandId}>
-                  <label htmlFor={`roi-${bandId}-upper`}>
-                    <span>{label} upper</span>
-                  </label>
-                  <div className="roi-stepper">
-                    <button
-                      type="button"
-                      aria-label={`Decrease ${label} upper`}
-                      onClick={() => handleRoiLimitStep(bandId, -ROI_LIMIT_STEP)}
-                    >
-                      -
-                    </button>
-                    <input
-                      id={`roi-${bandId}-upper`}
-                      type="number"
-                      min={ROI_MIN_LIMIT}
-                      step={ROI_LIMIT_STEP}
-                      value={roiLimits[bandId]}
-                      onBlur={handleRoiLimitCommit}
-                      onChange={(event) => handleRoiLimitChange(bandId, event.target.value)}
-                      onKeyDown={handleRoiLimitKeyDown}
-                    />
-                    <button
-                      type="button"
-                      aria-label={`Increase ${label} upper`}
-                      onClick={() => handleRoiLimitStep(bandId, ROI_LIMIT_STEP)}
-                    >
-                      +
-                    </button>
-                  </div>
+          {roiSettingsOpen ? (
+            <div className="roi-settings-body" id="roi-settings-body">
+              {activeGroupUsesOutsideRoi ? (
+                <div className="roi-limit-grid">
+                  {ROI_BAND_IDS.map((bandId) => {
+                    const label = ROI_BAND_LABELS[bandId];
+                    return (
+                      <div className="roi-limit-field" key={bandId}>
+                        <label htmlFor={`roi-${bandId}-upper`}>
+                          <span>{label} upper</span>
+                        </label>
+                        <div className="roi-stepper">
+                          <button
+                            type="button"
+                            aria-label={`Decrease ${label} upper`}
+                            onClick={() => handleRoiLimitStep(bandId, -ROI_LIMIT_STEP)}
+                          >
+                            -
+                          </button>
+                          <input
+                            id={`roi-${bandId}-upper`}
+                            type="number"
+                            min={ROI_MIN_LIMIT}
+                            step={ROI_LIMIT_STEP}
+                            value={activeRoiLimits[bandId]}
+                            onBlur={handleRoiLimitCommit}
+                            onChange={(event) => handleRoiLimitChange(bandId, event.target.value)}
+                            onKeyDown={handleRoiLimitKeyDown}
+                          />
+                          <button
+                            type="button"
+                            aria-label={`Increase ${label} upper`}
+                            onClick={() => handleRoiLimitStep(bandId, ROI_LIMIT_STEP)}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
-          </div>
+              ) : null}
+              {activeGroup && !activeGroupUsesOutsideRoi ? (
+                <p className="analysis-empty">Inside groups do not use outside ROI settings.</p>
+              ) : null}
+            </div>
+            ) : null}
 
           {analysisError ? <p className="analysis-error">{analysisError}</p> : null}
           {analysis ? (
@@ -967,10 +1440,11 @@ export default function App() {
               <div className="analysis-table-wrap">
                 <table className="analysis-table">
 	                  <thead>
-	                    <tr>
-	                      <th>Group</th>
-	                      <th>ROI</th>
-	                      {ANALYSIS_COLUMNS.map((column) => (
+		                    <tr>
+		                      <th>Group</th>
+		                      <th>Mode</th>
+		                      <th>ROI</th>
+		                      {ANALYSIS_COLUMNS.map((column) => (
 	                        <MetricColumnHeader
 	                          activeMetricHelp={activeMetricHelp}
 	                          column={column}
@@ -982,11 +1456,14 @@ export default function App() {
 	                    </tr>
 	                  </thead>
 	                  <tbody>
-	                    {analysisRows(analysis).map((row) => (
-	                      <tr key={row.id}>
-	                        <td>{row.groupName}</td>
-	                        <td>{row.bandLabel}</td>
-	                        {ANALYSIS_COLUMNS.map((column) => (
+		                    {analysisRows(analysis)
+                          .filter((row) => groupVisible(groupStatsVisibility, row.groupId))
+                          .map((row) => (
+		                      <tr key={row.id}>
+		                        <td>{row.groupName}</td>
+		                        <td>{row.modeLabel}</td>
+		                        <td>{row.bandLabel}</td>
+		                        {ANALYSIS_COLUMNS.map((column) => (
 	                          <td key={column.key}>{column.format(row.metrics[column.key])}</td>
 	                        ))}
 	                      </tr>
@@ -1030,15 +1507,15 @@ function MetricColumnHeader({ activeMetricHelp, column, onHide, onShow }) {
   );
 }
 
-function buildRoiPreviewGroups(polygons, roiBands, image) {
+function buildRoiPreviewGroups(polygons, image) {
   return polygons
-    .filter((group) => group.ordered.length >= 3)
+    .filter((group) => group.ordered.length >= 3 && (group.analysisMode ?? "outside") === "outside")
     .map((group, groupIndex) => {
       const clipId = `roi-preview-clip-${svgIdPart(group.id)}-${groupIndex}`;
       return {
         clipId,
         outsidePath: `M 0 0 H ${image.width} V ${image.height} H 0 Z ${polygonPath(group.ordered)} Z`,
-        bands: [...roiBands]
+        bands: deriveRoiBands(groupRoiLimits(group))
           .sort((left, right) => right.toPx - left.toPx)
           .map((band) => ({
             key: `${group.id}-${band.id}`,
@@ -1060,6 +1537,10 @@ function polygonPath(points) {
 
 function svgIdPart(value) {
   return String(value ?? "group").replace(/[^a-zA-Z0-9_-]/g, "-");
+}
+
+function migrationMarkerId(groupId) {
+  return `migration-arrow-${svgIdPart(groupId)}`;
 }
 
 async function readJsonResponse(response) {
@@ -1125,12 +1606,42 @@ function roiLimitsFromBands(roiBands) {
   return nextLimits;
 }
 
+function groupRoiLimits(group) {
+  return {
+    ...DEFAULT_ROI_LIMITS,
+    ...(group?.roiLimits && typeof group.roiLimits === "object" ? group.roiLimits : {}),
+  };
+}
+
+function roiBandsByGroup(bounds) {
+  return Object.fromEntries(
+    (bounds?.groups ?? [])
+      .filter((group) => (group.analysisMode ?? "outside") === "outside")
+      .map((group) => [group.id, deriveRoiBands(groupRoiLimits(group))]),
+  );
+}
+
 function analysisRows(analysis) {
   const labels = new Map((analysis.roiBands ?? []).map((band) => [band.id, band.label ?? band.id]));
   return (analysis.groups ?? []).flatMap((group) => {
+    if (group.analysisMode === "inside" && group.area) {
+      return [
+        {
+          id: `${group.groupId}-inside`,
+          groupId: group.groupId,
+          groupName: group.groupName ?? group.groupId,
+          modeLabel: "Inside",
+          bandLabel: "영역",
+          metrics: group.area,
+        },
+      ];
+    }
+
     const bandRows = ROI_BAND_IDS.filter((bandId) => group.bands?.[bandId]).map((bandId) => ({
       id: `${group.groupId}-${bandId}`,
+      groupId: group.groupId,
       groupName: group.groupName ?? group.groupId,
+      modeLabel: "Outside",
       bandLabel: labels.get(bandId) ?? bandId,
       metrics: group.bands[bandId],
     }));
@@ -1140,12 +1651,22 @@ function analysisRows(analysis) {
       ...bandRows,
       {
         id: `${group.groupId}-all`,
+        groupId: group.groupId,
         groupName: group.groupName ?? group.groupId,
+        modeLabel: "Outside",
         bandLabel: "전체",
         metrics: group.allBands,
       },
     ];
   });
+}
+
+function groupVisible(visibilityByGroupId, groupId) {
+  return !groupId || visibilityByGroupId[groupId] !== false;
+}
+
+function groupDisplayVisible(drawVisibilityByGroupId, statsVisibilityByGroupId, groupId) {
+  return groupVisible(drawVisibilityByGroupId, groupId) && groupVisible(statsVisibilityByGroupId, groupId);
 }
 
 function formatMetric(value) {
@@ -1154,6 +1675,15 @@ function formatMetric(value) {
 
 function formatInteger(value) {
   return Number.isFinite(value) ? String(Math.round(value)) : "-";
+}
+
+function formatMigrationVector(migrationVector) {
+  if (!validMigrationVector(migrationVector)) {
+    return "Not set";
+  }
+
+  const { start, end } = migrationVector;
+  return `${Math.round(start.x)},${Math.round(start.y)} -> ${Math.round(end.x)},${Math.round(end.y)}`;
 }
 
 function formatDateTime(value) {
@@ -1196,9 +1726,42 @@ function normalizeGroups(groups) {
           typeof group.color === "string" && group.color.trim()
             ? group.color
             : GROUP_COLORS[groupIndex % GROUP_COLORS.length],
+        analysisMode: group.analysisMode === "inside" ? "inside" : "outside",
+        migrationVector: normalizeMigrationVector(group.migrationVector),
+        ...(group.analysisMode === "inside" ? {} : { roiLimits: normalizeOptionalRoiLimits(group.roiLimits) }),
         points: normalizePoints(points),
       };
     });
+}
+
+function normalizeOptionalRoiLimits(roiLimits) {
+  if (!roiLimits || typeof roiLimits !== "object" || Array.isArray(roiLimits)) {
+    return undefined;
+  }
+
+  return normalizeRoiLimits(roiLimits);
+}
+
+function normalizeMigrationVector(migrationVector) {
+  if (!validMigrationVector(migrationVector)) {
+    return null;
+  }
+
+  return {
+    start: { x: migrationVector.start.x, y: migrationVector.start.y },
+    end: { x: migrationVector.end.x, y: migrationVector.end.y },
+  };
+}
+
+function validMigrationVector(migrationVector) {
+  return (
+    migrationVector &&
+    typeof migrationVector === "object" &&
+    Number.isFinite(migrationVector.start?.x) &&
+    Number.isFinite(migrationVector.start?.y) &&
+    Number.isFinite(migrationVector.end?.x) &&
+    Number.isFinite(migrationVector.end?.y)
+  );
 }
 
 function normalizePoints(points) {
@@ -1254,6 +1817,17 @@ function imageContentRect(contentElement, fallbackElement) {
   }
 
   return fallbackElement.getBoundingClientRect();
+}
+
+function sameStageDisplaySize(current, next) {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return current.width === next.width && current.height === next.height;
+}
+
+function eventClientY(event) {
+  const clientY = Number(event.clientY);
+  return Number.isFinite(clientY) ? clientY : null;
 }
 
 function eventToImagePoint(event, image, { allowOutside = false, contentRect = null } = {}) {

@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
 import sharp from "sharp";
 import { assignOutwardRoiPixels, validateRoiBands } from "./analysisGeometry.js";
 import { AnalysisError, selectMaskSource } from "./analysisService.js";
@@ -65,6 +67,22 @@ async function pngFromGreyMask(mask) {
     .toBuffer();
 }
 
+async function pngFromColorMask(mask, color) {
+  const data = new Uint8Array(mask.width * mask.height * 4);
+
+  for (let index = 0; index < mask.data.length; index += 1) {
+    if (!mask.data[index]) continue;
+
+    const offset = index * 4;
+    data[offset] = color[0];
+    data[offset + 1] = color[1];
+    data[offset + 2] = color[2];
+    data[offset + 3] = color[3];
+  }
+
+  return pngFromRgba({ data, width: mask.width, height: mask.height });
+}
+
 async function pngFromRgba({ data, width, height }) {
   return sharp(data, {
     raw: {
@@ -101,6 +119,28 @@ export async function createMaskPreview(storage, id, { maxImagePixels } = {}) {
   };
 }
 
+export async function createSkeletonPreview(storage, id, { maxImagePixels } = {}) {
+  const paths = storage.imagePaths(id);
+
+  if (!existsSync(paths.skeletonPath)) {
+    throw new AnalysisError("MISSING_SKELETON", "Skeleton image is required before preview.", { status: 409 });
+  }
+
+  let skeleton;
+  try {
+    skeleton = await readBinaryMask(paths.skeletonPath, { maxImagePixels });
+  } catch (error) {
+    throw new AnalysisError("UNREADABLE_SKELETON", "Unable to read skeleton image.", { status: 422, cause: error });
+  }
+
+  return {
+    buffer: await pngFromColorMask(skeleton, [255, 0, 0, 255]),
+    width: skeleton.width,
+    height: skeleton.height,
+    skeletonFile: path.basename(paths.skeletonPath),
+  };
+}
+
 export async function createRoiOverlay(storage, id, { bounds, roiBands, maxImagePixels } = {}) {
   const paths = storage.imagePaths(id);
   const dimensions = await imageDimensions(paths.imagePath, maxImagePixels);
@@ -112,7 +152,7 @@ export async function createRoiOverlay(storage, id, { bounds, roiBands, maxImage
     assignments = assignOutwardRoiPixels({
       width: nextBounds.width,
       height: nextBounds.height,
-      groups: nextBounds.groups,
+      groups: nextBounds.groups.filter((group) => (group.analysisMode ?? "outside") === "outside"),
       roiBands: validateRoiBands(roiBands),
     });
   } catch (error) {

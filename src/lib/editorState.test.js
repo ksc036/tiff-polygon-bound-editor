@@ -9,6 +9,9 @@ import {
   movePointOrder,
   movePoint,
   moveNearestPoint,
+  clearGroupMigrationVector,
+  setGroupAnalysisMode,
+  setGroupMigrationVector,
 } from "./editorState.js";
 
 describe("editor state", () => {
@@ -28,6 +31,79 @@ describe("editor state", () => {
       { id: "point-1", x: 12.5, y: 19.25 },
     ]);
     expect(bounds.groups[0].points).toEqual([]);
+  });
+
+  test("does not add a point at an existing exact coordinate in the same group", () => {
+    const bounds = addPoint(
+      addGroup(
+        createEmptyBounds({
+          folder: "sample-folder",
+          file: "image.png",
+          width: 100,
+          height: 80,
+        }),
+      ),
+      "group-1",
+      { x: 12.5, y: 19.25 },
+    );
+
+    const updated = addPoint(bounds, "group-1", { x: 12.5, y: 19.25 });
+
+    expect(updated).toBe(bounds);
+    expect(updated.groups[0].points).toEqual([
+      { id: "point-1", x: 12.5, y: 19.25 },
+    ]);
+  });
+
+  test("creates groups with explicit outside analysis mode and can switch modes", () => {
+    const bounds = addGroup(
+      createEmptyBounds({
+        folder: "sample-folder",
+        file: "image.png",
+        width: 100,
+        height: 80,
+      }),
+    );
+
+    expect(bounds.groups[0].analysisMode).toBe("outside");
+
+    const inside = setGroupAnalysisMode(bounds, "group-1", "inside");
+    expect(inside.groups[0].analysisMode).toBe("inside");
+    expect(bounds.groups[0].analysisMode).toBe("outside");
+
+    const unchanged = setGroupAnalysisMode(bounds, "group-1", "invalid");
+    expect(unchanged).toBe(bounds);
+  });
+
+  test("sets clears and clamps group migration vectors", () => {
+    const bounds = addGroup(
+      createEmptyBounds({
+        folder: "sample-folder",
+        file: "image.png",
+        width: 100,
+        height: 80,
+      }),
+    );
+
+    const withVector = setGroupMigrationVector(bounds, "group-1", {
+      start: { x: -10, y: 20 },
+      end: { x: 120, y: 90 },
+    });
+
+    expect(withVector.groups[0].migrationVector).toEqual({
+      start: { x: -10, y: 20 },
+      end: { x: 120, y: 90 },
+    });
+    expect(bounds.groups[0].migrationVector).toBeNull();
+
+    const clamped = clampBoundsToImage(withVector, 100, 80);
+    expect(clamped.groups[0].migrationVector).toEqual({
+      start: { x: 0, y: 20 },
+      end: { x: 99, y: 79 },
+    });
+
+    const cleared = clearGroupMigrationVector(clamped, "group-1");
+    expect(cleared.groups[0].migrationVector).toBeNull();
   });
 
   test("inserts a point at an explicit ordered position", () => {

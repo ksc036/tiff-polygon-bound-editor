@@ -14,7 +14,9 @@ async function createTempRoot() {
 
 async function writeImage(rootDir, folderName, imageName = "frame.tif") {
   const imageDir = path.join(rootDir, folderName, "image");
+  const maskDir = path.join(rootDir, folderName, "mask");
   await mkdir(imageDir, { recursive: true });
+  await mkdir(maskDir, { recursive: true });
   await writeFile(path.join(imageDir, imageName), "tiff placeholder");
 }
 
@@ -27,23 +29,23 @@ afterEach(async () => {
 });
 
 describe("createStorage", () => {
-  test("scans name_Txx folders in numeric order", async () => {
+  test("scans folders with image and mask directories in name order", async () => {
     const rootDir = await createTempRoot();
-    await writeImage(rootDir, "selected-stack-sequence_T10", "zeta.tif");
-    await writeImage(rootDir, "other-stack_T01", "only.tiff");
-    await writeImage(rootDir, "selected-stack-sequence_T02", "beta.tif");
-    await writeImage(rootDir, "selected-stack-sequence_T1", "alpha.tiff");
-    await mkdir(path.join(rootDir, "selected-stack-sequence_T03", "image"), { recursive: true });
-    await writeFile(path.join(rootDir, "selected-stack-sequence_T03", "image", "ignored.png"), "not a tif");
-    await writeImage(rootDir, "selected-stack-sequence_T02_extra", "ignored.tif");
+    await writeImage(rootDir, "zeta", "zeta.tif");
+    await writeImage(rootDir, "alpha sample", "alpha.tiff");
+    await writeImage(rootDir, "middle", "middle.tif");
+    await mkdir(path.join(rootDir, "missing-mask", "image"), { recursive: true });
+    await writeFile(path.join(rootDir, "missing-mask", "image", "ignored.tif"), "tiff placeholder");
+    await mkdir(path.join(rootDir, "not-a-tiff", "image"), { recursive: true });
+    await mkdir(path.join(rootDir, "not-a-tiff", "mask"), { recursive: true });
+    await writeFile(path.join(rootDir, "not-a-tiff", "image", "ignored.png"), "not a tif");
 
     const storage = createStorage({ initialRoot: rootDir });
 
     await expect(storage.scanImages()).resolves.toMatchObject([
-      { id: "other-stack_T01", imageFolder: "other-stack_T01", imageFile: "only.tiff" },
-      { id: "selected-stack-sequence_T1", imageFolder: "selected-stack-sequence_T1", imageFile: "alpha.tiff" },
-      { id: "selected-stack-sequence_T02", imageFolder: "selected-stack-sequence_T02", imageFile: "beta.tif" },
-      { id: "selected-stack-sequence_T10", imageFolder: "selected-stack-sequence_T10", imageFile: "zeta.tif" },
+      { id: "alpha sample", imageFolder: "alpha sample", imageFile: "alpha.tiff" },
+      { id: "middle", imageFolder: "middle", imageFile: "middle.tif" },
+      { id: "zeta", imageFolder: "zeta", imageFile: "zeta.tif" },
     ]);
   });
 
@@ -73,13 +75,13 @@ describe("createStorage", () => {
     });
   });
 
-  test("rejects roots with no image sequence folders", async () => {
+  test("rejects roots with no folders containing image and mask directories", async () => {
     const rootDir = await createTempRoot();
-    await mkdir(path.join(rootDir, "not-a-sequence", "image"), { recursive: true });
-    await writeFile(path.join(rootDir, "not-a-sequence", "image", "frame.tif"), "tiff placeholder");
+    await mkdir(path.join(rootDir, "not-ready", "image"), { recursive: true });
+    await writeFile(path.join(rootDir, "not-ready", "image", "frame.tif"), "tiff placeholder");
     const storage = createStorage();
 
-    expect(() => storage.setRoot(rootDir)).toThrow(/no image sequence folders/i);
+    expect(() => storage.setRoot(rootDir)).toThrow(/no image folders/i);
   });
 
   test("rejects relative and nonexistent roots", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   aggregateRoiMetrics,
+  assignInsideRoiPixels,
   assignOutwardRoiPixels,
   buildMaskSamples,
   buildSkeletonSamples,
@@ -141,6 +142,60 @@ describe("analysis geometry", () => {
     expect(assignments.has("2,2")).toBe(false);
   });
 
+  test("assignInsideRoiPixels includes polygon interiors and boundaries without radial vectors", () => {
+    const assignments = assignInsideRoiPixels({
+      width: 5,
+      height: 5,
+      groups: [square("cell", 1, 1, 3, 3)],
+    });
+
+    expect(assignments.get("1,1")).toMatchObject({
+      groupId: "cell",
+      bandId: "inside",
+    });
+    expect(assignments.get("2,2")).toMatchObject({
+      groupId: "cell",
+      bandId: "inside",
+    });
+    expect(assignments.has("0,0")).toBe(false);
+    expect(assignments.size).toBe(9);
+    expect(assignments.get("2,2")).not.toHaveProperty("outwardNormal");
+    expect(assignments.get("2,2")).not.toHaveProperty("tangent");
+
+    const maskSamples = buildMaskSamples({
+      mask: new Set(["1,1", "2,2", "4,4"]),
+      width: 5,
+      height: 5,
+      assignments,
+    });
+    const skeletonSamples = buildSkeletonSamples({
+      skeleton: new Set(["1,2", "2,2", "3,2"]),
+      width: 5,
+      height: 5,
+      assignments,
+    });
+    const metrics = aggregateRoiMetrics({
+      assignments,
+      maskSamples,
+      skeletonSamples,
+      bandIds: ["inside"],
+    });
+
+    expect(metrics.overall.roiAreaPx).toBe(9);
+    expect(metrics.overall.maskPixelCount).toBe(2);
+    expect(metrics.overall.density).toBeCloseTo(2 / 9);
+    expect(metrics.overall.globalAlignment).toBeCloseTo(1);
+    expect(metrics.overall.radialNormalAlignment).toBeNull();
+    expect(metrics.overall.tangentialAlignment).toBeNull();
+    expect(metrics.bands.inside).toMatchObject({
+      bandId: "inside",
+      roiAreaPx: 9,
+      maskPixelCount: 2,
+      radialNormalAlignment: null,
+      tangentialAlignment: null,
+    });
+  });
+
   test("roiScanWindows expands each polygon by the max ROI distance", () => {
     expect(
       roiScanWindows({
@@ -273,6 +328,185 @@ describe("analysis geometry", () => {
     expect(tangentialMetrics.overall.tangentialAlignment).toBeGreaterThan(0.95);
   });
 
+  test("buildSkeletonSamples uses ordered centerline segments instead of per-pixel neighbor angles", () => {
+    const centerline = [
+      [0, 0],
+      [1, 0],
+      [2, 0],
+      [3, 0],
+      [4, 0],
+      [4, 1],
+      [4, 2],
+      [4, 3],
+    ];
+    const assignments = new Map(centerline.map(([x, y]) => [`${x},${y}`, { groupId: "cell", bandId: "near" }]));
+
+    const samples = buildSkeletonSamples({
+      skeleton: new Set(centerline.map(([x, y]) => `${x},${y}`)),
+      width: 8,
+      height: 8,
+      assignments,
+      segmentLengthPx: 4,
+    });
+
+    expect(samples).toHaveLength(2);
+    expect(samples[0]).toMatchObject({
+      x: 2,
+      y: 0,
+      orientation: { x: 1, y: 0 },
+      segmentStart: { x: 0, y: 0 },
+      segmentEnd: { x: 4, y: 0 },
+      segmentLengthPx: 4,
+    });
+    expect(samples[1]).toMatchObject({
+      x: 4,
+      y: 2,
+      orientation: { x: 0, y: 1 },
+      segmentStart: { x: 4, y: 0 },
+      segmentEnd: { x: 4, y: 3 },
+      segmentLengthPx: 3,
+    });
+  });
+
+  test("aggregateRoiMetrics weights circular statistics by centerline segment length", () => {
+    const assignments = new Map([
+      ["0,0", { groupId: "cell", bandId: "near" }],
+      ["1,0", { groupId: "cell", bandId: "near" }],
+    ]);
+    const skeletonSamples = [
+      {
+        x: 0,
+        y: 0,
+        groupId: "cell",
+        bandId: "near",
+        orientation: { x: 1, y: 0 },
+        outwardNormal: { x: 1, y: 0 },
+        segmentLengthPx: 4,
+      },
+      {
+        x: 1,
+        y: 0,
+        groupId: "cell",
+        bandId: "near",
+        orientation: { x: 0, y: 1 },
+        outwardNormal: { x: 1, y: 0 },
+        segmentLengthPx: 1,
+      },
+    ];
+
+    const metrics = aggregateRoiMetrics({ assignments, maskSamples: [], skeletonSamples });
+
+    expect(metrics.overall.globalAlignment).toBeCloseTo(0.6);
+    expect(metrics.overall.circularVariance).toBeCloseTo(0.4);
+    expect(metrics.overall.radialNormalAlignment).toBeCloseTo(0.6);
+  });
+
+  test("local collagen alignment stays high for spatially separated fiber directions", () => {
+    const assignments = new Map();
+    const skeletonSamples = [
+      ...[
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ].map(([x, y]) => ({ x, y, groupId: "cell", bandId: "near", orientation: { x: 1, y: 0 } })),
+      ...[
+        [80, 0],
+        [80, 1],
+        [80, 2],
+      ].map(([x, y]) => ({ x, y, groupId: "cell", bandId: "near", orientation: { x: 0, y: 1 } })),
+      ...[
+        [0, 80],
+        [1, 80],
+        [2, 80],
+      ].map(([x, y]) => ({ x, y, groupId: "cell", bandId: "near", orientation: { x: 1, y: 0 } })),
+      ...[
+        [80, 80],
+        [80, 81],
+        [80, 82],
+      ].map(([x, y]) => ({ x, y, groupId: "cell", bandId: "near", orientation: { x: 0, y: 1 } })),
+    ];
+
+    for (const sample of skeletonSamples) {
+      assignments.set(`${sample.x},${sample.y}`, { groupId: sample.groupId, bandId: sample.bandId });
+    }
+
+    const metrics = aggregateRoiMetrics({ assignments, maskSamples: [], skeletonSamples });
+
+    expect(metrics.overall.globalAlignment).toBeLessThan(0.05);
+    expect(metrics.overall.circularVariance).toBeGreaterThan(0.95);
+  });
+
+  test("global collagen alignment uses all ROI segment angles without local neighbor threshold", () => {
+    const assignments = new Map([
+      ["0,0", { groupId: "cell", bandId: "near", outwardNormal: { x: 1, y: 0 } }],
+      ["100,100", { groupId: "cell", bandId: "near", outwardNormal: { x: 1, y: 0 } }],
+    ]);
+    const skeletonSamples = [
+      { x: 0, y: 0, groupId: "cell", bandId: "near", orientation: { x: 1, y: 0 }, outwardNormal: { x: 1, y: 0 } },
+      { x: 100, y: 100, groupId: "cell", bandId: "near", orientation: { x: 1, y: 0 }, outwardNormal: { x: 1, y: 0 } },
+    ];
+
+    const metrics = aggregateRoiMetrics({ assignments, maskSamples: [], skeletonSamples });
+
+    expect(metrics.overall.globalAlignment).toBeCloseTo(1);
+    expect(metrics.overall.circularVariance).toBeCloseTo(0);
+    expect(metrics.overall.radialNormalAlignment).toBeCloseTo(1);
+  });
+
+  test("target angle alignment reports radial tangent and migration relationships on a signed scale", () => {
+    const assignments = new Map([
+      [
+        "0,0",
+        {
+          groupId: "cell",
+          bandId: "near",
+          outwardNormal: { x: 1, y: 0 },
+          tangent: { x: 0, y: 1 },
+          migrationVector: { x: 1, y: 0 },
+        },
+      ],
+      [
+        "1,0",
+        {
+          groupId: "cell",
+          bandId: "near",
+          outwardNormal: { x: 1, y: 0 },
+          tangent: { x: 0, y: 1 },
+          migrationVector: { x: 1, y: 0 },
+        },
+      ],
+      [
+        "2,0",
+        {
+          groupId: "cell",
+          bandId: "near",
+          outwardNormal: { x: 1, y: 0 },
+          tangent: { x: 0, y: 1 },
+          migrationVector: { x: 1, y: 0 },
+        },
+      ],
+    ]);
+    const skeletonSamples = [...assignments].map(([key, assignment]) => {
+      const [x, y] = key.split(",").map(Number);
+      return {
+        x,
+        y,
+        groupId: assignment.groupId,
+        bandId: assignment.bandId,
+        orientation: { x: 1, y: 0 },
+        outwardNormal: assignment.outwardNormal,
+        tangent: assignment.tangent,
+        migrationVector: assignment.migrationVector,
+      };
+    });
+
+    const metrics = aggregateRoiMetrics({ assignments, maskSamples: [], skeletonSamples });
+
+    expect(metrics.overall.radialNormalAlignment).toBeCloseTo(1);
+    expect(metrics.overall.tangentialAlignment).toBeCloseTo(-1);
+    expect(metrics.overall.migrationAlignment).toBeCloseTo(1);
+  });
+
   test("aggregateRoiMetrics allocates mask density by ROI band", () => {
     const group = square("cell", 4, 3, 6, 7);
     const roiBands = [
@@ -343,9 +577,14 @@ describe("analysis geometry", () => {
     skeleton.data[1 * 11 + 5] = 1;
     skeleton.data[2 * 11 + 5] = 1;
 
-    expect(buildSkeletonSamples({ skeleton, assignments }).map((sample) => [sample.x, sample.y])).toEqual([
-      [5, 1],
-      [5, 2],
-    ]);
+    const samples = buildSkeletonSamples({ skeleton, assignments });
+
+    expect(samples).toHaveLength(1);
+    expect(samples[0]).toMatchObject({
+      x: 5,
+      y: 2,
+      orientation: { x: 0, y: 1 },
+      segmentLengthPx: 1,
+    });
   });
 });

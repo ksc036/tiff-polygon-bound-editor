@@ -4,7 +4,7 @@ import express from "express";
 import { createStorage } from "./storage.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
 import { AnalysisError, loadAnalysis, recalculateAnalysis } from "./analysisService.js";
-import { createMaskPreview, createRoiOverlay } from "./previewLayers.js";
+import { createMaskPreview, createRoiOverlay, createSkeletonPreview } from "./previewLayers.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 
@@ -46,10 +46,12 @@ function safeErrorResponse(error) {
       INVALID_ROI_BANDS: "Invalid ROI bands.",
       MISSING_BOUNDS: "Saved bounds are required before analysis.",
       MISSING_MASK: "Mask image is required before analysis.",
+      MISSING_SKELETON: "Skeleton image is required before preview.",
       CORRUPT_BOUNDS: "Saved bounds JSON is invalid.",
       INVALID_BOUNDS: "Saved bounds are invalid.",
       INVALID_ANALYSIS: "Saved analysis JSON is invalid.",
       UNREADABLE_MASK: "Unable to read mask image.",
+      UNREADABLE_SKELETON: "Unable to read skeleton image.",
       DIMENSION_MISMATCH: "Mask dimensions do not match saved bounds.",
       CALCULATION_FAILED: "Unable to calculate analysis metrics.",
     };
@@ -259,6 +261,23 @@ export function createApp({
     }),
   );
 
+  app.get(
+    "/api/images/:id/skeleton-preview",
+    asyncRoute(async (request, response) => {
+      const preview = await createSkeletonPreview(imageStorage, request.params.id, { maxImagePixels });
+
+      response
+        .type("image/png")
+        .set({
+          "Cache-Control": "no-store",
+          "X-Image-Width": String(preview.width),
+          "X-Image-Height": String(preview.height),
+          "X-Skeleton-File": preview.skeletonFile,
+        })
+        .send(preview.buffer);
+    }),
+  );
+
   app.post(
     "/api/images/:id/roi-overlay",
     asyncRoute(async (request, response) => {
@@ -326,6 +345,7 @@ export function createApp({
       response.json(
         await recalculateAnalysis(imageStorage, request.params.id, {
           roiBands: request.body?.roiBands,
+          roiBandsByGroup: request.body?.roiBandsByGroup,
           maxImagePixels,
         }),
       );

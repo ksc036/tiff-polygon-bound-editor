@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "./App.jsx";
@@ -60,6 +60,37 @@ const savedBounds = {
   updatedAt: "2026-07-03T00:00:00.000Z",
 };
 
+const boundsWithInsideGroup = {
+  ...savedBounds,
+  groups: [
+    savedBounds.groups[0],
+    {
+      id: "group-inside",
+      name: "Inside Patch",
+      color: "#2563eb",
+      analysisMode: "inside",
+      points: [
+        { id: "inside-1", x: 60, y: 12 },
+        { id: "inside-2", x: 80, y: 12 },
+        { id: "inside-3", x: 70, y: 32 },
+      ],
+    },
+  ],
+};
+
+const boundsWithMigration = {
+  ...savedBounds,
+  groups: [
+    {
+      ...savedBounds.groups[0],
+      migrationVector: {
+        start: { x: 10, y: 12 },
+        end: { x: 40, y: 12 },
+      },
+    },
+  ],
+};
+
 const reloadedBounds = {
   ...savedBounds,
   groups: [
@@ -92,7 +123,7 @@ const legacyBounds = {
 };
 
 const savedAnalysis = {
-  schemaVersion: 2,
+  schemaVersion: 5,
   imageFolder: "plate-a",
   imageFile: "a.tif",
   boundsFile: "plate-a.bounds.json",
@@ -108,14 +139,17 @@ const savedAnalysis = {
       groupId: "group-saved",
       groupName: "Saved Tissue",
       color: "#e11d48",
+      analysisMode: "outside",
       bands: {
         near: {
           roiAreaPx: 25,
           maskPixelCount: 5,
           density: 0.2,
           globalAlignment: 0.8,
+          circularVariance: 0.2,
           radialNormalAlignment: 0.7,
           tangentialAlignment: 0.3,
+          migrationAlignment: 0.6,
           empty: false,
         },
       },
@@ -124,8 +158,10 @@ const savedAnalysis = {
         maskPixelCount: 5,
         density: 0.2,
         globalAlignment: 0.8,
+        circularVariance: 0.2,
         radialNormalAlignment: 0.7,
         tangentialAlignment: 0.3,
+        migrationAlignment: 0.6,
         empty: false,
       },
     },
@@ -135,11 +171,62 @@ const savedAnalysis = {
     maskPixelCount: 5,
     density: 0.2,
     globalAlignment: 0.8,
+    circularVariance: 0.2,
     radialNormalAlignment: 0.7,
     tangentialAlignment: 0.3,
+    migrationAlignment: 0.6,
   },
   warnings: [],
   updatedAt: "2026-07-05T00:00:00.000Z",
+};
+
+const insideAnalysis = {
+  ...savedAnalysis,
+  groups: [
+    {
+      groupId: "group-saved",
+      groupName: "Saved Tissue",
+      color: "#e11d48",
+      analysisMode: "inside",
+      area: {
+        bandId: "inside",
+        roiAreaPx: 40,
+        maskPixelCount: 10,
+        density: 0.25,
+        globalAlignment: 0.9,
+        circularVariance: 0.1,
+        radialNormalAlignment: null,
+        tangentialAlignment: null,
+        migrationAlignment: null,
+        empty: false,
+      },
+    },
+  ],
+};
+
+const twoGroupAnalysis = {
+  ...savedAnalysis,
+  groups: [
+    savedAnalysis.groups[0],
+    {
+      groupId: "group-inside",
+      groupName: "Inside Patch",
+      color: "#2563eb",
+      analysisMode: "inside",
+      area: {
+        bandId: "inside",
+        roiAreaPx: 40,
+        maskPixelCount: 10,
+        density: 0.25,
+        globalAlignment: 0.9,
+        circularVariance: 0.1,
+        radialNormalAlignment: null,
+        tangentialAlignment: null,
+        migrationAlignment: null,
+        empty: false,
+      },
+    },
+  ],
 };
 
 function jsonResponse(body, init = {}) {
@@ -277,7 +364,28 @@ describe("App", () => {
     mockApi({ rootImages: [] });
     render(<App />);
     expect(screen.getByRole("button", { name: /find root/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /set root/i })).toBeInTheDocument();
     expect(screen.getByLabelText(/root path/i)).toBeInTheDocument();
+  });
+
+  test("sets a typed root again after an existing root is loaded", async () => {
+    const { fetchMock } = mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const rootPathInput = screen.getByLabelText(/root path/i);
+    fireEvent.change(rootPathInput, { target: { value: "/new/root" } });
+    fireEvent.click(screen.getByRole("button", { name: /set root/i }));
+
+    await waitFor(() => expect(rootPathInput).toHaveValue("/typed/root"));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/root",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ rootPath: "/new/root" }),
+      }),
+    );
   });
 
   test("loads saved bounds when opening an image", async () => {
@@ -290,6 +398,100 @@ describe("App", () => {
     expect(screen.getByLabelText("Vertex point-1")).toHaveAttribute("cx", "10");
   });
 
+  test("defaults loaded groups to outside mode and saves selected inside mode", async () => {
+    const { fetchMock } = mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    expect(screen.getByRole("button", { name: "Outside ROI" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Inside area" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/bounds",
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    const saveCall = fetchMock.mock.calls.find(([url, options]) => url === "/api/images/scan-a/bounds" && options?.method === "PUT");
+    expect(JSON.parse(saveCall[1].body).groups[0].analysisMode).toBe("inside");
+  });
+
+  test("creates a group when choosing an analysis mode before any group exists", async () => {
+    const { fetchMock } = mockApi({ boundsQueue: [emptyBounds] });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText(/no active group/i).length).toBeGreaterThan(0));
+
+    fireEvent.click(screen.getByRole("button", { name: "Inside area" }));
+
+    expect(await screen.findByRole("button", { name: "Group 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Inside area" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/bounds",
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    const saveCall = fetchMock.mock.calls.find(([url, options]) => url === "/api/images/scan-a/bounds" && options?.method === "PUT");
+    expect(JSON.parse(saveCall[1].body).groups[0]).toMatchObject({
+      name: "Group 1",
+      analysisMode: "inside",
+    });
+  });
+
+  test("sets a group migration vector from two stage clicks and saves it", async () => {
+    const { fetchMock } = mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const stage = screen.getByTestId("image-stage");
+    const canvas = screen.getByLabelText("raw16 image");
+    vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 100,
+      bottom: 80,
+      width: 100,
+      height: 80,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+    vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 100,
+      bottom: 80,
+      width: 100,
+      height: 80,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /set migration/i }));
+    fireEvent.click(stage, { clientX: 10, clientY: 12 });
+    fireEvent.click(stage, { clientX: 40, clientY: 12 });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/bounds",
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    const saveCall = fetchMock.mock.calls.find(([url, options]) => url === "/api/images/scan-a/bounds" && options?.method === "PUT");
+    expect(JSON.parse(saveCall[1].body).groups[0].migrationVector).toEqual({
+      start: { x: 10, y: 12 },
+      end: { x: 40, y: 12 },
+    });
+  });
+
   test("loads saved analysis after opening an image", async () => {
     mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
 
@@ -298,9 +500,107 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
     expect(screen.getByText("plate-a.png")).toBeInTheDocument();
     expect(screen.getAllByText("0.2000").length).toBeGreaterThan(0);
+    expect(screen.getByRole("columnheader", { name: "Mode" })).toBeInTheDocument();
+    expect(screen.getAllByText("Outside").length).toBeGreaterThan(0);
     expect(screen.getByRole("columnheader", { name: "Pixels" })).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Length" })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: "Coverage" })).not.toBeInTheDocument();
+  });
+
+  test("hides active group drawing and stats with client-side toggles only", async () => {
+    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
+    expect(screen.getByLabelText("Vertex point-1")).toBeInTheDocument();
+    expect(screen.getAllByText("Saved Tissue").length).toBeGreaterThan(1);
+    expect(screen.getByLabelText("Saved Tissue")).toHaveTextContent(/Draw on/);
+    expect(screen.getByLabelText("Saved Tissue")).toHaveTextContent(/Stats on/);
+
+    fireEvent.click(screen.getByLabelText("Draw active group"));
+    expect(screen.queryByLabelText("Vertex point-1")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Saved Tissue").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Saved Tissue")).toHaveTextContent(/Draw off/);
+
+    fireEvent.click(screen.getByLabelText("Show active group stats"));
+    expect(screen.queryByText("0.8000")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Saved Tissue")).toHaveTextContent(/Stats off/);
+    expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument();
+  });
+
+  test("toggles all group display and one group display directly from the group list", async () => {
+    mockApi({
+      boundsQueue: [boundsWithInsideGroup],
+      analysisResponse: { analysis: twoGroupAnalysis, hasAnalysis: true },
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
+    expect(screen.getByLabelText("Vertex point-1")).toBeInTheDocument();
+    expect(screen.getByLabelText("Vertex inside-1")).toBeInTheDocument();
+    expect(within(screen.getByRole("table")).getAllByText("Saved Tissue").length).toBeGreaterThan(0);
+    expect(within(screen.getByRole("table")).getAllByText("Inside Patch").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide all group display" }));
+
+    expect(screen.queryByLabelText("Vertex point-1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Vertex inside-1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Saved Tissue")).toHaveTextContent(/Draw off/);
+    expect(screen.getByLabelText("Inside Patch")).toHaveTextContent(/Stats off/);
+    expect(within(screen.getByRole("table")).queryAllByText("Saved Tissue")).toHaveLength(0);
+    expect(within(screen.getByRole("table")).queryAllByText("Inside Patch")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show Inside Patch display" }));
+
+    expect(screen.queryByLabelText("Vertex point-1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Vertex inside-1")).toBeInTheDocument();
+    expect(screen.getByLabelText("Saved Tissue")).toHaveTextContent(/Draw off/);
+    expect(screen.getByLabelText("Inside Patch")).toHaveTextContent(/Draw on/);
+    expect(within(screen.getByRole("table")).queryAllByText("Saved Tissue")).toHaveLength(0);
+    expect(within(screen.getByRole("table")).getAllByText("Inside Patch").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show all group display" }));
+
+    expect(screen.getByLabelText("Vertex point-1")).toBeInTheDocument();
+    expect(screen.getByLabelText("Vertex inside-1")).toBeInTheDocument();
+    expect(within(screen.getByRole("table")).getAllByText("Saved Tissue").length).toBeGreaterThan(0);
+    expect(within(screen.getByRole("table")).getAllByText("Inside Patch").length).toBeGreaterThan(0);
+  });
+
+  test("renders migration vector as an arrow and hides it independently", async () => {
+    mockApi({ boundsQueue: [boundsWithMigration] });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const vectorLine = screen.getByLabelText("Migration vector Saved Tissue");
+    expect(vectorLine).toHaveAttribute("marker-end", expect.stringContaining("url("));
+    expect(screen.getByLabelText("Migration vector start Saved Tissue")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Migration vector end Saved Tissue")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Show migration vector"));
+
+    expect(screen.queryByLabelText("Migration vector Saved Tissue")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Vertex point-1")).toBeInTheDocument();
+  });
+
+  test("renders inside analysis as a single area row with no radial or tangent values", async () => {
+    mockApi({ analysisResponse: { analysis: insideAnalysis, hasAnalysis: true } });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
+    expect(screen.getByRole("columnheader", { name: "Mode" })).toBeInTheDocument();
+    expect(screen.getByText("Inside")).toBeInTheDocument();
+    expect(screen.getByText("영역")).toBeInTheDocument();
+    expect(screen.getByText("40")).toBeInTheDocument();
+    expect(screen.getByText("10")).toBeInTheDocument();
+    expect(screen.getByText("0.2500")).toBeInTheDocument();
+    expect(screen.getByText("0.9000")).toBeInTheDocument();
+    const row = screen.getByText("영역").closest("tr");
+    expect(row).toHaveTextContent(/-\s*-/);
   });
 
   test("shows metric meaning when hovering an analysis header", async () => {
@@ -314,6 +614,11 @@ describe("App", () => {
     fireEvent.mouseEnter(screen.getByRole("button", { name: "Density" }));
 
     expect(screen.getByRole("tooltip")).toHaveTextContent(/mask pixels divided by roi area/i);
+
+    fireEvent.mouseLeave(screen.getByRole("button", { name: "Density" }));
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "Alignment" }));
+
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/roi-wide nematic order parameter/i);
   });
 
   test("recalculates analysis with edited contiguous ROI bands", async () => {
@@ -337,7 +642,170 @@ describe("App", () => {
       { id: "mid", label: "중간", fromPx: 18, toPx: 50 },
       { id: "far", label: "멀리", fromPx: 50, toPx: 100 },
     ]);
+    expect(JSON.parse(call[1].body).roiBandsByGroup).toEqual({
+      "group-saved": [
+        { id: "near", label: "가까움", fromPx: 0, toPx: 18 },
+        { id: "mid", label: "중간", fromPx: 18, toPx: 50 },
+        { id: "far", label: "멀리", fromPx: 50, toPx: 100 },
+      ],
+    });
     expect(await screen.findByText(/analysis recalculated/i)).toBeInTheDocument();
+  });
+
+  test("removes manual analysis loading and collapses point order and ROI settings from panel headers", async () => {
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    expect(screen.queryByRole("button", { name: /load analysis/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /recalculate/i })).toBeInTheDocument();
+
+    expect(screen.queryByRole("button", { name: /hide point order/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /show point order/i })).not.toBeInTheDocument();
+    const pointOrderToggle = screen.getByRole("button", { name: "Toggle point order panel" });
+
+    expect(screen.getByRole("button", { name: "Point 1 point-1" })).toBeInTheDocument();
+    expect(pointOrderToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(pointOrderToggle);
+    expect(screen.queryByRole("button", { name: "Point 1 point-1" })).not.toBeInTheDocument();
+    expect(pointOrderToggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(pointOrderToggle);
+    expect(screen.getByRole("button", { name: "Point 1 point-1" })).toBeInTheDocument();
+
+    expect(screen.queryByRole("button", { name: /hide roi settings/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /show roi settings/i })).not.toBeInTheDocument();
+    const roiSettingsToggle = screen.getByRole("button", { name: "Toggle outside ROI settings" });
+
+    expect(screen.getByLabelText("가까움 upper")).toBeInTheDocument();
+    expect(roiSettingsToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(roiSettingsToggle);
+    expect(screen.queryByLabelText("가까움 upper")).not.toBeInTheDocument();
+    expect(roiSettingsToggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(roiSettingsToggle);
+    expect(screen.getByLabelText("가까움 upper")).toBeInTheDocument();
+  });
+
+  test("collapsing bottom panels gives the image stage more vertical budget", async () => {
+    mockApi();
+
+    const { container } = render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const stageShell = container.querySelector(".stage-shell");
+    expect(stageShell).toHaveAttribute("data-point-order-open", "true");
+    expect(stageShell).toHaveAttribute("data-roi-settings-open", "true");
+    expect(stageShell.style.getPropertyValue("--stage-collapsed-space")).toBe("0px");
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle point order panel" }));
+
+    expect(stageShell).toHaveAttribute("data-point-order-open", "false");
+    expect(container.querySelector(".point-order-panel")).toHaveClass("is-collapsed");
+    expect(stageShell.style.getPropertyValue("--stage-collapsed-space")).toBe("24px");
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle outside ROI settings" }));
+
+    expect(stageShell).toHaveAttribute("data-roi-settings-open", "false");
+    expect(container.querySelector(".analysis-panel")).toHaveClass("roi-settings-collapsed");
+    expect(stageShell.style.getPropertyValue("--stage-collapsed-space")).toBe("80px");
+  });
+
+  test("resizes the analysis panel by dragging the lower splitter", async () => {
+    mockApi();
+
+    const { container } = render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const stageShell = container.querySelector(".stage-shell");
+    const analysisPanel = screen.getByLabelText("Analysis");
+    const resizeHandle = screen.getByRole("button", { name: "Resize analysis panel" });
+
+    expect(stageShell.style.getPropertyValue("--analysis-panel-height")).toBe("210px");
+    expect(stageShell.style.getPropertyValue("--analysis-panel-stage-adjust")).toBe("0px");
+    expect(analysisPanel).toHaveStyle({ height: "210px" });
+
+    fireEvent(resizeHandle, new MouseEvent("pointerdown", { bubbles: true, clientY: 500 }));
+    fireEvent(window, new MouseEvent("pointermove", { bubbles: true, clientY: 420 }));
+    fireEvent(window, new MouseEvent("pointerup", { bubbles: true }));
+
+    expect(stageShell.style.getPropertyValue("--analysis-panel-height")).toBe("290px");
+    expect(stageShell.style.getPropertyValue("--analysis-panel-stage-adjust")).toBe("-80px");
+    expect(analysisPanel).toHaveStyle({ height: "290px" });
+    expect(localStorage.getItem("raw16-editor-analysis-panel-height")).toBe("290");
+  });
+
+  test("sizes the image stage from the available frame instead of a fixed viewport estimate", async () => {
+    let resizeCallback = null;
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback) {
+          resizeCallback = callback;
+        }
+
+        observe() {}
+
+        disconnect() {}
+      },
+    );
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const frame = screen.getByTestId("image-stage-frame");
+    const stage = screen.getByTestId("image-stage");
+
+    act(() => {
+      resizeCallback([{ target: frame, contentRect: { width: 1000, height: 500 } }]);
+    });
+
+    expect(stage).toHaveStyle({ width: "625px", height: "500px" });
+  });
+
+  test("deletes a point from the point order panel after hovering it", async () => {
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const pointToken = screen.getByRole("button", { name: "Point 1 point-1" });
+    expect(screen.queryByRole("button", { name: "Delete point-1" })).not.toBeInTheDocument();
+
+    fireEvent.mouseEnter(pointToken);
+    fireEvent.click(screen.getByRole("button", { name: "Delete point-1" }));
+
+    expect(screen.queryByLabelText("Vertex point-1")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Point 1 point-1" })).not.toBeInTheDocument();
+    expect(screen.getByText("2 points")).toBeInTheDocument();
+  });
+
+  test("keeps ROI limits per outside group and hides them for inside groups", async () => {
+    const { fetchMock } = mockApi({ boundsQueue: [boundsWithInsideGroup] });
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    fireEvent.change(screen.getByLabelText("가까움 upper"), { target: { value: "18" } });
+    fireEvent.blur(screen.getByLabelText("가까움 upper"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Inside Patch" }));
+    expect(screen.queryByLabelText("가까움 upper")).not.toBeInTheDocument();
+    expect(screen.getByText(/inside groups do not use outside roi settings/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Saved Tissue" }));
+    expect(screen.getByLabelText("가까움 upper")).toHaveValue(18);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/bounds",
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    const saveCall = fetchMock.mock.calls.find(([url, options]) => url === "/api/images/scan-a/bounds" && options?.method === "PUT");
+    expect(JSON.parse(saveCall[1].body).groups[0].roiLimits).toEqual({ near: 18, mid: 50, far: 100 });
+    expect(JSON.parse(saveCall[1].body).groups[1].roiLimits).toBeUndefined();
   });
 
   test("switches the image stage between original and mask preview", async () => {
@@ -351,6 +819,22 @@ describe("App", () => {
 
     expect(screen.getByRole("button", { name: "Mask" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByAltText("mask preview")).toHaveAttribute("src", "/api/images/scan-a/mask-preview");
+  });
+
+  test("shows mask and skeleton together in the fiber QC layer", async () => {
+    mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Fiber QC" }));
+
+    expect(screen.getByRole("button", { name: "Fiber QC" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByAltText("mask preview")).toHaveAttribute("src", "/api/images/scan-a/mask-preview");
+    expect(screen.getByAltText("skeleton preview")).toHaveAttribute(
+      "src",
+      "/api/images/scan-a/skeleton-preview",
+    );
   });
 
   test("renders ROI preview locally without requesting a server overlay", async () => {

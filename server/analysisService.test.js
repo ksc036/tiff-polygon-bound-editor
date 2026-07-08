@@ -16,7 +16,9 @@ async function createTempRoot() {
 
 async function writeImage(rootDir, folderName, imageName = "frame001.tif") {
   const imageDir = path.join(rootDir, folderName, "image");
+  const maskDir = path.join(rootDir, folderName, "mask");
   await mkdir(imageDir, { recursive: true });
+  await mkdir(maskDir, { recursive: true });
   await sharp(Buffer.from([0, 1, 2, 3]), { raw: { width: 2, height: 2, channels: 1 } })
     .tiff({ compression: "none" })
     .toFile(path.join(imageDir, imageName));
@@ -62,6 +64,21 @@ function squareGroup(id = "cell") {
   };
 }
 
+function squareGroupAt(id, minX, minY, maxX, maxY, overrides = {}) {
+  return {
+    id,
+    name: id,
+    color: "#44aa99",
+    points: [
+      { id: `${id}-1`, x: minX, y: minY },
+      { id: `${id}-2`, x: maxX, y: minY },
+      { id: `${id}-3`, x: maxX, y: maxY },
+      { id: `${id}-4`, x: minX, y: maxY },
+    ],
+    ...overrides,
+  };
+}
+
 function boundsPayload(overrides = {}) {
   return {
     schemaVersion: 1,
@@ -95,8 +112,10 @@ function metric(overrides = {}) {
     density: null,
     globalAlignment: null,
     globalOrientationDeg: null,
+    circularVariance: null,
     radialNormalAlignment: null,
     tangentialAlignment: null,
+    migrationAlignment: null,
     orientationDispersion: null,
     empty: true,
     ...overrides,
@@ -161,7 +180,7 @@ describe("recalculateAnalysis", () => {
 
     expect(result.hasAnalysis).toBe(true);
     expect(result.analysis).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 5,
       imageFolder: folderName,
       imageFile: "frame001.tif",
       boundsFile: `${folderName}.bounds.json`,
@@ -177,6 +196,7 @@ describe("recalculateAnalysis", () => {
           groupId: "cell",
           groupName: "Cell",
           color: "#44aa99",
+          analysisMode: "outside",
           bands: {
             near: expect.objectContaining({ bandId: "near", maskPixelCount: expect.any(Number) }),
             mid: expect.objectContaining({ bandId: "mid" }),
@@ -206,6 +226,126 @@ describe("recalculateAnalysis", () => {
     const { skeletonPath, analysisPath } = storage.imagePaths(folderName);
     await expect(access(skeletonPath)).resolves.toBeUndefined();
     await expect(JSON.parse(await readFile(analysisPath, "utf8"))).toEqual(result.analysis);
+  });
+
+  test("calculates inside groups as a single polygon area with global alignment only", async () => {
+    const { rootDir, folderName, storage } = await setupStorage();
+    await writeBounds(
+      rootDir,
+      folderName,
+      boundsPayload({
+        width: 12,
+        height: 8,
+        groups: [
+          squareGroupAt("outside-cell", 7, 2, 9, 4, { name: "Outside Cell", analysisMode: "outside" }),
+          squareGroupAt("inside-region", 2, 2, 4, 4, {
+            name: "Inside Region",
+            analysisMode: "inside",
+            migrationVector: { start: { x: 2, y: 3 }, end: { x: 4, y: 3 } },
+          }),
+        ],
+      }),
+    );
+    await writeMask(rootDir, folderName, "frame001.png", {
+      width: 12,
+      height: 8,
+      foreground: [
+        [2, 3],
+        [3, 3],
+        [4, 3],
+      ],
+    });
+
+    const result = await recalculateAnalysis(storage, folderName, {
+      roiBands: [
+        { id: "near", label: "Near", fromPx: 0, toPx: 2 },
+        { id: "mid", label: "Mid", fromPx: 2, toPx: 4 },
+        { id: "far", label: "Far", fromPx: 4, toPx: 6 },
+      ],
+    });
+
+    expect(result.analysis.schemaVersion).toBe(5);
+    expect(result.analysis.groups).toEqual([
+      expect.objectContaining({
+        groupId: "outside-cell",
+        groupName: "Outside Cell",
+        analysisMode: "outside",
+        bands: expect.objectContaining({
+          near: expect.objectContaining({ bandId: "near" }),
+        }),
+        allBands: expect.any(Object),
+      }),
+      expect.objectContaining({
+        groupId: "inside-region",
+        groupName: "Inside Region",
+        analysisMode: "inside",
+        area: expect.objectContaining({
+          bandId: "inside",
+          roiAreaPx: 9,
+          maskPixelCount: 3,
+          density: 1 / 3,
+          globalAlignment: 1,
+          circularVariance: 0,
+          radialNormalAlignment: null,
+          tangentialAlignment: null,
+          migrationAlignment: 1,
+        }),
+      }),
+    ]);
+    expect(result.analysis.groups[1]).not.toHaveProperty("bands");
+    expect(result.analysis.groups[1]).not.toHaveProperty("allBands");
+  });
+
+  test("uses per-group outside ROI bands when recalculating analysis", async () => {
+    const { rootDir, folderName, storage } = await setupStorage();
+    await writeBounds(
+      rootDir,
+      folderName,
+      boundsPayload({
+        width: 20,
+        height: 10,
+        groups: [
+          squareGroupAt("small-roi", 3, 3, 5, 5, { name: "Small ROI", analysisMode: "outside" }),
+          squareGroupAt("wide-roi", 12, 3, 14, 5, { name: "Wide ROI", analysisMode: "outside" }),
+        ],
+      }),
+    );
+    await writeMask(rootDir, folderName, "frame001.png", { width: 20, height: 10, foreground: [[3, 2], [12, 1]] });
+
+    const result = await recalculateAnalysis(storage, folderName, {
+      roiBands: [
+        { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+        { id: "mid", label: "Mid", fromPx: 1, toPx: 2 },
+        { id: "far", label: "Far", fromPx: 2, toPx: 3 },
+      ],
+      roiBandsByGroup: {
+        "small-roi": [
+          { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+          { id: "mid", label: "Mid", fromPx: 1, toPx: 1.5 },
+          { id: "far", label: "Far", fromPx: 1.5, toPx: 2 },
+        ],
+        "wide-roi": [
+          { id: "near", label: "Near", fromPx: 0, toPx: 2 },
+          { id: "mid", label: "Mid", fromPx: 2, toPx: 4 },
+          { id: "far", label: "Far", fromPx: 4, toPx: 6 },
+        ],
+      },
+    });
+
+    const small = result.analysis.groups.find((group) => group.groupId === "small-roi");
+    const wide = result.analysis.groups.find((group) => group.groupId === "wide-roi");
+
+    expect(small.roiBands).toEqual([
+      { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+      { id: "mid", label: "Mid", fromPx: 1, toPx: 1.5 },
+      { id: "far", label: "Far", fromPx: 1.5, toPx: 2 },
+    ]);
+    expect(wide.roiBands).toEqual([
+      { id: "near", label: "Near", fromPx: 0, toPx: 2 },
+      { id: "mid", label: "Mid", fromPx: 2, toPx: 4 },
+      { id: "far", label: "Far", fromPx: 4, toPx: 6 },
+    ]);
+    expect(wide.allBands.roiAreaPx).toBeGreaterThan(small.allBands.roiAreaPx);
   });
 
   test("prefers PNG over TIF and falls back to TIF when PNG is missing", async () => {
@@ -348,7 +488,7 @@ describe("recalculateAnalysis", () => {
     await writeFile(
       analysisPath,
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 4,
         imageFolder: folderName,
         imageFile: "frame001.tif",
         boundsFile: `${folderName}.bounds.json`,
@@ -380,7 +520,7 @@ describe("recalculateAnalysis", () => {
     const { rootDir, folderName, storage } = await setupStorage();
     const { analysisDir, analysisPath } = storage.imagePaths(folderName);
     const saved = {
-      schemaVersion: 2,
+      schemaVersion: 5,
       imageFolder: path.join(rootDir, folderName),
       imageFile: path.join(rootDir, folderName, "image", "frame001.tif"),
       boundsFile: path.join(rootDir, folderName, "bound", `${folderName}.bounds.json`),
@@ -404,6 +544,7 @@ describe("recalculateAnalysis", () => {
           groupId: "cell",
           groupName: "Cell",
           color: null,
+          analysisMode: "outside",
           bands: { near: metric({ bandId: "near" }) },
           allBands: { ...metric(), skeletonLengthPx: 10, coverage: 0.5, endpointCount: 2, branchpointCount: 1 },
           absolutePath: path.join(rootDir, "leak"),
@@ -421,7 +562,7 @@ describe("recalculateAnalysis", () => {
 
     expect(result.hasAnalysis).toBe(true);
     expect(result.analysis).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 5,
       imageFolder: folderName,
       imageFile: "frame001.tif",
       boundsFile: `${folderName}.bounds.json`,
@@ -439,6 +580,8 @@ describe("recalculateAnalysis", () => {
           groupId: "cell",
           groupName: "Cell",
           color: null,
+          analysisMode: "outside",
+          migrationVector: null,
           bands: { near: metric({ bandId: "near" }) },
           allBands: metric(),
         },
@@ -455,7 +598,7 @@ describe("recalculateAnalysis", () => {
     const { folderName, storage } = await setupStorage();
     const { analysisDir, analysisPath } = storage.imagePaths(folderName);
     await mkdir(analysisDir, { recursive: true });
-    await writeFile(analysisPath, JSON.stringify({ schemaVersion: 2, groups: "not an array" }));
+    await writeFile(analysisPath, JSON.stringify({ schemaVersion: 5, groups: "not an array" }));
 
     await expectRejectCode(loadAnalysis(storage, folderName), "INVALID_ANALYSIS");
   });

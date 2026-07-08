@@ -3,7 +3,6 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-const SEQUENCE_FOLDER_PATTERN = /^(.+)_T(\d+)$/;
 const DEFAULT_CONNECTION_MODE = "input-order-cycle";
 const SETTINGS_FILE_NAME = "settings.json";
 
@@ -12,11 +11,7 @@ function isTiffFile(fileName) {
 }
 
 function compareImageRecords(left, right) {
-  return (
-    left.sequenceName.localeCompare(right.sequenceName) ||
-    left.tNumber - right.tNumber ||
-    left.imageFolder.localeCompare(right.imageFolder)
-  );
+  return left.imageFolder.localeCompare(right.imageFolder, undefined, { numeric: true, sensitivity: "base" });
 }
 
 function scanRoot(rootDir) {
@@ -31,16 +26,11 @@ function scanRoot(rootDir) {
   const images = readdirSync(rootDir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .flatMap((entry) => {
-      const match = entry.name.match(SEQUENCE_FOLDER_PATTERN);
-
-      if (!match) {
-        return [];
-      }
-
       const folderPath = path.join(rootDir, entry.name);
       const imageDir = path.join(folderPath, "image");
+      const maskDir = path.join(folderPath, "mask");
 
-      if (!existsSync(imageDir) || !statSync(imageDir).isDirectory()) {
+      if (!existsSync(imageDir) || !statSync(imageDir).isDirectory() || !existsSync(maskDir) || !statSync(maskDir).isDirectory()) {
         return [];
       }
 
@@ -57,8 +47,6 @@ function scanRoot(rootDir) {
           id: entry.name,
           imageFolder: entry.name,
           imageFile,
-          sequenceName: match[1],
-          tNumber: Number(match[2]),
           folderPath,
           imageDir,
           imagePath: path.join(imageDir, imageFile),
@@ -68,14 +56,14 @@ function scanRoot(rootDir) {
     .sort(compareImageRecords);
 
   if (images.length === 0) {
-    throw new Error(`Storage root has no image sequence folders: ${rootDir}`);
+    throw new Error(`Storage root has no image folders: ${rootDir}`);
   }
 
   return images;
 }
 
 function publicImage(image) {
-  const { sequenceName, tNumber, folderPath, imageDir, imagePath, ...visibleImage } = image;
+  const { folderPath, imageDir, imagePath, ...visibleImage } = image;
   return { ...visibleImage };
 }
 
