@@ -671,6 +671,25 @@ input[type="range"] {
   margin-right: 2px;
 }
 
+.density-calibration {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #aab7c3;
+}
+
+.density-calibration label {
+  display: inline-grid;
+  grid-template-columns: auto 112px;
+  align-items: center;
+  gap: 4px;
+}
+
+.density-calibration input {
+  min-height: 26px;
+  padding: 0 7px;
+}
+
 .compact-panel-toggle {
   display: inline-grid;
   grid-template-columns: 16px auto;

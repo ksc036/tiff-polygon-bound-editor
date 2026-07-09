@@ -418,6 +418,38 @@ describe("App", () => {
     expect(JSON.parse(saveCall[1].body).groups[0].analysisMode).toBe("inside");
   });
 
+  test("sets the active group to full image inside analysis", async () => {
+    const { fetchMock } = mockApi();
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Full image inside" }));
+
+    expect(screen.getByRole("button", { name: "Inside area" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Saved Tissue")).toHaveTextContent("4 / Inside area");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/bounds",
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+    const saveCall = fetchMock.mock.calls.find(([url, options]) => url === "/api/images/scan-a/bounds" && options?.method === "PUT");
+    expect(JSON.parse(saveCall[1].body).groups[0]).toMatchObject({
+      name: "Saved Tissue",
+      analysisMode: "inside",
+      points: [
+        { id: "point-1", x: 0, y: 0 },
+        { id: "point-2", x: 99, y: 0 },
+        { id: "point-3", x: 99, y: 79 },
+        { id: "point-4", x: 0, y: 79 },
+      ],
+    });
+  });
+
   test("creates a group when choosing an analysis mode before any group exists", async () => {
     const { fetchMock } = mockApi({ boundsQueue: [emptyBounds] });
 
@@ -610,25 +642,49 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "ROI Alignment" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pixel Density" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Radial Alignment" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Circumferential Alignment" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Migration Axis Alignment" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Circ Var" })).not.toBeInTheDocument();
 
-    fireEvent.mouseEnter(screen.getByRole("button", { name: "Density" }));
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "Pixel Density" }));
 
     expect(screen.getByRole("tooltip")).toHaveTextContent(/mask pixels divided by roi area/i);
 
-    fireEvent.mouseLeave(screen.getByRole("button", { name: "Density" }));
-    fireEvent.mouseEnter(screen.getByRole("button", { name: "Alignment" }));
+    fireEvent.mouseLeave(screen.getByRole("button", { name: "Pixel Density" }));
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "ROI Alignment" }));
 
     expect(screen.getByRole("tooltip")).toHaveTextContent(/roi-wide nematic order parameter/i);
   });
 
-  test("recalculates analysis with edited contiguous ROI bands", async () => {
+  test("derives estimated collagen density from editable pixel density calibration", async () => {
+    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
+
+    expect(screen.getByRole("button", { name: "Estimated Collagen Density" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Density calibration a")).toHaveValue(0.069676956982087);
+    expect(screen.getByLabelText("Density calibration b")).toHaveValue(0.067893820336777);
+    expect(within(screen.getByRole("table")).getAllByText("1.8960 mg/ml").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("Density calibration a"), { target: { value: "0.1" } });
+    fireEvent.change(screen.getByLabelText("Density calibration b"), { target: { value: "0.05" } });
+
+    expect(within(screen.getByRole("table")).getAllByText("1.5000 mg/ml").length).toBeGreaterThan(0);
+  });
+
+  test("calculates analysis after automatically saving edited bounds", async () => {
     const { fetchMock } = mockApi({ analysisResponse: { analysis: null, hasAnalysis: false } });
 
     render(<App />);
     await screen.findByRole("button", { name: "Saved Tissue" });
 
     fireEvent.change(screen.getByLabelText("가까움 upper"), { target: { value: "18" } });
-    fireEvent.click(screen.getByRole("button", { name: /recalculate/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Calculate" }));
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -636,6 +692,18 @@ describe("App", () => {
         expect.objectContaining({ method: "POST" }),
       ),
     );
+    const saveIndex = fetchMock.mock.calls.findIndex(
+      ([url, options]) => url === "/api/images/scan-a/bounds" && options?.method === "PUT",
+    );
+    const analysisIndex = fetchMock.mock.calls.findIndex(
+      ([url, options]) => url === "/api/images/scan-a/analysis/recalculate" && options?.method === "POST",
+    );
+    expect(saveIndex).toBeGreaterThan(-1);
+    expect(analysisIndex).toBeGreaterThan(saveIndex);
+
+    const saveCall = fetchMock.mock.calls[saveIndex];
+    expect(JSON.parse(saveCall[1].body).groups[0].roiLimits).toEqual({ near: 18, mid: 50, far: 100 });
+
     const call = fetchMock.mock.calls.find(([url]) => url === "/api/images/scan-a/analysis/recalculate");
     expect(JSON.parse(call[1].body).roiBands).toEqual([
       { id: "near", label: "가까움", fromPx: 0, toPx: 18 },
@@ -649,7 +717,7 @@ describe("App", () => {
         { id: "far", label: "멀리", fromPx: 50, toPx: 100 },
       ],
     });
-    expect(await screen.findByText(/analysis recalculated/i)).toBeInTheDocument();
+    expect(await screen.findByText(/analysis calculated/i)).toBeInTheDocument();
   });
 
   test("removes manual analysis loading and collapses point order and ROI settings from panel headers", async () => {
@@ -659,7 +727,8 @@ describe("App", () => {
     await screen.findByRole("button", { name: "Saved Tissue" });
 
     expect(screen.queryByRole("button", { name: /load analysis/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /recalculate/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Calculate" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Recalculate" })).not.toBeInTheDocument();
 
     expect(screen.queryByRole("button", { name: /hide point order/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /show point order/i })).not.toBeInTheDocument();

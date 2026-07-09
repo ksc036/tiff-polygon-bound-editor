@@ -11,6 +11,7 @@ import {
   moveNearestPoint,
   clearGroupMigrationVector,
   setGroupAnalysisMode,
+  setGroupToFullImageInside,
   setGroupMigrationVector,
 } from "./editorState.js";
 
@@ -73,6 +74,34 @@ describe("editor state", () => {
 
     const unchanged = setGroupAnalysisMode(bounds, "group-1", "invalid");
     expect(unchanged).toBe(bounds);
+  });
+
+  test("sets a group to full image inside bounds", () => {
+    const bounds = addPoint(
+      addGroup(
+        createEmptyBounds({
+          folder: "sample-folder",
+          file: "image.png",
+          width: 100,
+          height: 80,
+        }),
+      ),
+      "group-1",
+      { x: 12.5, y: 19.25 },
+    );
+
+    const updated = setGroupToFullImageInside(bounds, "group-1", { width: 100, height: 80 });
+
+    expect(updated.groups[0]).toMatchObject({
+      analysisMode: "inside",
+      points: [
+        { id: "point-1", x: 0, y: 0 },
+        { id: "point-2", x: 99, y: 0 },
+        { id: "point-3", x: 99, y: 79 },
+        { id: "point-4", x: 0, y: 79 },
+      ],
+    });
+    expect(bounds.groups[0].points).toEqual([{ id: "point-1", x: 12.5, y: 19.25 }]);
   });
 
   test("sets clears and clamps group migration vectors", () => {

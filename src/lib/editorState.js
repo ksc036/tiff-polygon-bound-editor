@@ -96,6 +96,42 @@ export function setGroupAnalysisMode(bounds, groupId, analysisMode) {
   };
 }
 
+export function setGroupToFullImageInside(bounds, groupId, image) {
+  const width = Number(image?.width);
+  const height = Number(image?.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return bounds;
+  }
+
+  const group = bounds.groups.find((candidate) => candidate.id === groupId);
+  if (!group) {
+    return bounds;
+  }
+
+  const right = Math.max(0, width - 1);
+  const bottom = Math.max(0, height - 1);
+  const points = [
+    { id: "point-1", x: 0, y: 0 },
+    { id: "point-2", x: right, y: 0 },
+    { id: "point-3", x: right, y: bottom },
+    { id: "point-4", x: 0, y: bottom },
+  ];
+
+  return {
+    ...bounds,
+    groups: bounds.groups.map((group) =>
+      group.id === groupId
+        ? {
+            ...group,
+            analysisMode: "inside",
+            roiLimits: undefined,
+            points,
+          }
+        : group,
+    ),
+  };
+}
+
 export function renameGroup(bounds, groupId, name) {
   return {
     ...bounds,

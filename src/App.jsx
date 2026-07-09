@@ -13,6 +13,7 @@ import {
   movePointOrder,
   renameGroup,
   setGroupAnalysisMode,
+  setGroupToFullImageInside,
   setGroupMigrationVector,
   setGroupRoiLimits,
 } from "./lib/editorState.js";
@@ -37,6 +38,8 @@ const ANALYSIS_PANEL_HEIGHT_KEY = "raw16-editor-analysis-panel-height";
 const DEFAULT_ANALYSIS_PANEL_HEIGHT = 210;
 const MIN_ANALYSIS_PANEL_HEIGHT = 120;
 const MAX_ANALYSIS_PANEL_HEIGHT = 520;
+const DEFAULT_COLLAGEN_DENSITY_SLOPE = 0.069676956982087;
+const DEFAULT_COLLAGEN_DENSITY_INTERCEPT = 0.067893820336777;
 const ANALYSIS_MODE_LABELS = { outside: "Outside ROI", inside: "Inside area" };
 const ANALYSIS_COLUMNS = [
   {
@@ -53,38 +56,39 @@ const ANALYSIS_COLUMNS = [
   },
   {
     key: "density",
-    label: "Density",
+    label: "Pixel Density",
     help: "Mask pixels divided by ROI area.",
     format: formatMetric,
   },
   {
+    key: "estimatedCollagenDensity",
+    label: "Estimated Collagen Density",
+    help: "Estimated collagen density in mg/ml, calculated as x = (Pixel Density - b) / a.",
+    format: formatCollagenDensity,
+    value: (metrics, densityCalibration) => estimateCollagenDensity(metrics.density, densityCalibration),
+  },
+  {
     key: "globalAlignment",
-    label: "Alignment",
+    label: "ROI Alignment",
     help: "ROI-wide nematic order parameter from all fiber segment angles. Higher means angles concentrate around one axis.",
     format: formatMetric,
   },
   {
-    key: "circularVariance",
-    label: "Circ Var",
-    help: "Circular variance, calculated as 1 minus Alignment. Lower means stronger alignment.",
-    format: formatMetric,
-  },
-  {
     key: "radialNormalAlignment",
-    label: "Radial",
+    label: "Radial Alignment",
     help: "Signed target-angle alignment with the outward boundary normal. 1 parallel, 0 random, -1 perpendicular.",
     format: formatMetric,
   },
   {
     key: "tangentialAlignment",
-    label: "Tangent",
+    label: "Circumferential Alignment",
     help: "Signed target-angle alignment with the nearest boundary tangent. 1 parallel, 0 random, -1 perpendicular.",
     format: formatMetric,
   },
   {
     key: "migrationAlignment",
-    label: "Migration",
-    help: "Signed target-angle alignment with the group migration vector. 1 parallel, 0 random, -1 perpendicular.",
+    label: "Migration Axis Alignment",
+    help: "Fiber alignment relative to the user-defined migration axis. 1 parallel, 0 mixed/45°, -1 perpendicular.",
     format: formatMetric,
   },
 ];
@@ -136,6 +140,10 @@ export default function App() {
   const [pointOpacity, setPointOpacity] = useState(() => {
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_OPACITY;
+  });
+  const [densityCalibration, setDensityCalibration] = useState({
+    slope: String(DEFAULT_COLLAGEN_DENSITY_SLOPE),
+    intercept: String(DEFAULT_COLLAGEN_DENSITY_INTERCEPT),
   });
 
   const activeImage = activeIndex >= 0 ? resolveImageDimensions(images[activeIndex], rawPixels, bounds) : null;
@@ -535,6 +543,17 @@ export default function App() {
     }, "Group analysis mode changed");
   }
 
+  function handleFullImageInside() {
+    if (!activeGroupId || !hasActiveImageDimensions) return;
+
+    setMigrationDraft(null);
+    setHoverPointId(null);
+    mutateBounds(
+      (current) => setGroupToFullImageInside(current, activeGroupId, activeImage),
+      "Full image inside area set",
+    );
+  }
+
   function handleActiveGroupDrawVisibility(visible) {
     if (!activeGroupId) return;
     setGroupDrawVisibility((current) => ({ ...current, [activeGroupId]: visible }));
@@ -627,6 +646,10 @@ export default function App() {
     }
   }
 
+  function handleDensityCalibrationChange(key, value) {
+    setDensityCalibration((current) => ({ ...current, [key]: value }));
+  }
+
   function handleStageClick(event) {
     if (!hasActiveImageDimensions) return;
     const clickPoint = eventToImagePoint(event, activeImage, {
@@ -665,23 +688,33 @@ export default function App() {
 
   async function handleSave() {
     if (!activeImage || !bounds) return;
-    const nextBounds = normalizeAndClampBounds(bounds, activeImage);
 
     try {
-      const payload = await readJsonResponse(
-        await fetch(`/api/images/${activeImage.id}/bounds`, {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(nextBounds),
-        }),
-      );
-      setBounds(normalizeAndClampBounds(payload.bounds ?? nextBounds, activeImage));
-      setHasBounds(true);
-      setDirty(false);
+      await saveBounds(bounds);
       setStatus("Saved");
     } catch (error) {
       setStatus(`Save failed: ${error.message}`);
     }
+  }
+
+  async function saveBounds(boundsToSave) {
+    if (!activeImage || !boundsToSave) {
+      return null;
+    }
+
+    const nextBounds = normalizeAndClampBounds(boundsToSave, activeImage);
+    const payload = await readJsonResponse(
+      await fetch(`/api/images/${activeImage.id}/bounds`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(nextBounds),
+      }),
+    );
+    const savedBounds = normalizeAndClampBounds(payload.bounds ?? nextBounds, activeImage);
+    setBounds(savedBounds);
+    setHasBounds(true);
+    setDirty(false);
+    return savedBounds;
   }
 
   async function handleImportPrevious() {
@@ -702,24 +735,26 @@ export default function App() {
     }
   }
 
-  async function handleRecalculateAnalysis() {
-    if (!activeImage) return;
+  async function handleCalculateAnalysis() {
+    if (!activeImage || !bounds) return;
     setAnalysisLoading(true);
-    setAnalysisStatus("Recalculating analysis");
+    setAnalysisStatus("Calculating analysis");
     setAnalysisError("");
 
     try {
+      const savedBounds = await saveBounds(bounds);
+      const savedActiveGroup = savedBounds?.groups.find((group) => group.id === activeGroupId);
       const payload = await readJsonResponse(
         await fetch(`/api/images/${activeImage.id}/analysis/recalculate`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            roiBands: deriveRoiBands(activeRoiLimits),
-            roiBandsByGroup: roiBandsByGroup(bounds),
+            roiBands: deriveRoiBands(groupRoiLimits(savedActiveGroup)),
+            roiBandsByGroup: roiBandsByGroup(savedBounds),
           }),
         }),
       );
-      applyAnalysisPayload(payload, "Analysis recalculated");
+      applyAnalysisPayload(payload, "Analysis calculated");
     } catch (error) {
       setAnalysisError(error.message);
       setAnalysisStatus(`Analysis failed: ${error.message}`);
@@ -944,6 +979,15 @@ export default function App() {
             onChange={(event) => handleRenameGroup(event.target.value)}
           />
         </label>
+        <div className="button-row">
+          <button
+            type="button"
+            onClick={handleFullImageInside}
+            disabled={!activeGroup || !hasActiveImageDimensions}
+          >
+            Full image inside
+          </button>
+        </div>
         <div className="field-stack">
           <span>Analysis mode</span>
           <div className="segmented-control group-mode-control" aria-label="Analysis mode">
@@ -1353,9 +1397,33 @@ export default function App() {
             <strong>Analysis</strong>
             <span className="status-chip">{hasAnalysis ? "Saved analysis" : "No saved analysis"}</span>
             <span className="status-line">{analysisStatus}</span>
-            <button type="button" disabled={!activeImage || analysisLoading} onClick={handleRecalculateAnalysis}>
-              {analysisLoading ? "Working" : "Recalculate"}
+            <button type="button" disabled={!activeImage || !bounds || analysisLoading} onClick={handleCalculateAnalysis}>
+              {analysisLoading ? "Working" : "Calculate"}
             </button>
+            <div className="density-calibration" aria-label="Density calibration">
+              <label htmlFor="density-calibration-slope">
+                <span>a</span>
+                <input
+                  id="density-calibration-slope"
+                  aria-label="Density calibration a"
+                  type="number"
+                  step="any"
+                  value={densityCalibration.slope}
+                  onChange={(event) => handleDensityCalibrationChange("slope", event.target.value)}
+                />
+              </label>
+              <label htmlFor="density-calibration-intercept">
+                <span>b</span>
+                <input
+                  id="density-calibration-intercept"
+                  aria-label="Density calibration b"
+                  type="number"
+                  step="any"
+                  value={densityCalibration.intercept}
+                  onChange={(event) => handleDensityCalibrationChange("intercept", event.target.value)}
+                />
+              </label>
+            </div>
             <button
               type="button"
               className="compact-panel-toggle"
@@ -1456,7 +1524,7 @@ export default function App() {
 	                    </tr>
 	                  </thead>
 	                  <tbody>
-		                    {analysisRows(analysis)
+	                    {analysisRows(analysis)
                           .filter((row) => groupVisible(groupStatsVisibility, row.groupId))
                           .map((row) => (
 		                      <tr key={row.id}>
@@ -1464,7 +1532,9 @@ export default function App() {
 		                        <td>{row.modeLabel}</td>
 		                        <td>{row.bandLabel}</td>
 		                        {ANALYSIS_COLUMNS.map((column) => (
-	                          <td key={column.key}>{column.format(row.metrics[column.key])}</td>
+	                          <td key={column.key}>
+                              {column.format(analysisColumnValue(column, row.metrics, densityCalibration))}
+                            </td>
 	                        ))}
 	                      </tr>
 	                    ))}
@@ -1505,6 +1575,10 @@ function MetricColumnHeader({ activeMetricHelp, column, onHide, onShow }) {
       ) : null}
     </th>
   );
+}
+
+function analysisColumnValue(column, metrics, densityCalibration) {
+  return column.value ? column.value(metrics, densityCalibration) : metrics[column.key];
 }
 
 function buildRoiPreviewGroups(polygons, image) {
@@ -1669,8 +1743,31 @@ function groupDisplayVisible(drawVisibilityByGroupId, statsVisibilityByGroupId, 
   return groupVisible(drawVisibilityByGroupId, groupId) && groupVisible(statsVisibilityByGroupId, groupId);
 }
 
+function estimateCollagenDensity(pixelDensity, densityCalibration) {
+  const slope = calibrationNumber(densityCalibration.slope);
+  const intercept = calibrationNumber(densityCalibration.intercept);
+  if (!Number.isFinite(pixelDensity) || !Number.isFinite(slope) || !Number.isFinite(intercept) || slope === 0) {
+    return null;
+  }
+
+  return (pixelDensity - intercept) / slope;
+}
+
+function calibrationNumber(value) {
+  if (String(value).trim() === "") {
+    return null;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function formatMetric(value) {
   return Number.isFinite(value) ? value.toFixed(4) : "-";
+}
+
+function formatCollagenDensity(value) {
+  return Number.isFinite(value) ? `${value.toFixed(4)} mg/ml` : "-";
 }
 
 function formatInteger(value) {
