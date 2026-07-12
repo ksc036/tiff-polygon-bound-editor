@@ -1169,12 +1169,14 @@ describe("App", () => {
     expect(screen.queryByLabelText("Bounds overlay")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Point opacity")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Show ROI")).not.toBeInTheDocument();
+    expect(screen.queryByText("ROI preview local")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Original" }));
 
     expect(screen.getByLabelText("Bounds overlay")).toBeInTheDocument();
     expect(screen.getByLabelText("Point opacity")).toBeInTheDocument();
     expect(screen.getByLabelText("Show ROI")).toBeInTheDocument();
+    expect(screen.getByText("ROI preview local")).toBeInTheDocument();
   });
 
   test("blocks bounds mutations while Heat Map is active", async () => {

@@ -1534,7 +1534,7 @@ export default function App() {
             {dirty ? "Unsaved" : "Clean"}
           </span>
           <span className="status-chip">{hasBounds ? "Saved bound" : "No saved file"}</span>
-          <span className="status-chip">{roiPreviewStatus}</span>
+          {imageLayer !== "heatmap" ? <span className="status-chip">{roiPreviewStatus}</span> : null}
           <span className="status-line">{status}</span>
         </div>
 

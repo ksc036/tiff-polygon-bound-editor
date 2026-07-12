@@ -6,7 +6,7 @@ Heat Map hid the editable bounds overlay and its editor controls, but the sideba
 
 ## Rule
 
-Treat a read-only mode as a complete interaction boundary. Enumerate every control and event path that can change state, hide or disable those paths in the read-only mode, and keep permitted read-only controls available.
+Treat a read-only mode as a complete interaction boundary. Enumerate every control, event path, and passive state readout that is inappropriate for the mode, hide or disable those paths and readouts in the read-only mode, and keep permitted read-only controls and status readouts available.
 
 ## Regression Test
 
