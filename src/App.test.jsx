@@ -1156,6 +1156,88 @@ describe("App", () => {
     expect(rawCanvas).toHaveStyle({ opacity: "1" });
   });
 
+  test("hides bounds controls in Heat Map and restores them in Original", async () => {
+    mockApi();
+    render(<App />);
+
+    expect(await screen.findByLabelText("Bounds overlay")).toBeInTheDocument();
+    expect(screen.getByLabelText("Point opacity")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show ROI")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
+
+    expect(screen.queryByLabelText("Bounds overlay")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Point opacity")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Show ROI")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+
+    expect(screen.getByLabelText("Bounds overlay")).toBeInTheDocument();
+    expect(screen.getByLabelText("Point opacity")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show ROI")).toBeInTheDocument();
+  });
+
+  test("blocks bounds mutations while Heat Map is active", async () => {
+    mockApi();
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const vertexCount = screen.getAllByLabelText(/^Vertex /).length;
+    const stage = screen.getByTestId("image-stage");
+    vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      top: 0,
+      right: 100,
+      bottom: 80,
+      width: 100,
+      height: 80,
+      x: 0,
+      y: 0,
+      toJSON: () => {},
+    });
+
+    fireEvent.pointerDown(screen.getByLabelText("Vertex point-1"));
+    fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
+    fireEvent.pointerMove(stage, { clientX: 30, clientY: 30 });
+    fireEvent.click(stage, { clientX: 30, clientY: 30 });
+    fireEvent.keyDown(window, { code: "KeyP" });
+    fireEvent.keyDown(window, { code: "KeyD" });
+    fireEvent.keyDown(window, { code: "KeyM" });
+
+    expect(screen.getByText("Clean")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+
+    expect(screen.getAllByLabelText(/^Vertex /)).toHaveLength(vertexCount);
+    expect(screen.getByLabelText("Vertex point-1")).toHaveAttribute("cx", "10");
+    expect(screen.getByLabelText("Vertex point-1")).toHaveAttribute("cy", "12");
+  });
+
+  test("omits point order, ROI settings, and bounds mutation controls in Heat Map", async () => {
+    mockApi();
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
+
+    expect(screen.getByLabelText("Groups")).toBeInTheDocument();
+    expect(screen.getByLabelText("Heatmap controls")).toBeInTheDocument();
+    expect(screen.getByLabelText("Heatmap batch")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Point order")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Toggle outside ROI settings" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("가까움 upper")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add group" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Rename active group")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Full image inside" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Analysis mode")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Draw active group")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set migration" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete active group" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load saved bound" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Import previous bound" })).not.toBeInTheDocument();
+  });
+
   test("restores persisted Heat Map original opacity after remount", async () => {
     mockApi();
     const first = render(<App />);

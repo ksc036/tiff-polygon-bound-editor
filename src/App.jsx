@@ -559,13 +559,13 @@ export default function App() {
       } else if (event.code === "ArrowRight") {
         event.preventDefault();
         navigateTo(activeIndex + 1);
-      } else if (event.code === "KeyP") {
+      } else if (event.code === "KeyP" && imageLayer !== "heatmap") {
         event.preventDefault();
         addPointAtPointer();
-      } else if (event.code === "KeyD") {
+      } else if (event.code === "KeyD" && imageLayer !== "heatmap") {
         event.preventDefault();
         mutateBounds((current) => deleteNearestPoint(current, activeGroupId, pointerRef.current), "Point deleted");
-      } else if (event.code === "KeyM") {
+      } else if (event.code === "KeyM" && imageLayer !== "heatmap") {
         event.preventDefault();
         mutateBounds((current) => moveNearestPoint(current, activeGroupId, pointerRef.current), "Point moved");
       }
@@ -668,7 +668,7 @@ export default function App() {
     if (!nextPointer) return;
 
     setCurrentPointer(nextPointer);
-    if (dragPoint) {
+    if (dragPoint && imageLayer !== "heatmap") {
       mutateBounds(
         (current) => movePoint(current, dragPoint.groupId, dragPoint.pointId, nextPointer),
         "Point moved",
@@ -893,7 +893,7 @@ export default function App() {
   }
 
   function handleStageClick(event) {
-    if (!hasActiveImageDimensions) return;
+    if (!hasActiveImageDimensions || imageLayer === "heatmap") return;
     const clickPoint = eventToImagePoint(event, activeImage, {
       contentRect: imageContentRect(canvasRef.current, event.currentTarget),
     });
@@ -1135,15 +1135,19 @@ export default function App() {
         >
           Next
         </button>
-        <button type="button" disabled={!activeImage} onClick={handleLoadSaved}>
-          Load saved bound
-        </button>
-        <button type="button" disabled={!activeImage || !bounds} onClick={handleSave}>
-          Save
-        </button>
-        <button type="button" disabled={!activeImage} onClick={handleImportPrevious}>
-          Import previous bound
-        </button>
+        {imageLayer !== "heatmap" ? (
+          <>
+            <button type="button" disabled={!activeImage} onClick={handleLoadSaved}>
+              Load saved bound
+            </button>
+            <button type="button" disabled={!activeImage || !bounds} onClick={handleSave}>
+              Save
+            </button>
+            <button type="button" disabled={!activeImage} onClick={handleImportPrevious}>
+              Import previous bound
+            </button>
+          </>
+        ) : null}
       </form>
 
       <aside className="side-panel" aria-label="Groups">
@@ -1340,6 +1344,8 @@ export default function App() {
             ) : null}
           </div>
         </section>
+        {imageLayer !== "heatmap" ? (
+          <>
         <button type="button" onClick={handleAddGroup} disabled={!bounds}>
           Add group
         </button>
@@ -1431,6 +1437,8 @@ export default function App() {
         <button type="button" className="danger" onClick={handleDeleteGroup} disabled={!activeGroup}>
           Delete active group
         </button>
+          </>
+        ) : null}
       </aside>
 
       <section
@@ -1479,7 +1487,7 @@ export default function App() {
               Heat Map
             </button>
           </div>
-          <label htmlFor="point-opacity">
+          {imageLayer !== "heatmap" ? <label htmlFor="point-opacity">
             Point opacity
             <input
               id="point-opacity"
@@ -1490,7 +1498,7 @@ export default function App() {
               value={pointOpacity}
               onChange={(event) => setPointOpacity(Number(event.target.value))}
             />
-          </label>
+          </label> : null}
           <label htmlFor="display-min">
             Display min
             <input
@@ -1509,7 +1517,7 @@ export default function App() {
               onChange={(event) => setDisplayMax(Number(event.target.value))}
             />
           </label>
-          <label className="toggle-field" htmlFor="show-roi-overlay">
+          {imageLayer !== "heatmap" ? <label className="toggle-field" htmlFor="show-roi-overlay">
             <input
               id="show-roi-overlay"
               type="checkbox"
@@ -1517,7 +1525,7 @@ export default function App() {
               onChange={(event) => setShowRoiOverlay(event.target.checked)}
             />
             Show ROI
-          </label>
+          </label> : null}
           <span className={dirty ? "dirty-indicator dirty" : "dirty-indicator"}>
             {dirty ? "Unsaved" : "Clean"}
           </span>
@@ -1576,7 +1584,7 @@ export default function App() {
                 pointer={pointer}
               />
             ) : null}
-            {activeImage && hasActiveImageDimensions && bounds ? (
+            {activeImage && hasActiveImageDimensions && bounds && imageLayer !== "heatmap" ? (
               <svg
                 className="overlay"
                 viewBox={`0 0 ${activeImage.width} ${activeImage.height}`}
@@ -1688,7 +1696,7 @@ export default function App() {
           </div>
         </div>
 
-        <div
+        {imageLayer !== "heatmap" ? <div
           className={pointOrderOpen ? "point-order-panel" : "point-order-panel is-collapsed"}
           aria-label="Point order"
         >
@@ -1764,7 +1772,7 @@ export default function App() {
               <span className="point-order-empty">No points</span>
             )}
           </div> : null}
-        </div>
+        </div> : null}
 
         <button
           type="button"
@@ -1816,7 +1824,7 @@ export default function App() {
                 />
               </label>
             </div>
-            <button
+            {imageLayer !== "heatmap" ? <button
               type="button"
               className="compact-panel-toggle"
               aria-label="Toggle outside ROI settings"
@@ -1826,10 +1834,10 @@ export default function App() {
             >
               <span className="panel-toggle-icon" aria-hidden="true">{roiSettingsOpen ? "v" : ">"}</span>
               <span>ROI settings</span>
-            </button>
+            </button> : null}
           </div>
 
-          {roiSettingsOpen ? (
+          {imageLayer !== "heatmap" && roiSettingsOpen ? (
             <div className="roi-settings-body" id="roi-settings-body">
               {activeGroupUsesOutsideRoi ? (
                 <div className="roi-limit-grid">
