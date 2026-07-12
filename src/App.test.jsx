@@ -993,6 +993,8 @@ describe("App", () => {
 
     expect(screen.getByRole("button", { name: "Mask" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByAltText("mask preview")).toHaveAttribute("src", "/api/images/scan-a/mask-preview");
+    expect(screen.getByLabelText("raw16 image")).toHaveClass("hidden-layer");
+    expect(screen.getByLabelText("raw16 image")).not.toHaveAttribute("style");
   });
 
   test("shows mask and skeleton together in the fiber QC layer", async () => {
@@ -1009,6 +1011,8 @@ describe("App", () => {
       "src",
       "/api/images/scan-a/skeleton-preview",
     );
+    expect(screen.getByLabelText("raw16 image")).toHaveClass("hidden-layer");
+    expect(screen.getByLabelText("raw16 image")).not.toHaveAttribute("style");
   });
 
   test("opens the Heat Map layer with persisted default presets", async () => {
@@ -1147,15 +1151,20 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
     const rawCanvas = screen.getByLabelText("raw16 image");
     const heatmapCanvas = await screen.findByLabelText("heatmap overlay");
-    expect(screen.getByLabelText("Original opacity")).toHaveValue("0.5");
+    const opacitySlider = screen.getByLabelText("Original opacity");
+    expect(opacitySlider).toHaveAttribute("min", "0");
+    expect(opacitySlider).toHaveAttribute("max", "1");
+    expect(opacitySlider).toHaveValue("0.5");
     expect(rawCanvas).toHaveClass("heatmap-original-overlay");
     expect(rawCanvas).toHaveStyle({ opacity: "0.5" });
-    fireEvent.change(screen.getByLabelText("Original opacity"), { target: { value: "0" } });
+    fireEvent.change(opacitySlider, { target: { value: "1" } });
+    expect(rawCanvas).toHaveStyle({ opacity: "1" });
+    fireEvent.change(opacitySlider, { target: { value: "0" } });
     expect(rawCanvas).toHaveStyle({ opacity: "0" });
     expect(heatmapCanvas).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Original" }));
     expect(rawCanvas).not.toHaveClass("heatmap-original-overlay");
-    expect(rawCanvas).toHaveStyle({ opacity: "1" });
+    expect(rawCanvas.style.opacity).toBe("");
   });
 
   test("hides bounds controls in Heat Map and restores them in Original", async () => {
@@ -1417,7 +1426,7 @@ describe("App", () => {
     expect(screen.getByLabelText("raw16 image")).not.toHaveClass("hidden-layer");
   });
 
-  test("places comparison max, zero, and min labels in accessible scale order", async () => {
+  test("places comparison min, zero, and max labels in accessible scale order", async () => {
     const compatibleImages = [images[0], { ...images[1], width: 100, height: 80 }];
     mockApi({
       rootImages: compatibleImages,
@@ -1440,11 +1449,13 @@ describe("App", () => {
     const markers = within(legend).getAllByLabelText(/comparison (maximum|zero|minimum)/);
 
     expect(markers.map((marker) => marker.getAttribute("aria-label"))).toEqual([
-      "comparison maximum",
-      "comparison zero",
       "comparison minimum",
+      "comparison zero",
+      "comparison maximum",
     ]);
+    expect(markers[0]).toHaveTextContent("-0.04");
     expect(markers[1]).toHaveClass("heatmap-legend-zero");
+    expect(markers[2]).toHaveTextContent("0.04");
   });
 
   test("selects a separate batch folder and generates edited preset sizes", async () => {

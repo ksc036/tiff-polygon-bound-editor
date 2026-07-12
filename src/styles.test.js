@@ -37,6 +37,15 @@ describe("application layout CSS", () => {
     const heatmapOverlayRule = css.match(/\.heatmap-overlay\s*\{[^}]+\}/)?.[0] ?? "";
 
     expect(originalOverlayRule).toContain("z-index: 2");
+    expect(originalOverlayRule).toContain("pointer-events: none");
     expect(heatmapOverlayRule).toContain("z-index: 1");
+  });
+
+  test("keeps hidden raw canvases at zero opacity through the CSS cascade", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const hiddenLayerRule = css.match(/\.raw-canvas\.hidden-layer\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(hiddenLayerRule).toContain("opacity: 0");
   });
 });

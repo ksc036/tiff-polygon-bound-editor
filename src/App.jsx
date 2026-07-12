@@ -1277,10 +1277,10 @@ export default function App() {
               className={heatmapComparison.value ? "heatmap-legend difference" : "heatmap-legend"}
               aria-label="heatmap color legend"
             >
-              <span aria-label={heatmapComparison.value ? "comparison maximum" : undefined}>
+              <span aria-label={heatmapComparison.value ? "comparison minimum" : undefined}>
                 {heatmapComparison.value
-                  ? formatLegendValue(heatmapComparison.value.maxAbs, heatmapRange.unit)
-                  : formatLegendValue(heatmapRange.max, heatmapRange.unit)}
+                  ? formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)
+                  : formatLegendValue(heatmapRange.min, heatmapRange.unit)}
               </span>
               <div className="heatmap-legend-scale">
                 <i aria-hidden="true" />
@@ -1288,10 +1288,10 @@ export default function App() {
                   <span className="heatmap-legend-zero" aria-label="comparison zero">0</span>
                 ) : null}
               </div>
-              <span aria-label={heatmapComparison.value ? "comparison minimum" : undefined}>
+              <span aria-label={heatmapComparison.value ? "comparison maximum" : undefined}>
                 {heatmapComparison.value
-                  ? formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)
-                  : formatLegendValue(heatmapRange.min, heatmapRange.unit)}
+                  ? formatLegendValue(heatmapComparison.value.maxAbs, heatmapRange.unit)
+                  : formatLegendValue(heatmapRange.max, heatmapRange.unit)}
               </span>
             </div>
             <span className="heatmap-view-state" aria-live="polite">
@@ -1565,7 +1565,7 @@ export default function App() {
                 imageLayer === "original" || imageLayer === "heatmap" ? "" : " hidden-layer"
               }`}
               aria-label="raw16 image"
-              style={{ opacity: imageLayer === "heatmap" ? heatmapOriginalOpacity : 1 }}
+              style={imageLayer === "heatmap" ? { opacity: heatmapOriginalOpacity } : undefined}
             />
             {activeImage && (imageLayer === "mask" || imageLayer === "fiber-qc") ? (
               <img
