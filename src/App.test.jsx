@@ -1148,11 +1148,13 @@ describe("App", () => {
     const rawCanvas = screen.getByLabelText("raw16 image");
     const heatmapCanvas = await screen.findByLabelText("heatmap overlay");
     expect(screen.getByLabelText("Original opacity")).toHaveValue("0.5");
+    expect(rawCanvas).toHaveClass("heatmap-original-overlay");
     expect(rawCanvas).toHaveStyle({ opacity: "0.5" });
     fireEvent.change(screen.getByLabelText("Original opacity"), { target: { value: "0" } });
     expect(rawCanvas).toHaveStyle({ opacity: "0" });
     expect(heatmapCanvas).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    expect(rawCanvas).not.toHaveClass("heatmap-original-overlay");
     expect(rawCanvas).toHaveStyle({ opacity: "1" });
   });
 

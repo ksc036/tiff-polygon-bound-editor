@@ -29,4 +29,14 @@ describe("application layout CSS", () => {
     expect(legendRule).not.toContain("position: absolute");
     expect(legendRule).toContain("grid-template-columns");
   });
+
+  test("stacks the Heat Map original TIFF above the opaque heatmap overlay", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const originalOverlayRule = css.match(/\.raw-canvas\.heatmap-original-overlay\s*\{[^}]+\}/)?.[0] ?? "";
+    const heatmapOverlayRule = css.match(/\.heatmap-overlay\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(originalOverlayRule).toContain("z-index: 2");
+    expect(heatmapOverlayRule).toContain("z-index: 1");
+  });
 });

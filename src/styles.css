@@ -535,6 +535,11 @@ input[type="range"] {
   opacity: 0;
 }
 
+.raw-canvas.heatmap-original-overlay {
+  z-index: 2;
+  pointer-events: none;
+}
+
 .layer-image {
   object-fit: fill;
   image-rendering: pixelated;

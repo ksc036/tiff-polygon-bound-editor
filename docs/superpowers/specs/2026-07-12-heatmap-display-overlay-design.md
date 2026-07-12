@@ -7,7 +7,7 @@ Make the Heat Map layer easier to inspect by controlling the visibility of the o
 ## Confirmed Behavior
 
 - The Heat Map color canvas is always rendered at full opacity.
-- A Heat Map-only `Original opacity` control changes the opacity of the TIFF canvas below the heatmap.
+- A Heat Map-only `Original opacity` control changes the opacity of the TIFF canvas composited above the heatmap.
 - The default original opacity is `0.5` and the selected value persists in `localStorage`.
 - Setting original opacity to `0` hides the TIFF completely and leaves only the heatmap visible.
 - Original, Mask, and Fiber QC modes are unaffected by the Heat Map original-opacity value.
@@ -19,7 +19,7 @@ Make the Heat Map layer easier to inspect by controlling the visibility of the o
 
 ### Separate Layer Opacity (Selected)
 
-Keep the TIFF and heatmap as separate canvases. Apply opacity only to the TIFF canvas while Heat Map is active. This matches the existing layered renderer, updates instantly, and does not require recalculating heatmap pixels.
+Keep the TIFF and heatmap as separate canvases. Apply opacity only to the TIFF canvas composited above the heatmap while Heat Map is active. This matches the existing layered renderer, updates instantly, and does not require recalculating heatmap pixels.
 
 ### Client-Side Canvas Composition
 
@@ -39,7 +39,7 @@ The color legend moves below the opacity row in the same contextual panel. It re
 - current Estimated Collagen Density: `0..3 mg/ml`;
 - comparison: symmetric `-maxAbs..+maxAbs` with zero marked at the midpoint.
 
-The image stage contains only the TIFF and heatmap canvases while Heat Map is active. The legend no longer covers image pixels.
+The image stage contains only the TIFF composited above the heatmap canvas while Heat Map is active. The legend no longer covers image pixels.
 
 ## Interaction Rules
 
@@ -51,7 +51,7 @@ The image stage contains only the TIFF and heatmap canvases while Heat Map is ac
 
 ## State and Persistence
 
-Introduce a dedicated Heat Map original-opacity state and storage key. Do not reuse the old heatmap-opacity key because the meaning is inverted. The renderer applies this value only as an inline opacity on the raw TIFF canvas when `imageLayer === "heatmap"`; otherwise raw TIFF opacity is `1`.
+Introduce a dedicated Heat Map original-opacity state and storage key. Do not reuse the old heatmap-opacity key because the meaning is inverted. The renderer applies this value only as an inline opacity on the raw TIFF canvas when `imageLayer === "heatmap"`; in that mode the TIFF is stacked above the heatmap. Otherwise raw TIFF opacity is `1` and retains its existing layer order.
 
 The heatmap canvas no longer receives a configurable opacity prop. Its cell colors are drawn with full alpha. Invalid Estimated Collagen Density calibration still clears the heatmap canvas as before.
 

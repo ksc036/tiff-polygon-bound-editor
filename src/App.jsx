@@ -1561,7 +1561,9 @@ export default function App() {
           >
             <canvas
               ref={canvasRef}
-              className={imageLayer === "original" || imageLayer === "heatmap" ? "raw-canvas" : "raw-canvas hidden-layer"}
+              className={`raw-canvas${imageLayer === "heatmap" ? " heatmap-original-overlay" : ""}${
+                imageLayer === "original" || imageLayer === "heatmap" ? "" : " hidden-layer"
+              }`}
               aria-label="raw16 image"
               style={{ opacity: imageLayer === "heatmap" ? heatmapOriginalOpacity : 1 }}
             />
