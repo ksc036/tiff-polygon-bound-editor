@@ -1238,6 +1238,40 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "Import previous bound" })).not.toBeInTheDocument();
   });
 
+  test("hides group selection and display controls in Heat Map while preserving group state", async () => {
+    mockApi({
+      boundsQueue: [boundsWithInsideGroup],
+      analysisResponse: { analysis: twoGroupAnalysis, hasAnalysis: true },
+    });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Inside Patch" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide Inside Patch display" }));
+
+    expect(screen.getByLabelText("Rename active group")).toHaveValue("Inside Patch");
+    expect(screen.queryByLabelText("Vertex inside-1")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("table")).queryAllByText("Inside Patch")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
+
+    expect(screen.getByLabelText("Heatmap controls")).toBeInTheDocument();
+    expect(screen.getByLabelText("Heatmap batch")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show all group display" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Hide all group display" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Saved Tissue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Inside Patch" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /(?:Show|Hide) .* display/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+
+    expect(screen.getByLabelText("Rename active group")).toHaveValue("Inside Patch");
+    expect(screen.getByRole("button", { name: "Inside Patch" }).closest(".group-row")).toHaveClass("active");
+    expect(screen.getByRole("button", { name: "Show Inside Patch display" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Vertex inside-1")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("table")).queryAllByText("Inside Patch")).toHaveLength(0);
+  });
+
   test("restores persisted Heat Map original opacity after remount", async () => {
     mockApi();
     const first = render(<App />);

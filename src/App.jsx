@@ -1156,62 +1156,66 @@ export default function App() {
             <h1>Groups</h1>
             <span className="status-chip">{activeGroup ? activeGroup.name : "No active group"}</span>
           </div>
-          <div className="group-display-actions">
-            <button
-              type="button"
-              aria-label="Show all group display"
-              disabled={!bounds?.groups.length}
-              onClick={() => handleAllGroupDisplayVisibility(true)}
-            >
-              All on
-            </button>
-            <button
-              type="button"
-              aria-label="Hide all group display"
-              disabled={!bounds?.groups.length}
-              onClick={() => handleAllGroupDisplayVisibility(false)}
-            >
-              All off
-            </button>
+          {imageLayer !== "heatmap" ? (
+            <div className="group-display-actions">
+              <button
+                type="button"
+                aria-label="Show all group display"
+                disabled={!bounds?.groups.length}
+                onClick={() => handleAllGroupDisplayVisibility(true)}
+              >
+                All on
+              </button>
+              <button
+                type="button"
+                aria-label="Hide all group display"
+                disabled={!bounds?.groups.length}
+                onClick={() => handleAllGroupDisplayVisibility(false)}
+              >
+                All off
+              </button>
+            </div>
+          ) : null}
+        </div>
+        {imageLayer !== "heatmap" ? (
+          <div className="group-list">
+            {bounds?.groups.map((group) => {
+              const displayVisible = groupDisplayVisible(groupDrawVisibility, groupStatsVisibility, group.id);
+              return (
+                <div className={group.id === activeGroupId ? "group-row active" : "group-row"} key={group.id}>
+                  <button
+                    type="button"
+                    aria-label={group.name}
+                    className="group-select-button"
+                    onClick={() => {
+                      setActiveGroupId(group.id);
+                      setHoverPointId(null);
+                      setMigrationDraft(null);
+                    }}
+                  >
+                    <span className="swatch" style={{ backgroundColor: group.color }} />
+                    <span>{group.name}</span>
+                    <small>{group.points.length} / {ANALYSIS_MODE_LABELS[group.analysisMode] ?? ANALYSIS_MODE_LABELS.outside}</small>
+                    <span className={groupVisible(groupDrawVisibility, group.id) ? "group-state on" : "group-state off"}>
+                      {groupVisible(groupDrawVisibility, group.id) ? "Draw on" : "Draw off"}
+                    </span>
+                    <span className={groupVisible(groupStatsVisibility, group.id) ? "group-state on" : "group-state off"}>
+                      {groupVisible(groupStatsVisibility, group.id) ? "Stats on" : "Stats off"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={displayVisible ? "group-display-toggle active" : "group-display-toggle"}
+                    aria-label={`${displayVisible ? "Hide" : "Show"} ${group.name} display`}
+                    onClick={() => handleGroupDisplayVisibility(group.id, !displayVisible)}
+                  >
+                    {displayVisible ? "Hide" : "Show"}
+                  </button>
+                </div>
+              );
+            })}
           </div>
-        </div>
-        <div className="group-list">
-          {bounds?.groups.map((group) => {
-            const displayVisible = groupDisplayVisible(groupDrawVisibility, groupStatsVisibility, group.id);
-            return (
-              <div className={group.id === activeGroupId ? "group-row active" : "group-row"} key={group.id}>
-                <button
-                  type="button"
-                  aria-label={group.name}
-                  className="group-select-button"
-                  onClick={() => {
-                    setActiveGroupId(group.id);
-                    setHoverPointId(null);
-                    setMigrationDraft(null);
-                  }}
-                >
-                  <span className="swatch" style={{ backgroundColor: group.color }} />
-                  <span>{group.name}</span>
-                  <small>{group.points.length} / {ANALYSIS_MODE_LABELS[group.analysisMode] ?? ANALYSIS_MODE_LABELS.outside}</small>
-                  <span className={groupVisible(groupDrawVisibility, group.id) ? "group-state on" : "group-state off"}>
-                    {groupVisible(groupDrawVisibility, group.id) ? "Draw on" : "Draw off"}
-                  </span>
-                  <span className={groupVisible(groupStatsVisibility, group.id) ? "group-state on" : "group-state off"}>
-                    {groupVisible(groupStatsVisibility, group.id) ? "Stats on" : "Stats off"}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={displayVisible ? "group-display-toggle active" : "group-display-toggle"}
-                  aria-label={`${displayVisible ? "Hide" : "Show"} ${group.name} display`}
-                  onClick={() => handleGroupDisplayVisibility(group.id, !displayVisible)}
-                >
-                  {displayVisible ? "Hide" : "Show"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
+        ) : null}
         {imageLayer === "heatmap" ? (
           <section className="heatmap-display heatmap-controls" aria-label="Heatmap controls">
             <strong>Heatmap display</strong>
