@@ -44,6 +44,20 @@ function publicMaskSource(maskSource) {
   return source;
 }
 
+function publicCell(cell) {
+  return {
+    row: cell.row,
+    column: cell.column,
+    x: cell.x,
+    y: cell.y,
+    width: cell.width,
+    height: cell.height,
+    areaPx: cell.areaPx,
+    maskPixelCount: cell.maskPixelCount,
+    pixelDensity: cell.pixelDensity,
+  };
+}
+
 function assertMask(mask) {
   if (!mask || !(mask.data instanceof Uint8Array)) {
     throw new Error("Heatmap mask must include Uint8Array data.");
@@ -209,5 +223,17 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
   }
 
   payload.cells.forEach((cell, index) => assertGridCell(cell, index, payload));
-  return { ...payload, maskSource: publicMaskSource(payload.maskSource) };
+  return {
+    schemaVersion: payload.schemaVersion,
+    imageFolder: payload.imageFolder,
+    maskSource: publicMaskSource(payload.maskSource),
+    width: payload.width,
+    height: payload.height,
+    cellWidth: payload.cellWidth,
+    cellHeight: payload.cellHeight,
+    columns: payload.columns,
+    rows: payload.rows,
+    cells: payload.cells.map(publicCell),
+    updatedAt: payload.updatedAt,
+  };
 }

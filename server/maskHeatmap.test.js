@@ -96,6 +96,28 @@ test("serializes only public mask source fields and strips path", () => {
   expect(JSON.stringify(validated)).not.toContain('"format"');
 });
 
+test("returns a closed public DTO without unknown top-level or cell fields", () => {
+  const payload = createHeatmapPayload({
+    imageFolder: "images/sample",
+    maskSource: { file: "masks/sample.png", mtimeMs: 12, size: 345 },
+    mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+    cellSize: 1,
+    updatedAt: "2026-07-12T00:00:00.000Z",
+  });
+  const validated = validateHeatmapPayload(
+    {
+      ...payload,
+      sourcePath: "/private/mask.png",
+      cells: [{ ...payload.cells[0], sourcePath: "/private/cell-mask.png" }],
+    },
+    { cellSize: 1 },
+  );
+
+  expect(validated).toEqual(payload);
+  expect(validated).not.toHaveProperty("sourcePath");
+  expect(validated.cells[0]).not.toHaveProperty("sourcePath");
+});
+
 test.each(["/tmp/mask.png", "C:\\tmp\\mask.png", "\\\\server\\share\\mask.png"])(
   "rejects absolute source metadata: %s",
   (maskFile) => {
