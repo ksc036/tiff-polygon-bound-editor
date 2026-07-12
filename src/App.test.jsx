@@ -28,13 +28,13 @@ const images = [
 
 const imagesWithoutDimensions = images.map(({ height, width, ...image }) => image);
 
-function heatmapFixture(imageFolder, cellSize, pixelDensity = 0.04) {
+function heatmapFixture(imageFolder, cellSize, pixelDensity = 0.04, width = 100, height = 80) {
   return {
     schemaVersion: 1,
     imageFolder,
     imageFile: `${imageFolder}.tif`,
-    width: 10,
-    height: 5,
+    width,
+    height,
     cellWidth: cellSize,
     cellHeight: cellSize,
     rows: 1,
@@ -45,10 +45,10 @@ function heatmapFixture(imageFolder, cellSize, pixelDensity = 0.04) {
         column: 0,
         x: 0,
         y: 0,
-        width: 10,
-        height: 5,
-        areaPx: 50,
-        maskPixelCount: Math.round(pixelDensity * 50),
+        width,
+        height,
+        areaPx: width * height,
+        maskPixelCount: Math.round(pixelDensity * width * height),
         pixelDensity,
       },
     ],
@@ -56,7 +56,7 @@ function heatmapFixture(imageFolder, cellSize, pixelDensity = 0.04) {
 }
 
 const heatmapA5 = heatmapFixture("plate-a", 5, 0.04);
-const heatmapB5 = heatmapFixture("plate-b", 5, 0.08);
+const heatmapB5 = heatmapFixture("plate-b", 5, 0.08, 120, 90);
 
 const emptyBounds = {
   schemaVersion: 1,
@@ -307,6 +307,7 @@ function mockApi({
   analysisResponse = { analysis: null, hasAnalysis: false },
   recalculateAnalysis = savedAnalysis,
   heatmapResponse,
+  rawDimensionsById = {},
 } = {}) {
   const calls = [];
   const fetchMock = vi.fn((input, options = {}) => {
@@ -351,13 +352,13 @@ function mockApi({
       return jsonResponse({ image: images[1] });
     }
     if (url === "/api/images/scan-a/raw16" && method === "GET") {
-      return raw16Response(100, 80);
+      return raw16Response(...(rawDimensionsById["scan-a"] ?? [100, 80]));
     }
     if (url === "/api/images/scan-a/roi-overlay" && method === "POST") {
       return pngResponse();
     }
     if (url === "/api/images/scan-b/raw16" && method === "GET") {
-      return raw16Response(120, 90);
+      return raw16Response(...(rawDimensionsById["scan-b"] ?? [120, 90]));
     }
     if (url === "/api/images/scan-b/roi-overlay" && method === "POST") {
       return pngResponse();
@@ -1054,8 +1055,36 @@ describe("App", () => {
     expect(screen.getByLabelText("heatmap color legend")).toHaveTextContent("3 mg/ml");
   });
 
+  test("restores persisted heatmap metric and opacity after remount", async () => {
+    mockApi();
+    const first = render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.click(screen.getByRole("button", { name: "Estimated Collagen Density" }));
+    fireEvent.change(screen.getByLabelText("Opacity"), { target: { value: "0.4" } });
+    first.unmount();
+
+    mockApi();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+
+    expect(screen.getByRole("button", { name: "Estimated Collagen Density" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByLabelText("Opacity")).toHaveValue("0.4");
+  });
+
   test("offers previous comparison only after the first image", async () => {
-    const { fetchMock } = mockApi();
+    const compatibleImages = [images[0], { ...images[1], width: 100, height: 80 }];
+    const { fetchMock } = mockApi({
+      rootImages: compatibleImages,
+      rawDimensionsById: { "scan-b": [100, 80] },
+      heatmapResponse: (url, cellSize) =>
+        jsonResponse({
+          heatmap: heatmapFixture(url.includes("scan-a") ? "plate-a" : "plate-b", cellSize),
+        }),
+    });
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
@@ -1068,6 +1097,87 @@ describe("App", () => {
       expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=5"),
     );
     expect(await screen.findByText(/Compared with plate-a/)).toBeInTheDocument();
+  });
+
+  test("keeps current heatmap when the previous heatmap request fails", async () => {
+    mockApi({
+      heatmapResponse: (url, cellSize) =>
+        url.includes("scan-a")
+          ? jsonResponse({ error: "Saved heatmap is stale." }, { status: 409 })
+          : jsonResponse({ heatmap: heatmapFixture("plate-b", cellSize, 0.08, 120, 90) }),
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Next image" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(await screen.findByLabelText("heatmap overlay")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Compare Previous" }));
+
+    expect(await screen.findByText(/Previous heatmap unavailable: Saved heatmap is stale/)).toHaveTextContent(
+      "Showing current heatmap.",
+    );
+    expect(screen.getByLabelText("heatmap overlay")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("keeps current heatmap and reports incompatible previous dimensions", async () => {
+    mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Next image" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(await screen.findByLabelText("heatmap overlay")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Compare Previous" }));
+
+    expect(await screen.findByText(/Previous heatmap unavailable: Heatmaps have incompatible dimensions/)).toHaveTextContent(
+      "Showing current heatmap.",
+    );
+    expect(screen.getByLabelText("heatmap overlay")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("rejects a current heatmap whose dimensions do not match the displayed image", async () => {
+    mockApi({
+      heatmapResponse: (_url, cellSize) =>
+        jsonResponse({ heatmap: heatmapFixture("plate-a", cellSize, 0.04, 99, 80) }),
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+
+    expect(await screen.findByText("Heatmap dimensions 99x80 do not match image 100x80.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("heatmap overlay")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("raw16 image")).not.toHaveClass("hidden-layer");
+  });
+
+  test("places comparison max, zero, and min labels in accessible scale order", async () => {
+    const compatibleImages = [images[0], { ...images[1], width: 100, height: 80 }];
+    mockApi({
+      rootImages: compatibleImages,
+      rawDimensionsById: { "scan-b": [100, 80] },
+      heatmapResponse: (url, cellSize) =>
+        jsonResponse({
+          heatmap: heatmapFixture(
+            url.includes("scan-a") ? "plate-a" : "plate-b",
+            cellSize,
+            url.includes("scan-a") ? 0.04 : 0.08,
+          ),
+        }),
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Next image" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compare Previous" }));
+    const legend = await screen.findByLabelText("heatmap color legend");
+    const markers = within(legend).getAllByLabelText(/comparison (maximum|zero|minimum)/);
+
+    expect(markers.map((marker) => marker.getAttribute("aria-label"))).toEqual([
+      "comparison maximum",
+      "comparison zero",
+      "comparison minimum",
+    ]);
+    expect(markers[1]).toHaveClass("heatmap-legend-zero");
   });
 
   test("selects a separate batch folder and generates edited preset sizes", async () => {

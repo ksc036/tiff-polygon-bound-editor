@@ -578,7 +578,16 @@ input[type="range"] {
   pointer-events: none;
 }
 
-.heatmap-legend i {
+.heatmap-legend-scale {
+  position: relative;
+  width: 100%;
+  height: 88px;
+}
+
+.heatmap-legend-scale i {
+  position: absolute;
+  top: 0;
+  right: 0;
   width: 12px;
   height: 88px;
   border: 1px solid rgba(255, 255, 255, 0.28);
@@ -586,11 +595,18 @@ input[type="range"] {
 }
 
 .heatmap-legend.difference {
-  grid-template-rows: auto 88px auto auto;
+  grid-template-rows: auto 88px auto;
 }
 
-.heatmap-legend.difference i {
+.heatmap-legend.difference .heatmap-legend-scale i {
   background: linear-gradient(to bottom, #dc2626, #f8fafc 50%, #2563eb);
+}
+
+.heatmap-legend-zero {
+  position: absolute;
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
 }
 
 .roi-overlay {

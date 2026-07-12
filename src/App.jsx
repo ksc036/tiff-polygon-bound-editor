@@ -22,6 +22,7 @@ import { findNearestSegment } from "./lib/geometry.js";
 import {
   buildHeatmapDifference,
   estimateHeatmapCollagenDensity,
+  heatmapCompatibilityError,
   heatmapDisplayRange,
 } from "./lib/heatmap.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
@@ -110,6 +111,7 @@ export default function App() {
   const stageFrameRef = useRef(null);
   const loadRequestRef = useRef(0);
   const heatmapRequestRef = useRef(0);
+  const previousHeatmapRequestRef = useRef(0);
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [images, setImages] = useState([]);
@@ -167,6 +169,8 @@ export default function App() {
   const [heatmapComparePrevious, setHeatmapComparePrevious] = useState(false);
   const [heatmapLoading, setHeatmapLoading] = useState(false);
   const [heatmapError, setHeatmapError] = useState("");
+  const [previousHeatmapLoading, setPreviousHeatmapLoading] = useState(false);
+  const [previousHeatmapError, setPreviousHeatmapError] = useState("");
   const [heatmapBatchRoot, setHeatmapBatchRoot] = useState("");
   const [heatmapBatchLoading, setHeatmapBatchLoading] = useState(false);
   const [heatmapBatchError, setHeatmapBatchError] = useState("");
@@ -213,14 +217,20 @@ export default function App() {
   const heatmapViewStatus = heatmapLoading
     ? "Loading heatmap"
     : heatmapError
-      ? `Heatmap unavailable: ${heatmapError}`
-      : invalidHeatmapCalibration
-        ? "Estimated density requires valid calibration"
-        : heatmapComparison.error
-          ? heatmapComparison.error
-          : heatmapComparePrevious && previousHeatmap
-            ? `Compared with ${previousImage?.folder ?? previousImage?.imageFolder}`
-            : "";
+      ? heatmapError.startsWith("Heatmap dimensions")
+        ? heatmapError
+        : `Heatmap unavailable: ${heatmapError}`
+      : previousHeatmapLoading
+        ? "Loading previous heatmap"
+        : previousHeatmapError
+          ? previousHeatmapError
+          : invalidHeatmapCalibration
+            ? "Estimated density requires valid calibration"
+            : heatmapComparison.error
+              ? `Previous heatmap unavailable: ${heatmapComparison.error} Showing current heatmap.`
+              : heatmapComparePrevious && previousHeatmap
+                ? `Compared with ${previousImage?.folder ?? previousImage?.imageFolder}`
+                : "";
 
   const loadImage = useCallback(
     async (index, nextImages) => {
@@ -351,7 +361,7 @@ export default function App() {
     const requestId = (heatmapRequestRef.current += 1);
     const isCurrentRequest = () => requestId === heatmapRequestRef.current;
 
-    if (imageLayer !== "heatmap" || !activeImage || !selectedHeatmapCellSize) {
+    if (imageLayer !== "heatmap" || !activeImage || !hasActiveImageDimensions || !selectedHeatmapCellSize) {
       setHeatmapLoading(false);
       return undefined;
     }
@@ -360,22 +370,18 @@ export default function App() {
     setHeatmapError("");
     setHeatmap(null);
     setPreviousHeatmap(null);
+    setPreviousHeatmapError("");
+    setPreviousHeatmapLoading(false);
 
-    async function loadHeatmaps() {
+    async function loadCurrentHeatmap() {
       try {
         const currentPayload = await readJsonResponse(
           await fetch(`/api/images/${activeImage.id}/heatmap?cellSize=${selectedHeatmapCellSize}`),
         );
         if (!isCurrentRequest()) return;
+        const dimensionError = heatmapDimensionError(currentPayload.heatmap, activeImage);
+        if (dimensionError) throw new Error(dimensionError);
         setHeatmap(currentPayload.heatmap);
-
-        if (heatmapComparePrevious && activeIndex > 0) {
-          const previousPayload = await readJsonResponse(
-            await fetch(`/api/images/${previousImage.id}/heatmap?cellSize=${selectedHeatmapCellSize}`),
-          );
-          if (!isCurrentRequest()) return;
-          setPreviousHeatmap(previousPayload.heatmap);
-        }
       } catch (error) {
         if (!isCurrentRequest()) return;
         setHeatmapError(error.message);
@@ -384,11 +390,50 @@ export default function App() {
       }
     }
 
-    loadHeatmaps();
+    loadCurrentHeatmap();
     return () => {
       if (isCurrentRequest()) heatmapRequestRef.current += 1;
     };
-  }, [activeImage?.id, activeIndex, heatmapComparePrevious, imageLayer, previousImage?.id, selectedHeatmapCellSize]);
+  }, [activeImage?.height, activeImage?.id, activeImage?.width, hasActiveImageDimensions, imageLayer, selectedHeatmapCellSize]);
+
+  useEffect(() => {
+    const requestId = (previousHeatmapRequestRef.current += 1);
+    const isCurrentRequest = () => requestId === previousHeatmapRequestRef.current;
+
+    if (imageLayer !== "heatmap" || !heatmapComparePrevious || !heatmap || !previousImage) {
+      setPreviousHeatmapLoading(false);
+      if (!heatmapComparePrevious) setPreviousHeatmap(null);
+      return undefined;
+    }
+
+    setPreviousHeatmapLoading(true);
+    setPreviousHeatmapError("");
+    setPreviousHeatmap(null);
+
+    async function loadPreviousHeatmap() {
+      try {
+        const previousPayload = await readJsonResponse(
+          await fetch(`/api/images/${previousImage.id}/heatmap?cellSize=${selectedHeatmapCellSize}`),
+        );
+        if (!isCurrentRequest()) return;
+        const compatibilityError = heatmapCompatibilityError(heatmap, previousPayload.heatmap);
+        if (compatibilityError) throw new Error(compatibilityError);
+        setPreviousHeatmap(previousPayload.heatmap);
+      } catch (error) {
+        if (!isCurrentRequest()) return;
+        setPreviousHeatmap(null);
+        setPreviousHeatmapError(`Previous heatmap unavailable: ${error.message} Showing current heatmap.`);
+        setHeatmapComparePrevious(false);
+      } finally {
+        if (isCurrentRequest()) setPreviousHeatmapLoading(false);
+      }
+    }
+
+    loadPreviousHeatmap();
+    return () => {
+      if (isCurrentRequest()) previousHeatmapRequestRef.current += 1;
+    };
+  }, [heatmap, heatmapComparePrevious, imageLayer, previousImage?.id, selectedHeatmapCellSize]);
 
   useEffect(() => {
     if (!analysisResizeDrag) return undefined;
@@ -1370,7 +1415,10 @@ export default function App() {
                 <button
                   type="button"
                   aria-pressed={heatmapComparePrevious}
-                  onClick={() => setHeatmapComparePrevious((current) => !current)}
+                  onClick={() => {
+                    setPreviousHeatmapError("");
+                    setHeatmapComparePrevious((current) => !current);
+                  }}
                 >
                   Compare Previous
                 </button>
@@ -1494,16 +1542,22 @@ export default function App() {
                 className={heatmapComparison.value ? "heatmap-legend difference" : "heatmap-legend"}
                 aria-label="heatmap color legend"
               >
-                <span>
+                <span aria-label={heatmapComparison.value ? "comparison maximum" : undefined}>
                   {heatmapComparison.value
                     ? formatLegendValue(heatmapComparison.value.maxAbs, heatmapRange.unit)
                     : formatLegendValue(heatmapRange.max, heatmapRange.unit)}
                 </span>
-                <i aria-hidden="true" />
-                <span>{heatmapComparison.value ? "0" : formatLegendValue(heatmapRange.min, heatmapRange.unit)}</span>
-                {heatmapComparison.value ? (
-                  <span>{formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)}</span>
-                ) : null}
+                <div className="heatmap-legend-scale">
+                  <i aria-hidden="true" />
+                  {heatmapComparison.value ? (
+                    <span className="heatmap-legend-zero" aria-label="comparison zero">0</span>
+                  ) : null}
+                </div>
+                <span aria-label={heatmapComparison.value ? "comparison minimum" : undefined}>
+                  {heatmapComparison.value
+                    ? formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)
+                    : formatLegendValue(heatmapRange.min, heatmapRange.unit)}
+                </span>
               </div>
             ) : null}
             {activeImage && hasActiveImageDimensions && bounds ? (
@@ -1993,6 +2047,13 @@ function validHeatmapCellSize(value, fallback) {
 function formatLegendValue(value, unit) {
   const formatted = Number.isInteger(value) ? String(value) : Number(value).toFixed(4);
   return unit ? `${formatted} ${unit}` : formatted;
+}
+
+function heatmapDimensionError(heatmap, image) {
+  if (heatmap?.width === image?.width && heatmap?.height === image?.height) return "";
+  return `Heatmap dimensions ${heatmap?.width ?? "?"}x${heatmap?.height ?? "?"} do not match image ${
+    image?.width ?? "?"
+  }x${image?.height ?? "?"}.`;
 }
 
 function normalizeAndClampBounds(bounds, image) {
