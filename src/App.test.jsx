@@ -969,9 +969,12 @@ describe("App", () => {
 
   test("opens the Heat Map layer with persisted default presets", async () => {
     mockApi();
-    render(<App />);
+    const { container } = render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    const heatmapControls = screen.getByLabelText("Heatmap controls");
+    expect(screen.getByLabelText("Groups")).toContainElement(heatmapControls);
+    expect(container.querySelector(".stage-tools")).not.toContainElement(heatmapControls);
     expect(screen.getByRole("button", { name: /Small 5x5/ })).toHaveAttribute("aria-pressed", "true");
     expect(await screen.findByLabelText("heatmap overlay")).toBeInTheDocument();
 

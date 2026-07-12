@@ -1194,6 +1194,68 @@ export default function App() {
             );
           })}
         </div>
+        {imageLayer === "heatmap" ? (
+          <section className="heatmap-display heatmap-controls" aria-label="Heatmap controls">
+            <strong>Heatmap display</strong>
+            <div className="segmented-control heatmap-metric-control" aria-label="Heatmap metric">
+              <button
+                type="button"
+                aria-pressed={heatmapMetric === "pixel-density"}
+                onClick={() => handleHeatmapMetricSelect("pixel-density")}
+              >
+                Pixel Density
+              </button>
+              <button
+                type="button"
+                aria-pressed={heatmapMetric === "estimated-collagen-density"}
+                onClick={() => handleHeatmapMetricSelect("estimated-collagen-density")}
+              >
+                Estimated Collagen Density
+              </button>
+            </div>
+            <div className="segmented-control heatmap-size-control" aria-label="Heatmap cell size">
+              {Object.entries(heatmapPresets).map(([preset, value]) => (
+                <button
+                  type="button"
+                  key={preset}
+                  aria-pressed={heatmapPreset === preset}
+                  onClick={() => handleHeatmapPresetSelect(preset)}
+                >
+                  {`${HEATMAP_PRESET_LABELS[preset]} ${value}x${value}`}
+                </button>
+              ))}
+            </div>
+            <div className="heatmap-display-actions">
+              {activeIndex > 0 ? (
+                <button
+                  type="button"
+                  aria-pressed={heatmapComparePrevious}
+                  onClick={() => {
+                    setPreviousHeatmapError("");
+                    setHeatmapComparePrevious((current) => !current);
+                  }}
+                >
+                  Compare Previous
+                </button>
+              ) : null}
+              <label htmlFor="heatmap-opacity">
+                Opacity
+                <input
+                  id="heatmap-opacity"
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={heatmapOpacity}
+                  onChange={(event) => setHeatmapOpacity(Number(event.target.value))}
+                />
+              </label>
+            </div>
+            <span className="heatmap-view-state" aria-live="polite">
+              {heatmapViewStatus}
+            </span>
+          </section>
+        ) : null}
         <section className="heatmap-batch" aria-labelledby="heatmap-batch-heading">
           <div className="heatmap-batch-heading">
             <strong id="heatmap-batch-heading">Heatmap batch</strong>
@@ -1381,65 +1443,6 @@ export default function App() {
               Heat Map
             </button>
           </div>
-          {imageLayer === "heatmap" ? (
-            <div className="heatmap-controls" aria-label="Heatmap controls">
-              <div className="segmented-control heatmap-metric-control" aria-label="Heatmap metric">
-                <button
-                  type="button"
-                  aria-pressed={heatmapMetric === "pixel-density"}
-                  onClick={() => handleHeatmapMetricSelect("pixel-density")}
-                >
-                  Pixel Density
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={heatmapMetric === "estimated-collagen-density"}
-                  onClick={() => handleHeatmapMetricSelect("estimated-collagen-density")}
-                >
-                  Estimated Collagen Density
-                </button>
-              </div>
-              <div className="segmented-control heatmap-size-control" aria-label="Heatmap cell size">
-                {Object.entries(heatmapPresets).map(([preset, value]) => (
-                  <button
-                    type="button"
-                    key={preset}
-                    aria-pressed={heatmapPreset === preset}
-                    onClick={() => handleHeatmapPresetSelect(preset)}
-                  >
-                    {`${HEATMAP_PRESET_LABELS[preset]} ${value}x${value}`}
-                  </button>
-                ))}
-              </div>
-              {activeIndex > 0 ? (
-                <button
-                  type="button"
-                  aria-pressed={heatmapComparePrevious}
-                  onClick={() => {
-                    setPreviousHeatmapError("");
-                    setHeatmapComparePrevious((current) => !current);
-                  }}
-                >
-                  Compare Previous
-                </button>
-              ) : null}
-              <label htmlFor="heatmap-opacity">
-                Opacity
-                <input
-                  id="heatmap-opacity"
-                  type="range"
-                  min="0.1"
-                  max="1"
-                  step="0.05"
-                  value={heatmapOpacity}
-                  onChange={(event) => setHeatmapOpacity(Number(event.target.value))}
-                />
-              </label>
-              <span className="heatmap-view-state" aria-live="polite">
-                {heatmapViewStatus}
-              </span>
-            </div>
-          ) : null}
           <label htmlFor="point-opacity">
             Point opacity
             <input

@@ -356,32 +356,64 @@ input[type="range"] {
   width: 92px;
 }
 
-.heatmap-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+.heatmap-display {
+  display: grid;
   gap: 7px;
   min-width: 0;
+  padding: 10px 0;
+  border-top: 1px solid #27313c;
+  border-bottom: 1px solid #27313c;
 }
 
-.heatmap-controls > button {
-  min-height: 30px;
+.heatmap-display .segmented-control {
+  width: 100%;
 }
 
-.heatmap-controls input[type="range"] {
-  width: 88px;
+.heatmap-display .segmented-control button {
+  min-width: 0;
+  padding: 0 7px;
+  font-size: 0.78rem;
+  white-space: normal;
+}
+
+.heatmap-metric-control {
+  grid-auto-flow: row;
+  grid-auto-columns: 1fr;
+}
+
+.heatmap-size-control {
+  grid-auto-columns: minmax(0, 1fr);
+}
+
+.heatmap-display-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.heatmap-display-actions label {
+  display: grid;
+  grid-template-columns: auto minmax(70px, 1fr);
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #aab7c3;
+  font-size: 0.78rem;
+}
+
+.heatmap-display-actions input[type="range"] {
+  width: 100%;
 }
 
 .heatmap-view-state {
   display: block;
-  width: 210px;
-  min-height: 16px;
-  overflow: hidden;
+  width: 100%;
+  min-height: 32px;
   color: #aab7c3;
   font-size: 0.78rem;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .segmented-control {
