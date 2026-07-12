@@ -231,6 +231,121 @@ describe("createApp", () => {
     expect(JSON.stringify(body)).not.toContain(missingRoot);
   });
 
+  test("selects a heatmap folder without changing the image root", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const batchRoot = await createTempRoot();
+    await writeImage(imageRoot, "sample-a", "frame001.tif");
+    const app = createApp({
+      rootDir: appRoot,
+      initialRoot: imageRoot,
+      selectHeatmapRoot: async () => batchRoot,
+    });
+
+    const response = await jsonRequest(app, "/api/heatmaps/select-folder", { method: "POST" });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ rootPath: batchRoot });
+    await expect((await request(app, "/api/root")).json()).resolves.toMatchObject({ rootPath: imageRoot });
+  });
+
+  test("heatmap folder selection returns a safe cancellation error", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const app = createApp({
+      rootDir: appRoot,
+      selectHeatmapRoot: async () => {
+        throw new Error(`User cancelled selecting ${imageRoot}`);
+      },
+    });
+
+    const response = await jsonRequest(app, "/api/heatmaps/select-folder", { method: "POST" });
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body).toEqual({ error: "Heatmap folder selection was cancelled or failed." });
+    expect(JSON.stringify(body)).not.toContain(imageRoot);
+  });
+
+  test("generates requested preset sizes and returns a safe summary", async () => {
+    const appRoot = await createTempRoot();
+    const batchRoot = await createTempRoot();
+    await writeImage(batchRoot, "sample-a", "frame001.tif");
+    await writeMask(batchRoot, "sample-a", "frame001.png");
+
+    const response = await jsonRequest(createApp({ rootDir: appRoot }), "/api/heatmaps/generate", {
+      method: "POST",
+      body: { rootPath: batchRoot, cellSizes: [5, 10, 20] },
+    });
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ completed: 1, generatedFiles: 3 });
+    expect(JSON.stringify(body)).not.toContain(batchRoot);
+  });
+
+  test("heatmap generation maps missing and invalid sizes to safe 400 errors", async () => {
+    const appRoot = await createTempRoot();
+    const batchRoot = await createTempRoot();
+    const app = createApp({ rootDir: appRoot });
+
+    for (const body of [{ rootPath: batchRoot }, { rootPath: batchRoot, cellSizes: [0] }]) {
+      const response = await jsonRequest(app, "/api/heatmaps/generate", { method: "POST", body });
+
+      expect(response.status).toBe(400);
+      const responseBody = await response.json();
+      expect(responseBody.error).toBe("Heatmap cell sizes must be valid positive integers.");
+      expect(JSON.stringify(responseBody)).not.toContain(batchRoot);
+    }
+  });
+
+  test("loads one saved image heatmap by cell size", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "sample-a", "frame001.tif");
+    await writeMask(imageRoot, "sample-a", "frame001.png");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+    await jsonRequest(app, "/api/heatmaps/generate", {
+      method: "POST",
+      body: { rootPath: imageRoot, cellSizes: [10] },
+    });
+
+    const response = await request(app, "/api/images/sample-a/heatmap?cellSize=10");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ heatmap: { cellWidth: 10 } });
+  });
+
+  test("heatmap loading maps missing, stale, and malformed saved data to safe statuses", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const folderName = "sample-a";
+    await writeImage(imageRoot, folderName, "frame001.tif");
+    await writeMask(imageRoot, folderName, "frame001.png");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const missingResponse = await request(app, `/api/images/${folderName}/heatmap?cellSize=10`);
+    expect(missingResponse.status).toBe(404);
+    await expect(missingResponse.json()).resolves.toEqual({ error: "Saved heatmap does not exist." });
+
+    await jsonRequest(app, "/api/heatmaps/generate", {
+      method: "POST",
+      body: { rootPath: imageRoot, cellSizes: [10] },
+    });
+    await writeMask(imageRoot, folderName, "frame001.png");
+    const staleResponse = await request(app, `/api/images/${folderName}/heatmap?cellSize=10`);
+    expect(staleResponse.status).toBe(409);
+    await expect(staleResponse.json()).resolves.toEqual({ error: "Saved heatmap is stale." });
+
+    const savedPath = path.join(imageRoot, folderName, "heatmap", "10x10", `${folderName}.heatmap.json`);
+    await writeFile(savedPath, "{ malformed json");
+    const malformedResponse = await request(app, `/api/images/${folderName}/heatmap?cellSize=10`);
+    expect(malformedResponse.status).toBe(422);
+    const malformedBody = await malformedResponse.json();
+    expect(malformedBody).toEqual({ error: "Saved heatmap is invalid." });
+    expect(JSON.stringify(malformedBody)).not.toContain(imageRoot);
+  });
+
   test("returns saved bounds for reviewing an image", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();

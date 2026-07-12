@@ -6,11 +6,11 @@ import { createApp } from "./app.js";
 
 const execFileAsync = promisify(execFile);
 
-export async function chooseFolderWithAppleScript() {
+export async function chooseFolderWithAppleScript(prompt = "Choose image sequence root folder") {
   try {
     const { stdout } = await execFileAsync("osascript", [
       "-e",
-      'POSIX path of (choose folder with prompt "Choose image sequence root folder")',
+      `POSIX path of (choose folder with prompt ${JSON.stringify(prompt)})`,
     ]);
     const selectedPath = stdout.trim();
 
@@ -29,7 +29,8 @@ export function startServer({ rootDir = process.cwd(), port = process.env.PORT |
     rootDir,
     dataDir: path.join(rootDir, "data"),
     initialRoot: process.env.BOUND_EDITOR_ROOT || null,
-    selectRoot: chooseFolderWithAppleScript,
+    selectRoot: () => chooseFolderWithAppleScript("Choose image sequence root folder"),
+    selectHeatmapRoot: () => chooseFolderWithAppleScript("Choose heatmap batch folder"),
   });
 
   return app.listen(port, () => {

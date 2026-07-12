@@ -4,6 +4,7 @@ import express from "express";
 import { createStorage } from "./storage.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
 import { AnalysisError, loadAnalysis, recalculateAnalysis } from "./analysisService.js";
+import { HeatmapError, generateHeatmapBatch, loadImageHeatmap } from "./heatmapService.js";
 import { createMaskPreview, createRoiOverlay, createSkeletonPreview } from "./previewLayers.js";
 
 const CONNECTION_MODE = "input-order-cycle";
@@ -57,6 +58,18 @@ function safeErrorResponse(error) {
     };
 
     return { status: error.status, body: { error: messages[error.code] ?? "Unable to calculate analysis metrics." } };
+  }
+
+  if (error instanceof HeatmapError) {
+    const messages = {
+      INVALID_ROOT: "Invalid heatmap batch root.",
+      INVALID_CELL_SIZE: "Heatmap cell sizes must be valid positive integers.",
+      MISSING_HEATMAP: "Saved heatmap does not exist.",
+      STALE_HEATMAP: "Saved heatmap is stale.",
+      INVALID_HEATMAP: "Saved heatmap is invalid.",
+    };
+
+    return { status: error.status, body: { error: messages[error.code] ?? "Unable to process heatmap data." } };
   }
 
   if (isInvalidSavedBoundsJsonError(error)) {
@@ -146,6 +159,7 @@ export function createApp({
   storage = null,
   initialRoot = null,
   selectRoot = null,
+  selectHeatmapRoot = null,
   dataDir = null,
   maxImagePixels,
 } = {}) {
@@ -186,6 +200,30 @@ export function createApp({
       }
 
       response.json(await rootPayload(imageStorage));
+    }),
+  );
+
+  app.post(
+    "/api/heatmaps/select-folder",
+    asyncRoute(async (_request, response) => {
+      try {
+        response.json({ rootPath: await selectHeatmapRoot() });
+      } catch {
+        response.status(400).json({ error: "Heatmap folder selection was cancelled or failed." });
+      }
+    }),
+  );
+
+  app.post(
+    "/api/heatmaps/generate",
+    asyncRoute(async (request, response) => {
+      response.json(
+        await generateHeatmapBatch({
+          rootPath: request.body?.rootPath,
+          cellSizes: request.body?.cellSizes,
+          maxImagePixels,
+        }),
+      );
     }),
   );
 
@@ -241,6 +279,13 @@ export function createApp({
           "X-Pixel-Format": "uint16le",
         })
         .send(raw.buffer);
+    }),
+  );
+
+  app.get(
+    "/api/images/:id/heatmap",
+    asyncRoute(async (request, response) => {
+      response.json({ heatmap: await loadImageHeatmap(imageStorage, request.params.id, request.query.cellSize) });
     }),
   );
 
