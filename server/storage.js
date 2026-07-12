@@ -147,6 +147,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const maskDir = path.join(image.folderPath, "mask");
     const skeletonDir = path.join(image.folderPath, "Skeletonize");
     const analysisDir = path.join(image.folderPath, "analysis");
+    const heatmapDir = path.join(image.folderPath, "heatmap");
 
     return {
       folderPath: image.folderPath,
@@ -157,6 +158,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
       maskDir,
       skeletonDir,
       analysisDir,
+      heatmapDir,
       skeletonPath: path.join(skeletonDir, `${image.imageFolder}.skeleton.png`),
       analysisPath: path.join(analysisDir, `${image.imageFolder}.analysis.json`),
     };

@@ -1,0 +1,90 @@
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import sharp from "sharp";
+import { afterEach, expect, test } from "vitest";
+import { generateHeatmapBatch, loadImageHeatmap } from "./heatmapService.js";
+import { createStorage } from "./storage.js";
+
+const tempRoots = [];
+
+async function createTempRoot() {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "heatmap-service-"));
+  tempRoots.push(rootDir);
+  return rootDir;
+}
+
+async function writeBundle(rootDir, folderName, { width, height }) {
+  const folderPath = path.join(rootDir, folderName);
+  const imageDir = path.join(folderPath, "image");
+  const maskDir = path.join(folderPath, "mask");
+  const imageName = `${path.basename(folderName)}.tif`;
+  await mkdir(imageDir, { recursive: true });
+  await mkdir(maskDir, { recursive: true });
+  await writeFile(path.join(imageDir, imageName), "tiff placeholder");
+  await sharp(Buffer.alloc(width * height, 255), { raw: { width, height, channels: 1 } }).png().toFile(path.join(maskDir, `${path.basename(folderName)}.png`));
+}
+
+async function writeUnreadableBundle(rootDir, folderName) {
+  const folderPath = path.join(rootDir, folderName);
+  const imageDir = path.join(folderPath, "image");
+  const maskDir = path.join(folderPath, "mask");
+  await mkdir(imageDir, { recursive: true });
+  await mkdir(maskDir, { recursive: true });
+  await writeFile(path.join(imageDir, `${folderName}.tif`), "tiff placeholder");
+  await writeFile(path.join(maskDir, `${folderName}.png`), "not an image");
+}
+
+async function setupStorageWithSavedHeatmap() {
+  const rootDir = await createTempRoot();
+  await writeBundle(rootDir, "sample-a", { width: 2, height: 2 });
+  await generateHeatmapBatch({ rootPath: rootDir, cellSizes: [5] });
+  return createStorage({ initialRoot: rootDir });
+}
+
+async function touchMask(maskDir) {
+  const maskPath = path.join(maskDir, "sample-a.png");
+  const metadata = await stat(maskPath);
+  const nextTime = new Date(metadata.mtimeMs + 1_000);
+  await utimes(maskPath, nextTime, nextTime);
+}
+
+afterEach(async () => {
+  await Promise.all(tempRoots.splice(0).map((rootDir) => rm(rootDir, { recursive: true, force: true })));
+});
+
+test("recursively writes each unique preset beside image and mask folders", async () => {
+  const rootDir = await createTempRoot();
+  await writeBundle(rootDir, "experiment/day-1/sample-a", { width: 5, height: 3 });
+
+  const result = await generateHeatmapBatch({ rootPath: rootDir, cellSizes: [5, 10, 20, 5] });
+
+  expect(result).toMatchObject({ discovered: 1, completed: 1, skipped: 0, failed: 0, generatedFiles: 3 });
+  for (const size of [5, 10, 20]) {
+    const saved = JSON.parse(
+      await readFile(path.join(rootDir, "experiment/day-1/sample-a", "heatmap", `${size}x${size}`, "sample-a.heatmap.json")),
+    );
+    expect(saved).toMatchObject({ imageFolder: "sample-a", cellWidth: size, cellHeight: size });
+  }
+});
+
+test("continues after an unreadable bundle and returns relative failures", async () => {
+  const rootDir = await createTempRoot();
+  await writeBundle(rootDir, "good", { width: 2, height: 2 });
+  await writeUnreadableBundle(rootDir, "bad");
+
+  const result = await generateHeatmapBatch({ rootPath: rootDir, cellSizes: [5] });
+
+  expect(result.completed).toBe(1);
+  expect(result.failed).toBe(1);
+  expect(result.failures[0].imageFolder).toBe("bad");
+  expect(JSON.stringify(result)).not.toContain(rootDir);
+});
+
+test("loads current image heatmaps and rejects stale mask metadata", async () => {
+  const storage = await setupStorageWithSavedHeatmap();
+
+  await expect(loadImageHeatmap(storage, "sample-a", 5)).resolves.toMatchObject({ cellWidth: 5 });
+  await touchMask(storage.imagePaths("sample-a").maskDir);
+  await expect(loadImageHeatmap(storage, "sample-a", 5)).rejects.toMatchObject({ code: "STALE_HEATMAP" });
+});
