@@ -13,16 +13,24 @@ function assertRelativeMetadata(value, label) {
     value.length === 0 ||
     value.startsWith("/") ||
     value.startsWith("\\") ||
-    /^[A-Za-z]:[\\/]/.test(value)
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    value.split(/[\\/]+/).some((segment) => segment === "." || segment === "..")
   ) {
     throw new Error(`Heatmap ${label} must be a non-empty relative path.`);
   }
 }
 
 function assertIsoTimestamp(value) {
-  if (typeof value !== "string" || Number.isNaN(Date.parse(value)) || !value.endsWith("Z")) {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
     throw new Error("Heatmap updatedAt must be an ISO timestamp.");
   }
+}
+
+function assertMaskSource(maskSource) {
+  if (!maskSource || typeof maskSource !== "object") {
+    throw new Error("Heatmap maskSource must include a relative file path.");
+  }
+  assertRelativeMetadata(maskSource.file, "maskSource.file");
 }
 
 function assertMask(mask) {
@@ -142,7 +150,7 @@ export function buildMaskHeatmapGrid({ mask, cellSize }) {
 
 export function createHeatmapPayload({ imageFolder, maskSource, mask, cellSize, updatedAt }) {
   assertRelativeMetadata(imageFolder, "imageFolder");
-  assertRelativeMetadata(maskSource, "maskSource");
+  assertMaskSource(maskSource);
   const grid = buildMaskHeatmapGrid({ mask, cellSize });
   const timestamp = updatedAt ?? new Date().toISOString();
   assertIsoTimestamp(timestamp);
@@ -168,7 +176,7 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
     throw new Error("Invalid heatmap payload schema.");
   }
   assertRelativeMetadata(payload.imageFolder, "imageFolder");
-  assertRelativeMetadata(payload.maskSource, "maskSource");
+  assertMaskSource(payload.maskSource);
   assertIsoTimestamp(payload.updatedAt);
   assertPositiveSafeInteger(payload.width, "width");
   assertPositiveSafeInteger(payload.height, "height");

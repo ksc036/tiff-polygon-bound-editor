@@ -49,7 +49,7 @@ test("rejects invalid cell sizes and malformed saved payloads", () => {
 test("creates and validates a relative heatmap payload", () => {
   const payload = createHeatmapPayload({
     imageFolder: "images/sample",
-    maskSource: "masks/sample.png",
+    maskSource: { file: "masks/sample.png", format: "png" },
     mask: { width: 2, height: 1, data: new Uint8Array([1, 0]) },
     cellSize: 1,
     updatedAt: "2026-07-12T00:00:00.000Z",
@@ -58,7 +58,7 @@ test("creates and validates a relative heatmap payload", () => {
   expect(payload).toMatchObject({
     schemaVersion: 1,
     imageFolder: "images/sample",
-    maskSource: "masks/sample.png",
+    maskSource: { file: "masks/sample.png", format: "png" },
     width: 2,
     height: 1,
     cellWidth: 1,
@@ -72,11 +72,11 @@ test("creates and validates a relative heatmap payload", () => {
 
 test.each(["/tmp/mask.png", "C:\\tmp\\mask.png", "\\\\server\\share\\mask.png"])(
   "rejects absolute source metadata: %s",
-  (maskSource) => {
+  (maskFile) => {
     expect(() =>
       createHeatmapPayload({
         imageFolder: "images/sample",
-        maskSource,
+        maskSource: { file: maskFile, format: "png" },
         mask: { width: 1, height: 1, data: new Uint8Array([1]) },
         cellSize: 1,
         updatedAt: "2026-07-12T00:00:00.000Z",
@@ -88,7 +88,7 @@ test.each(["/tmp/mask.png", "C:\\tmp\\mask.png", "\\\\server\\share\\mask.png"])
 test("rejects payloads with a mismatched expected cell size", () => {
   const payload = createHeatmapPayload({
     imageFolder: "images/sample",
-    maskSource: "masks/sample.png",
+    maskSource: { file: "masks/sample.png", format: "png" },
     mask: { width: 2, height: 2, data: new Uint8Array([1, 0, 0, 1]) },
     cellSize: 1,
     updatedAt: "2026-07-12T00:00:00.000Z",
@@ -100,7 +100,7 @@ test("rejects payloads with a mismatched expected cell size", () => {
 test("rejects non-integer grid dimensions and out-of-range density", () => {
   const payload = createHeatmapPayload({
     imageFolder: "images/sample",
-    maskSource: "masks/sample.png",
+    maskSource: { file: "masks/sample.png", format: "png" },
     mask: { width: 1, height: 1, data: new Uint8Array([1]) },
     cellSize: 1,
     updatedAt: "2026-07-12T00:00:00.000Z",
@@ -113,4 +113,76 @@ test("rejects non-integer grid dimensions and out-of-range density", () => {
       { cellSize: 1 },
     ),
   ).toThrow("density");
+});
+
+test.each([
+  "../private/mask.png",
+  "..\\private\\mask.png",
+  "images/../../private",
+  "images\\..\\..\\private",
+  ".",
+  "..",
+])("rejects traversal in createHeatmapPayload metadata: %s", (pathValue) => {
+  expect(() =>
+    createHeatmapPayload({
+      imageFolder: pathValue,
+      maskSource: { file: "masks/sample.png", format: "png" },
+      mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+      cellSize: 1,
+      updatedAt: "2026-07-12T00:00:00.000Z",
+    }),
+  ).toThrow("relative");
+
+  expect(() =>
+    createHeatmapPayload({
+      imageFolder: "images/sample",
+      maskSource: { file: pathValue, format: "png" },
+      mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+      cellSize: 1,
+      updatedAt: "2026-07-12T00:00:00.000Z",
+    }),
+  ).toThrow("relative");
+});
+
+test("rejects traversal in validateHeatmapPayload metadata", () => {
+  const payload = createHeatmapPayload({
+    imageFolder: "images/sample",
+    maskSource: { file: "masks/sample.png", format: "png" },
+    mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+    cellSize: 1,
+    updatedAt: "2026-07-12T00:00:00.000Z",
+  });
+
+  expect(() => validateHeatmapPayload({ ...payload, imageFolder: "images/../../private" }, { cellSize: 1 })).toThrow(
+    "relative",
+  );
+  expect(() =>
+    validateHeatmapPayload(
+      { ...payload, maskSource: { ...payload.maskSource, file: "masks\\..\\..\\private" } },
+      { cellSize: 1 },
+    ),
+  ).toThrow("relative");
+});
+
+test("rejects non-canonical ISO timestamps when creating and validating payloads", () => {
+  expect(() =>
+    createHeatmapPayload({
+      imageFolder: "images/sample",
+      maskSource: { file: "masks/sample.png", format: "png" },
+      mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+      cellSize: 1,
+      updatedAt: "2026-07-12 00:00:00Z",
+    }),
+  ).toThrow("ISO");
+
+  const payload = createHeatmapPayload({
+    imageFolder: "images/sample",
+    maskSource: { file: "masks/sample.png", format: "png" },
+    mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+    cellSize: 1,
+    updatedAt: "2026-07-12T00:00:00.000Z",
+  });
+  expect(() => validateHeatmapPayload({ ...payload, updatedAt: "2026-07-12 00:00:00Z" }, { cellSize: 1 })).toThrow(
+    "ISO",
+  );
 });
