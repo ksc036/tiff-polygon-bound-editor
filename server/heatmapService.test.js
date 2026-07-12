@@ -128,6 +128,38 @@ test("removes atomic temporary files after an injected rename failure", async ()
   await expect(readdir(path.join(rootDir, "sample-a", "heatmap", "5x5"))).resolves.toEqual([]);
 });
 
+test("fails a bundle when the mask snapshot changes during decode", async () => {
+  const rootDir = await createTempRoot();
+  await writeBundle(rootDir, "sample-a", { width: 2, height: 2 });
+  const maskPath = path.join(rootDir, "sample-a", "mask", "sample-a.png");
+  const actualStats = await stat(maskPath);
+  let snapshot = 0;
+
+  const result = await generateHeatmapBatch({
+    rootPath: rootDir,
+    cellSizes: [5],
+    __testDependencies: {
+      stat: async (filePath) => {
+        expect(filePath).toBe(maskPath);
+        snapshot += 1;
+        return snapshot === 1
+          ? actualStats
+          : { ...actualStats, ino: actualStats.ino + 1 };
+      },
+    },
+  });
+
+  expect(snapshot).toBe(2);
+  expect(result).toMatchObject({ completed: 0, failed: 1, generatedFiles: 0 });
+  expect(result.failures).toEqual([
+    {
+      imageFolder: "sample-a",
+      code: "MASK_CHANGED",
+      message: "Mask source changed during heatmap generation.",
+    },
+  ]);
+});
+
 test("loads current image heatmaps and rejects stale mask metadata", async () => {
   const storage = await setupStorageWithSavedHeatmap();
 

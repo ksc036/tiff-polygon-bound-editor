@@ -66,6 +66,10 @@ function publicFailure(imageFolder, error) {
   };
 }
 
+function sameMaskSnapshot(before, after) {
+  return ["dev", "ino", "size", "mtimeMs"].every((field) => before[field] === after[field]);
+}
+
 async function writeHeatmapAtomically(filePath, payload, fileSystem) {
   const outputDir = path.dirname(filePath);
   const tempPath = path.join(outputDir, `.${randomUUID()}.tmp`);
@@ -149,11 +153,17 @@ export async function generateHeatmapBatch({ rootPath, cellSizes, maxImagePixels
         continue;
       }
 
-      const [mask, maskStats] = await Promise.all([
-        readBinaryMask(maskSource.path, { maxImagePixels }),
-        fileSystem.stat(maskSource.path),
-      ]);
-      const sourceMetadata = { file: maskSource.file, mtimeMs: maskStats.mtimeMs, size: maskStats.size };
+      const maskStatsBefore = await fileSystem.stat(maskSource.path);
+      const mask = await readBinaryMask(maskSource.path, { maxImagePixels });
+      const maskStatsAfter = await fileSystem.stat(maskSource.path);
+      if (!sameMaskSnapshot(maskStatsBefore, maskStatsAfter)) {
+        throw heatmapError("MASK_CHANGED", "Mask source changed during heatmap generation.", 409);
+      }
+      const sourceMetadata = {
+        file: maskSource.file,
+        mtimeMs: maskStatsAfter.mtimeMs,
+        size: maskStatsAfter.size,
+      };
 
       for (const cellSize of sizes) {
         const payload = createHeatmapPayload({ imageFolder: bundle.imageFolder, maskSource: sourceMetadata, mask, cellSize });

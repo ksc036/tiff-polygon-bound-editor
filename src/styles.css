@@ -551,6 +551,7 @@ input[type="range"] {
 
 .heatmap-overlay {
   z-index: 1;
+  image-rendering: pixelated;
   shape-rendering: crispEdges;
   pointer-events: none;
 }

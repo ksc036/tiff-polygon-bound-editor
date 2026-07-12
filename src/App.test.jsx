@@ -307,6 +307,8 @@ function mockApi({
   analysisResponse = { analysis: null, hasAnalysis: false },
   recalculateAnalysis = savedAnalysis,
   heatmapResponse,
+  selectHeatmapFolderResponse,
+  generateHeatmapsResponse,
   rawDimensionsById = {},
 } = {}) {
   const calls = [];
@@ -325,9 +327,11 @@ function mockApi({
       return jsonResponse({ rootPath: "/selected/root", images: rootImages });
     }
     if (url === "/api/heatmaps/select-folder" && method === "POST") {
+      if (selectHeatmapFolderResponse) return selectHeatmapFolderResponse();
       return jsonResponse({ rootPath: "/selected/heatmap-root" });
     }
     if (url === "/api/heatmaps/generate" && method === "POST") {
+      if (generateHeatmapsResponse) return generateHeatmapsResponse(options);
       return jsonResponse({
         discovered: 2,
         completed: 2,
@@ -337,7 +341,7 @@ function mockApi({
         failures: [],
       });
     }
-    const heatmapMatch = url.match(/^\/api\/images\/(scan-a|scan-b)\/heatmap\?cellSize=(\d+)$/);
+    const heatmapMatch = url.match(/^\/api\/images\/(scan-a|scan-b|scan-c)\/heatmap\?cellSize=(\d+)$/);
     if (heatmapMatch && method === "GET") {
       if (heatmapResponse) return heatmapResponse(url, Number(heatmapMatch[2]));
       const imageId = heatmapMatch[1];
@@ -351,6 +355,9 @@ function mockApi({
     if (url === "/api/images/scan-b" && method === "GET") {
       return jsonResponse({ image: images[1] });
     }
+    if (url === "/api/images/scan-c" && method === "GET") {
+      return jsonResponse({ image: rootImages.find((image) => image.id === "scan-c") });
+    }
     if (url === "/api/images/scan-a/raw16" && method === "GET") {
       return raw16Response(...(rawDimensionsById["scan-a"] ?? [100, 80]));
     }
@@ -361,6 +368,12 @@ function mockApi({
       return raw16Response(...(rawDimensionsById["scan-b"] ?? [120, 90]));
     }
     if (url === "/api/images/scan-b/roi-overlay" && method === "POST") {
+      return pngResponse();
+    }
+    if (url === "/api/images/scan-c/raw16" && method === "GET") {
+      return raw16Response(...(rawDimensionsById["scan-c"] ?? [100, 80]));
+    }
+    if (url === "/api/images/scan-c/roi-overlay" && method === "POST") {
       return pngResponse();
     }
     if (url === "/api/images/scan-a/bounds" && method === "GET") {
@@ -388,6 +401,22 @@ function mockApi({
     if (url === "/api/images/scan-b/analysis" && method === "GET") {
       return jsonResponse({ analysis: null, hasAnalysis: false });
     }
+    if (url === "/api/images/scan-c/bounds" && method === "GET") {
+      return jsonResponse({
+        bounds: {
+          ...savedBounds,
+          imageFolder: "plate-c",
+          imageFile: "c.tif",
+          width: 100,
+          height: 80,
+          groups: [],
+        },
+        hasBounds: false,
+      });
+    }
+    if (url === "/api/images/scan-c/analysis" && method === "GET") {
+      return jsonResponse({ analysis: null, hasAnalysis: false });
+    }
     if (url === "/api/images/scan-a/bounds" && method === "PUT") {
       if (saveResponse) {
         return saveResponse(options);
@@ -406,7 +435,22 @@ function mockApi({
 }
 
 describe("App", () => {
+  let canvasContexts;
+
   beforeEach(() => {
+    canvasContexts = new WeakMap();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function getContext() {
+      if (!canvasContexts.has(this)) {
+        canvasContexts.set(this, {
+          clearRect: vi.fn(),
+          fillRect: vi.fn(),
+          fillStyle: "",
+          globalAlpha: 1,
+          imageSmoothingEnabled: true,
+        });
+      }
+      return canvasContexts.get(this);
+    });
     localStorage.clear();
     vi.stubGlobal("confirm", vi.fn(() => true));
     vi.stubGlobal("URL", {
@@ -1039,12 +1083,32 @@ describe("App", () => {
     await act(async () => {
       largeRequest.resolve(await jsonResponse({ heatmap: heatmapFixture("plate-a", 20, 0.8) }));
     });
-    const currentFill = (await screen.findByLabelText("heatmap overlay")).querySelector("rect").getAttribute("fill");
+    const overlay = await screen.findByLabelText("heatmap overlay");
+    const currentFill = canvasContexts.get(overlay).fillStyle;
 
     await act(async () => {
       smallRequest.resolve(await jsonResponse({ heatmap: heatmapA5 }));
     });
-    expect(screen.getByLabelText("heatmap overlay").querySelector("rect")).toHaveAttribute("fill", currentFill);
+    expect(canvasContexts.get(screen.getByLabelText("heatmap overlay")).fillStyle).toBe(currentFill);
+  });
+
+  test("rejects a current heatmap above the client cell budget", async () => {
+    mockApi({
+      heatmapResponse: (_url, cellSize) =>
+        jsonResponse({
+          heatmap: {
+            ...heatmapFixture("plate-a", cellSize),
+            columns: 1_000_001,
+            rows: 1,
+          },
+        }),
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+
+    expect(await screen.findByText("Heatmap unavailable: Heatmap grid exceeds the 1,000,000 cell limit.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("heatmap overlay")).not.toBeInTheDocument();
   });
 
   test("shows current and estimated metrics using current calibration", async () => {
@@ -1120,7 +1184,47 @@ describe("App", () => {
       "Showing current heatmap.",
     );
     expect(screen.getByLabelText("heatmap overlay")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("retries comparison on the next compatible image after a previous heatmap failure", async () => {
+    const compatibleImages = [
+      images[0],
+      { ...images[1], width: 100, height: 80 },
+      {
+        id: "scan-c",
+        folder: "plate-c",
+        imageFolder: "plate-c",
+        file: "c.tif",
+        imageFile: "c.tif",
+        width: 100,
+        height: 80,
+      },
+    ];
+    mockApi({
+      rootImages: compatibleImages,
+      rawDimensionsById: { "scan-b": [100, 80], "scan-c": [100, 80] },
+      heatmapResponse: (url, cellSize) => {
+        if (url.includes("scan-a")) {
+          return jsonResponse({ error: "Saved heatmap is stale." }, { status: 409 });
+        }
+        const imageFolder = url.includes("scan-b") ? "plate-b" : "plate-c";
+        return jsonResponse({ heatmap: heatmapFixture(imageFolder, cellSize, 0.08) });
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Next image" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compare Previous" }));
+
+    expect(await screen.findByText(/Previous heatmap unavailable: Saved heatmap is stale/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+
+    expect(await screen.findByText("Compared with plate-b")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "true");
   });
 
   test("keeps current heatmap and reports incompatible previous dimensions", async () => {
@@ -1136,7 +1240,7 @@ describe("App", () => {
       "Showing current heatmap.",
     );
     expect(screen.getByLabelText("heatmap overlay")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Compare Previous" })).toHaveAttribute("aria-pressed", "true");
   });
 
   test("rejects a current heatmap whose dimensions do not match the displayed image", async () => {
@@ -1204,6 +1308,93 @@ describe("App", () => {
       });
     });
     expect(screen.getByText(/2 discovered/)).toHaveTextContent("6 files");
+  });
+
+  test("ignores a pending folder response after generation starts and disables folder selection", async () => {
+    const pendingSelection = deferred();
+    const pendingGeneration = deferred();
+    let selectionCount = 0;
+    mockApi({
+      selectHeatmapFolderResponse: () => {
+        selectionCount += 1;
+        return selectionCount === 1
+          ? jsonResponse({ rootPath: "/selected/heatmap-root" })
+          : pendingSelection.promise;
+      },
+      generateHeatmapsResponse: () => pendingGeneration.promise,
+    });
+    render(<App />);
+
+    const chooseButton = await screen.findByRole("button", { name: "Choose heatmap folder" });
+    fireEvent.click(chooseButton);
+    await screen.findByText("/selected/heatmap-root");
+    fireEvent.click(chooseButton);
+    fireEvent.click(screen.getByRole("button", { name: "Generate Heatmaps" }));
+
+    expect(chooseButton).toBeDisabled();
+    await act(async () => {
+      pendingSelection.resolve(await jsonResponse({ rootPath: "/stale/heatmap-root" }));
+    });
+    expect(screen.getByText("/selected/heatmap-root")).toBeInTheDocument();
+    expect(screen.queryByText("/stale/heatmap-root")).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingGeneration.resolve(await jsonResponse({
+        discovered: 1,
+        completed: 1,
+        skipped: 0,
+        failed: 0,
+        generatedFiles: 3,
+        failures: [],
+      }));
+    });
+    expect(chooseButton).toBeEnabled();
+  });
+
+  test("ignores an older generation response that resolves after the newest request", async () => {
+    const firstGeneration = deferred();
+    const secondGeneration = deferred();
+    let generationCount = 0;
+    mockApi({
+      generateHeatmapsResponse: () => {
+        generationCount += 1;
+        return generationCount === 1 ? firstGeneration.promise : secondGeneration.promise;
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
+    await screen.findByText("/selected/heatmap-root");
+    const generateButton = screen.getByRole("button", { name: "Generate Heatmaps" });
+    act(() => {
+      generateButton.click();
+      generateButton.click();
+    });
+    await waitFor(() => expect(generationCount).toBe(2));
+
+    await act(async () => {
+      secondGeneration.resolve(await jsonResponse({
+        discovered: 2,
+        completed: 2,
+        skipped: 0,
+        failed: 0,
+        generatedFiles: 6,
+        failures: [],
+      }));
+    });
+    expect(screen.getByText(/2 discovered/)).toHaveTextContent("2 completed");
+
+    await act(async () => {
+      firstGeneration.resolve(await jsonResponse({
+        discovered: 1,
+        completed: 1,
+        skipped: 0,
+        failed: 0,
+        generatedFiles: 3,
+        failures: [],
+      }));
+    });
+    expect(screen.getByText(/2 discovered/)).toHaveTextContent("2 completed");
   });
 
   test("renders ROI preview locally without requesting a server overlay", async () => {

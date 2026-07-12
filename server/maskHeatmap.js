@@ -1,5 +1,6 @@
 const SCHEMA_VERSION = 1;
 const MAX_CELL_SIZE = 4096;
+const MAX_CELL_COUNT = 1_000_000;
 
 function assertPositiveSafeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -69,6 +70,12 @@ function assertMask(mask) {
   }
 }
 
+function assertCellBudget(columns, rows) {
+  if (columns > Math.floor(MAX_CELL_COUNT / rows)) {
+    throw new Error("Heatmap grid exceeds the 1,000,000 cell limit.");
+  }
+}
+
 function assertGridCell(cell, index, grid) {
   if (!cell || typeof cell !== "object") {
     throw new Error(`Heatmap cell ${index} is malformed.`);
@@ -131,6 +138,7 @@ export function buildMaskHeatmapGrid({ mask, cellSize }) {
   const size = validateCellSize(cellSize);
   const columns = Math.ceil(mask.width / size);
   const rows = Math.ceil(mask.height / size);
+  assertCellBudget(columns, rows);
   const cells = [];
 
   for (let row = 0; row < rows; row += 1) {
@@ -210,6 +218,7 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
   assertPositiveSafeInteger(payload.cellHeight, "cell height");
   assertPositiveSafeInteger(payload.columns, "columns");
   assertPositiveSafeInteger(payload.rows, "rows");
+  assertCellBudget(payload.columns, payload.rows);
 
   if (
     payload.cellWidth !== expectedCellSize ||

@@ -46,6 +46,34 @@ test("rejects invalid cell sizes and malformed saved payloads", () => {
   );
 });
 
+test("rejects generated grids above the one-million-cell budget", () => {
+  const mask = { width: 1_000_001, height: 1, data: new Uint8Array(1_000_001) };
+
+  expect(() => buildMaskHeatmapGrid({ mask, cellSize: 1 })).toThrow(
+    "Heatmap grid exceeds the 1,000,000 cell limit.",
+  );
+});
+
+test("rejects saved payload dimensions above the one-million-cell budget", () => {
+  const payload = {
+    schemaVersion: 1,
+    imageFolder: "images/sample",
+    maskSource: { file: "masks/sample.png" },
+    width: 1_000_001,
+    height: 1,
+    cellWidth: 1,
+    cellHeight: 1,
+    columns: 1_000_001,
+    rows: 1,
+    cells: [],
+    updatedAt: "2026-07-12T00:00:00.000Z",
+  };
+
+  expect(() => validateHeatmapPayload(payload, { cellSize: 1 })).toThrow(
+    "Heatmap grid exceeds the 1,000,000 cell limit.",
+  );
+});
+
 test("creates and validates a relative heatmap payload", () => {
   const payload = createHeatmapPayload({
     imageFolder: "images/sample",

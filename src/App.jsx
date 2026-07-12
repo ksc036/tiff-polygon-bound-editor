@@ -53,6 +53,7 @@ const HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
 const HEATMAP_SELECTED_PRESET_KEY = "raw16-editor-heatmap-selected-preset";
 const HEATMAP_METRIC_KEY = "raw16-editor-heatmap-metric";
 const HEATMAP_OPACITY_KEY = "raw16-editor-heatmap-opacity";
+const MAX_HEATMAP_CELLS = 1_000_000;
 const HEATMAP_PRESET_LABELS = { small: "Small", medium: "Medium", large: "Large" };
 const ANALYSIS_COLUMNS = [
   {
@@ -112,6 +113,7 @@ export default function App() {
   const loadRequestRef = useRef(0);
   const heatmapRequestRef = useRef(0);
   const previousHeatmapRequestRef = useRef(0);
+  const heatmapBatchRequestRef = useRef(0);
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [images, setImages] = useState([]);
@@ -423,7 +425,6 @@ export default function App() {
         if (!isCurrentRequest()) return;
         setPreviousHeatmap(null);
         setPreviousHeatmapError(`Previous heatmap unavailable: ${error.message} Showing current heatmap.`);
-        setHeatmapComparePrevious(false);
       } finally {
         if (isCurrentRequest()) setPreviousHeatmapLoading(false);
       }
@@ -833,20 +834,26 @@ export default function App() {
   }
 
   async function handleSelectHeatmapFolder() {
+    if (heatmapBatchLoading) return;
+    const requestId = (heatmapBatchRequestRef.current += 1);
+    const isCurrentRequest = () => requestId === heatmapBatchRequestRef.current;
     setHeatmapBatchError("");
     try {
       const payload = await readJsonResponse(
         await fetch("/api/heatmaps/select-folder", { method: "POST" }),
       );
+      if (!isCurrentRequest()) return;
       setHeatmapBatchRoot(payload.rootPath ?? "");
       setHeatmapBatchResult(null);
     } catch (error) {
-      setHeatmapBatchError(error.message);
+      if (isCurrentRequest()) setHeatmapBatchError(error.message);
     }
   }
 
   async function handleGenerateHeatmaps() {
     if (!heatmapBatchRoot || heatmapBatchLoading) return;
+    const requestId = (heatmapBatchRequestRef.current += 1);
+    const isCurrentRequest = () => requestId === heatmapBatchRequestRef.current;
     const committedPresets = Object.fromEntries(
       Object.entries(heatmapPresets).map(([preset, value]) => [
         preset,
@@ -870,11 +877,11 @@ export default function App() {
           }),
         }),
       );
-      setHeatmapBatchResult(payload);
+      if (isCurrentRequest()) setHeatmapBatchResult(payload);
     } catch (error) {
-      setHeatmapBatchError(error.message);
+      if (isCurrentRequest()) setHeatmapBatchError(error.message);
     } finally {
-      setHeatmapBatchLoading(false);
+      if (isCurrentRequest()) setHeatmapBatchLoading(false);
     }
   }
 
@@ -1262,6 +1269,7 @@ export default function App() {
             <button
               type="button"
               aria-label="Choose heatmap folder"
+              disabled={heatmapBatchLoading}
               onClick={handleSelectHeatmapFolder}
             >
               Choose Folder
@@ -2053,6 +2061,15 @@ function formatLegendValue(value, unit) {
 }
 
 function heatmapDimensionError(heatmap, image) {
+  if (
+    Number.isSafeInteger(heatmap?.columns) &&
+    heatmap.columns > 0 &&
+    Number.isSafeInteger(heatmap?.rows) &&
+    heatmap.rows > 0 &&
+    heatmap.columns > Math.floor(MAX_HEATMAP_CELLS / heatmap.rows)
+  ) {
+    return "Heatmap grid exceeds the 1,000,000 cell limit.";
+  }
   if (heatmap?.width === image?.width && heatmap?.height === image?.height) return "";
   return `Heatmap dimensions ${heatmap?.width ?? "?"}x${heatmap?.height ?? "?"} do not match image ${
     image?.width ?? "?"

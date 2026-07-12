@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import React from "react";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import HeatmapOverlay from "./HeatmapOverlay.jsx";
 
 const heatmap = {
@@ -19,10 +19,26 @@ const heatmap = {
 };
 
 describe("HeatmapOverlay", () => {
-  afterEach(cleanup);
+  let context;
 
-  test("renders saved cells and reports current, previous, and delta values at the pointer", () => {
-    const { container } = render(
+  beforeEach(() => {
+    context = {
+      clearRect: vi.fn(),
+      fillRect: vi.fn(),
+      fillStyle: "",
+      globalAlpha: 1,
+      imageSmoothingEnabled: true,
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  test("draws saved cells on canvas and reports current, previous, and delta values at the pointer", () => {
+    render(
       <HeatmapOverlay
         heatmap={heatmap}
         metric="pixel-density"
@@ -38,12 +54,53 @@ describe("HeatmapOverlay", () => {
       />,
     );
 
-    expect(screen.getByLabelText("heatmap overlay")).toHaveAttribute("viewBox", "0 0 10 5");
-    expect(container.querySelectorAll("rect")).toHaveLength(2);
+    expect(screen.getByLabelText("heatmap overlay")).toHaveAttribute("width", "10");
+    expect(screen.getByLabelText("heatmap overlay")).toHaveAttribute("height", "5");
+    expect(context.imageSmoothingEnabled).toBe(false);
+    expect(context.fillRect).toHaveBeenCalledTimes(2);
+    expect(context.fillRect).toHaveBeenNthCalledWith(1, 0, 0, 5, 5);
+    expect(context.fillRect).toHaveBeenNthCalledWith(2, 5, 0, 5, 5);
     expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 1 / 25");
     expect(screen.getByRole("status")).toHaveTextContent("Pixel Density 0.0400");
     expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.3000 mg/ml");
     expect(screen.getByRole("status")).toHaveTextContent("Previous 0.0200, Current 0.0400, Change 0.0200");
+  });
+
+  test("does not redraw static cells for pointer-only updates", () => {
+    const props = {
+      heatmap,
+      metric: "pixel-density",
+      calibration: { slope: 0.1, intercept: 0.01 },
+      comparison: null,
+      opacity: 0.62,
+    };
+    const { rerender } = render(<HeatmapOverlay {...props} pointer={{ x: 1, y: 1 }} />);
+
+    expect(context.fillRect).toHaveBeenCalledTimes(2);
+    context.fillRect.mockClear();
+    context.clearRect.mockClear();
+    rerender(<HeatmapOverlay {...props} pointer={{ x: 6, y: 1 }} />);
+
+    expect(context.clearRect).not.toHaveBeenCalled();
+    expect(context.fillRect).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 5 / 25");
+  });
+
+  test("leaves the canvas transparent for invalid Estimated calibration", () => {
+    const { container } = render(
+      <HeatmapOverlay
+        heatmap={heatmap}
+        metric="estimated-collagen-density"
+        calibration={{ slope: "", intercept: 0.01 }}
+        comparison={null}
+        opacity={0.62}
+        pointer={null}
+      />,
+    );
+
+    expect(context.clearRect).toHaveBeenCalledWith(0, 0, 10, 5);
+    expect(context.fillRect).not.toHaveBeenCalled();
+    expect(container.querySelector("rect")).not.toBeInTheDocument();
   });
 
   test("shows unavailable estimated density when calibration is invalid", () => {
