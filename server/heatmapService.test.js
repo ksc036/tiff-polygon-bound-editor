@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -49,6 +49,11 @@ async function touchMask(maskDir) {
   await utimes(maskPath, nextTime, nextTime);
 }
 
+function savedHeatmapPath(storage, id, cellSize) {
+  const image = storage.getImage(id);
+  return path.join(storage.imagePaths(id).heatmapDir, `${cellSize}x${cellSize}`, `${image.imageFolder}.heatmap.json`);
+}
+
 afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((rootDir) => rm(rootDir, { recursive: true, force: true })));
 });
@@ -81,10 +86,72 @@ test("continues after an unreadable bundle and returns relative failures", async
   expect(JSON.stringify(result)).not.toContain(rootDir);
 });
 
+test("continues when a descendant cannot be listed and keeps that failure relative", async () => {
+  const rootDir = await createTempRoot();
+  const blockedDir = path.join(rootDir, "blocked");
+  await writeBundle(rootDir, "good", { width: 2, height: 2 });
+  await mkdir(blockedDir);
+
+  const result = await generateHeatmapBatch({
+    rootPath: rootDir,
+    cellSizes: [5],
+    __testDependencies: {
+      readdir: async (directory, options) => {
+        if (directory === blockedDir) {
+          throw new Error(`cannot list ${blockedDir}`);
+        }
+        return readdir(directory, options);
+      },
+    },
+  });
+
+  expect(result).toMatchObject({ discovered: 1, completed: 1, failed: 1 });
+  expect(result.failures).toContainEqual(expect.objectContaining({ imageFolder: "blocked" }));
+  expect(JSON.stringify(result)).not.toContain(rootDir);
+});
+
+test("removes atomic temporary files after an injected rename failure", async () => {
+  const rootDir = await createTempRoot();
+  await writeBundle(rootDir, "sample-a", { width: 2, height: 2 });
+
+  const result = await generateHeatmapBatch({
+    rootPath: rootDir,
+    cellSizes: [5],
+    __testDependencies: {
+      rename: async () => {
+        throw new Error("rename failed");
+      },
+    },
+  });
+
+  expect(result).toMatchObject({ completed: 0, failed: 1, generatedFiles: 0 });
+  await expect(readdir(path.join(rootDir, "sample-a", "heatmap", "5x5"))).resolves.toEqual([]);
+});
+
 test("loads current image heatmaps and rejects stale mask metadata", async () => {
   const storage = await setupStorageWithSavedHeatmap();
 
   await expect(loadImageHeatmap(storage, "sample-a", 5)).resolves.toMatchObject({ cellWidth: 5 });
   await touchMask(storage.imagePaths("sample-a").maskDir);
   await expect(loadImageHeatmap(storage, "sample-a", 5)).rejects.toMatchObject({ code: "STALE_HEATMAP" });
+});
+
+test("rejects saved heatmaps missing mask source metadata as invalid", async () => {
+  const storage = await setupStorageWithSavedHeatmap();
+  const filePath = savedHeatmapPath(storage, "sample-a", 5);
+  const saved = JSON.parse(await readFile(filePath, "utf8"));
+  delete saved.maskSource.size;
+  await writeFile(filePath, JSON.stringify(saved));
+
+  await expect(loadImageHeatmap(storage, "sample-a", 5)).rejects.toMatchObject({ code: "INVALID_HEATMAP" });
+});
+
+test("rejects saved heatmaps with wrongly typed mask source metadata as invalid", async () => {
+  const storage = await setupStorageWithSavedHeatmap();
+  const filePath = savedHeatmapPath(storage, "sample-a", 5);
+  const saved = JSON.parse(await readFile(filePath, "utf8"));
+  saved.maskSource.mtimeMs = "not-a-time";
+  await writeFile(filePath, JSON.stringify(saved));
+
+  await expect(loadImageHeatmap(storage, "sample-a", 5)).rejects.toMatchObject({ code: "INVALID_HEATMAP" });
 });

@@ -6,6 +6,8 @@ import { selectMaskSource } from "./analysisService.js";
 import { createHeatmapPayload, validateCellSize, validateHeatmapPayload } from "./maskHeatmap.js";
 import { readBinaryMask } from "./maskSkeleton.js";
 
+const DEFAULT_FILE_SYSTEM = { mkdir, readFile, readdir, rename, rm, stat, writeFile };
+
 export class HeatmapError extends Error {
   constructor(code, message, { status = 422, cause } = {}) {
     super(message, { cause });
@@ -45,10 +47,10 @@ function imageFileFromEntries(entries) {
     .sort((left, right) => left.localeCompare(right))[0] ?? "";
 }
 
-async function bundleImage(bundle) {
+async function bundleImage(bundle, fileSystem) {
   return {
     imageFolder: bundle.imageFolder,
-    imageFile: imageFileFromEntries(await readdir(bundle.imageDir, { withFileTypes: true })),
+    imageFile: imageFileFromEntries(await fileSystem.readdir(bundle.imageDir, { withFileTypes: true })),
   };
 }
 
@@ -64,25 +66,43 @@ function publicFailure(imageFolder, error) {
   };
 }
 
-async function writeHeatmapAtomically(filePath, payload) {
+async function writeHeatmapAtomically(filePath, payload, fileSystem) {
   const outputDir = path.dirname(filePath);
   const tempPath = path.join(outputDir, `.${randomUUID()}.tmp`);
 
-  await mkdir(outputDir, { recursive: true });
+  await fileSystem.mkdir(outputDir, { recursive: true });
   try {
-    await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
-    await rename(tempPath, filePath);
+    await fileSystem.writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
+    await fileSystem.rename(tempPath, filePath);
   } catch (error) {
-    await rm(tempPath, { force: true });
+    await fileSystem.rm(tempPath, { force: true });
     throw error;
   }
 }
 
-export async function discoverHeatmapBundles(rootPath) {
-  const bundles = [];
+function relativeFailureFolder(rootPath, directory) {
+  return path.relative(rootPath, directory) || path.basename(directory);
+}
 
-  async function visit(directory) {
-    const entries = await readdir(directory, { withFileTypes: true });
+async function collectHeatmapBundles(rootPath, fileSystem) {
+  const bundles = [];
+  const failures = [];
+
+  async function visit(directory, isRoot = false) {
+    let entries;
+    try {
+      entries = await fileSystem.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (isRoot) {
+        throw heatmapError("INVALID_ROOT", "Heatmap batch root must be readable.", 400, error);
+      }
+      failures.push({
+        imageFolder: relativeFailureFolder(rootPath, directory),
+        code: "UNREADABLE_DIRECTORY",
+        message: "Unable to inspect heatmap folder.",
+      });
+      return;
+    }
     const names = new Set(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
     if (names.has("image") && names.has("mask")) {
       bundles.push({
@@ -96,18 +116,33 @@ export async function discoverHeatmapBundles(rootPath) {
     await Promise.all(entries.filter((entry) => entry.isDirectory()).map((entry) => visit(path.join(directory, entry.name))));
   }
 
-  await visit(validateBatchRoot(rootPath));
-  return bundles.sort((left, right) => left.folderPath.localeCompare(right.folderPath, undefined, { numeric: true }));
+  await visit(validateBatchRoot(rootPath), true);
+  return {
+    bundles: bundles.sort((left, right) => left.folderPath.localeCompare(right.folderPath, undefined, { numeric: true })),
+    failures: failures.sort((left, right) => left.imageFolder.localeCompare(right.imageFolder, undefined, { numeric: true })),
+  };
 }
 
-export async function generateHeatmapBatch({ rootPath, cellSizes, maxImagePixels } = {}) {
+export async function discoverHeatmapBundles(rootPath) {
+  return (await collectHeatmapBundles(rootPath, DEFAULT_FILE_SYSTEM)).bundles;
+}
+
+export async function generateHeatmapBatch({ rootPath, cellSizes, maxImagePixels, __testDependencies } = {}) {
   const sizes = validatedCellSizes(cellSizes);
-  const bundles = await discoverHeatmapBundles(rootPath);
-  const result = { discovered: bundles.length, completed: 0, skipped: 0, failed: 0, generatedFiles: 0, failures: [] };
+  const fileSystem = { ...DEFAULT_FILE_SYSTEM, ...__testDependencies };
+  const { bundles, failures } = await collectHeatmapBundles(rootPath, fileSystem);
+  const result = {
+    discovered: bundles.length,
+    completed: 0,
+    skipped: 0,
+    failed: failures.length,
+    generatedFiles: 0,
+    failures,
+  };
 
   for (const bundle of bundles) {
     try {
-      const image = await bundleImage(bundle);
+      const image = await bundleImage(bundle, fileSystem);
       const maskSource = await selectMaskSource(image, bundle.maskDir);
       if (!maskSource) {
         result.skipped += 1;
@@ -116,7 +151,7 @@ export async function generateHeatmapBatch({ rootPath, cellSizes, maxImagePixels
 
       const [mask, maskStats] = await Promise.all([
         readBinaryMask(maskSource.path, { maxImagePixels }),
-        stat(maskSource.path),
+        fileSystem.stat(maskSource.path),
       ]);
       const sourceMetadata = { file: maskSource.file, mtimeMs: maskStats.mtimeMs, size: maskStats.size };
 
@@ -125,6 +160,7 @@ export async function generateHeatmapBatch({ rootPath, cellSizes, maxImagePixels
         await writeHeatmapAtomically(
           heatmapPath({ heatmapDir: path.join(bundle.folderPath, "heatmap"), imageFolder: bundle.imageFolder, cellSize }),
           payload,
+          fileSystem,
         );
         result.generatedFiles += 1;
       }
@@ -140,6 +176,18 @@ export async function generateHeatmapBatch({ rootPath, cellSizes, maxImagePixels
 
 function savedHeatmapError(code, message, status, cause) {
   return heatmapError(code, message, status, cause);
+}
+
+function hasValidSavedMaskMetadata(maskSource) {
+  return (
+    typeof maskSource.size === "number" &&
+    Number.isFinite(maskSource.size) &&
+    Number.isInteger(maskSource.size) &&
+    maskSource.size >= 0 &&
+    typeof maskSource.mtimeMs === "number" &&
+    Number.isFinite(maskSource.mtimeMs) &&
+    maskSource.mtimeMs >= 0
+  );
 }
 
 export async function loadImageHeatmap(storage, id, cellSize) {
@@ -172,6 +220,10 @@ export async function loadImageHeatmap(storage, id, cellSize) {
     }
   } catch (error) {
     throw savedHeatmapError("INVALID_HEATMAP", "Saved heatmap is invalid.", 422, error);
+  }
+
+  if (!hasValidSavedMaskMetadata(heatmap.maskSource)) {
+    throw savedHeatmapError("INVALID_HEATMAP", "Saved heatmap is invalid.", 422);
   }
 
   let currentSource;
