@@ -58,7 +58,7 @@ test("creates and validates a relative heatmap payload", () => {
   expect(payload).toMatchObject({
     schemaVersion: 1,
     imageFolder: "images/sample",
-    maskSource: { file: "masks/sample.png", format: "png" },
+    maskSource: { file: "masks/sample.png" },
     width: 2,
     height: 1,
     cellWidth: 1,
@@ -68,6 +68,32 @@ test("creates and validates a relative heatmap payload", () => {
     updatedAt: "2026-07-12T00:00:00.000Z",
   });
   expect(validateHeatmapPayload(payload, { cellSize: 1 })).toEqual(payload);
+});
+
+test("serializes only public mask source fields and strips path", () => {
+  const maskSource = {
+    file: "masks/sample.png",
+    mtimeMs: 12,
+    size: 345,
+    format: "png",
+    path: "/private/masks/sample.png",
+  };
+  const payload = createHeatmapPayload({
+    imageFolder: "images/sample",
+    maskSource,
+    mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+    cellSize: 1,
+    updatedAt: "2026-07-12T00:00:00.000Z",
+  });
+
+  expect(payload.maskSource).toEqual({ file: "masks/sample.png", mtimeMs: 12, size: 345 });
+  expect(JSON.stringify(payload)).not.toContain("/private/masks/sample.png");
+  expect(JSON.stringify(payload)).not.toContain('"format"');
+
+  const validated = validateHeatmapPayload({ ...payload, maskSource }, { cellSize: 1 });
+  expect(validated.maskSource).toEqual({ file: "masks/sample.png", mtimeMs: 12, size: 345 });
+  expect(JSON.stringify(validated)).not.toContain("/private/masks/sample.png");
+  expect(JSON.stringify(validated)).not.toContain('"format"');
 });
 
 test.each(["/tmp/mask.png", "C:\\tmp\\mask.png", "\\\\server\\share\\mask.png"])(

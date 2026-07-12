@@ -33,6 +33,17 @@ function assertMaskSource(maskSource) {
   assertRelativeMetadata(maskSource.file, "maskSource.file");
 }
 
+function publicMaskSource(maskSource) {
+  const source = { file: maskSource.file };
+  if (maskSource.mtimeMs !== undefined) {
+    source.mtimeMs = maskSource.mtimeMs;
+  }
+  if (maskSource.size !== undefined) {
+    source.size = maskSource.size;
+  }
+  return source;
+}
+
 function assertMask(mask) {
   if (!mask || !(mask.data instanceof Uint8Array)) {
     throw new Error("Heatmap mask must include Uint8Array data.");
@@ -158,7 +169,7 @@ export function createHeatmapPayload({ imageFolder, maskSource, mask, cellSize, 
   return {
     schemaVersion: SCHEMA_VERSION,
     imageFolder,
-    maskSource,
+    maskSource: publicMaskSource(maskSource),
     ...grid,
     updatedAt: timestamp,
   };
@@ -198,5 +209,5 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
   }
 
   payload.cells.forEach((cell, index) => assertGridCell(cell, index, payload));
-  return payload;
+  return { ...payload, maskSource: publicMaskSource(payload.maskSource) };
 }
