@@ -20,4 +20,13 @@ describe("application layout CSS", () => {
 
     expect(roiPreviewRule).not.toContain("vector-effect");
   });
+
+  test("uses a horizontal panel scale for the heatmap legend", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const legendRule = css.match(/\.heatmap-legend\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(legendRule).not.toContain("position: absolute");
+    expect(legendRule).toContain("grid-template-columns");
+  });
 });

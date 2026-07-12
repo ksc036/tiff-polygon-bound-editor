@@ -1122,13 +1122,12 @@ describe("App", () => {
     expect(screen.getByLabelText("heatmap color legend")).toHaveTextContent("3 mg/ml");
   });
 
-  test("restores persisted heatmap metric and opacity after remount", async () => {
+  test("restores persisted heatmap metric after remount", async () => {
     mockApi();
     const first = render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
     fireEvent.click(screen.getByRole("button", { name: "Estimated Collagen Density" }));
-    fireEvent.change(screen.getByLabelText("Opacity"), { target: { value: "0.4" } });
     first.unmount();
 
     mockApi();
@@ -1139,7 +1138,48 @@ describe("App", () => {
       "aria-pressed",
       "true",
     );
-    expect(screen.getByLabelText("Opacity")).toHaveValue("0.4");
+  });
+
+  test("controls only the original TIFF opacity while Heat Map is active", async () => {
+    mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    const rawCanvas = screen.getByLabelText("raw16 image");
+    const heatmapCanvas = await screen.findByLabelText("heatmap overlay");
+    expect(screen.getByLabelText("Original opacity")).toHaveValue("0.5");
+    expect(rawCanvas).toHaveStyle({ opacity: "0.5" });
+    fireEvent.change(screen.getByLabelText("Original opacity"), { target: { value: "0" } });
+    expect(rawCanvas).toHaveStyle({ opacity: "0" });
+    expect(heatmapCanvas).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    expect(rawCanvas).toHaveStyle({ opacity: "1" });
+  });
+
+  test("restores persisted Heat Map original opacity after remount", async () => {
+    mockApi();
+    const first = render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.change(screen.getByLabelText("Original opacity"), { target: { value: "0.35" } });
+    first.unmount();
+
+    mockApi();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(screen.getByLabelText("Original opacity")).toHaveValue("0.35");
+  });
+
+  test("places the heatmap color legend in Heatmap controls", async () => {
+    mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    const controls = screen.getByLabelText("Heatmap controls");
+    const stage = screen.getByTestId("image-stage");
+
+    expect(within(controls).getByLabelText("heatmap color legend")).toBeInTheDocument();
+    expect(within(stage).queryByLabelText("heatmap color legend")).not.toBeInTheDocument();
   });
 
   test("offers previous comparison only after the first image", async () => {

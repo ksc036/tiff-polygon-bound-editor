@@ -592,20 +592,12 @@ input[type="range"] {
 }
 
 .heatmap-legend {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  z-index: 4;
   display: grid;
-  grid-template-rows: auto 88px auto;
-  justify-items: end;
-  gap: 4px;
-  width: 66px;
-  padding: 6px;
-  border: 1px solid #465666;
-  border-radius: 5px;
-  color: #f3f7fa;
-  background: rgba(12, 18, 24, 0.86);
+  grid-template-columns: minmax(54px, auto) minmax(0, 1fr) minmax(54px, auto);
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  color: #c6d0d9;
   font-size: 0.7rem;
   line-height: 1.1;
   pointer-events: none;
@@ -614,32 +606,25 @@ input[type="range"] {
 .heatmap-legend-scale {
   position: relative;
   width: 100%;
-  height: 88px;
+  height: 12px;
 }
 
 .heatmap-legend-scale i {
   position: absolute;
-  top: 0;
-  right: 0;
-  width: 12px;
-  height: 88px;
+  inset: 0;
   border: 1px solid rgba(255, 255, 255, 0.28);
-  background: linear-gradient(to bottom, #fcffa4, #f98e09 25%, #bc3754 50%, #57106e 75%, #000004);
-}
-
-.heatmap-legend.difference {
-  grid-template-rows: auto 88px auto;
+  background: linear-gradient(to right, #000004, #57106e 25%, #bc3754 50%, #f98e09 75%, #fcffa4);
 }
 
 .heatmap-legend.difference .heatmap-legend-scale i {
-  background: linear-gradient(to bottom, #dc2626, #f8fafc 50%, #2563eb);
+  background: linear-gradient(to right, #2563eb, #f8fafc 50%, #dc2626);
 }
 
 .heatmap-legend-zero {
   position: absolute;
-  top: 50%;
-  right: 18px;
-  transform: translateY(-50%);
+  top: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 .roi-overlay {

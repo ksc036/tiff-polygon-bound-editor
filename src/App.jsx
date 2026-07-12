@@ -52,7 +52,7 @@ const DEFAULT_HEATMAP_PRESETS = { small: 5, medium: 10, large: 20 };
 const HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
 const HEATMAP_SELECTED_PRESET_KEY = "raw16-editor-heatmap-selected-preset";
 const HEATMAP_METRIC_KEY = "raw16-editor-heatmap-metric";
-const HEATMAP_OPACITY_KEY = "raw16-editor-heatmap-opacity";
+const HEATMAP_ORIGINAL_OPACITY_KEY = "raw16-editor-heatmap-original-opacity";
 const MAX_HEATMAP_CELLS = 1_000_000;
 const HEATMAP_PRESET_LABELS = { small: "Small", medium: "Medium", large: "Large" };
 const ANALYSIS_COLUMNS = [
@@ -166,7 +166,9 @@ export default function App() {
   const [heatmapPresets, setHeatmapPresets] = useState(loadHeatmapPresets);
   const [heatmapPreset, setHeatmapPreset] = useState(loadSelectedHeatmapPreset);
   const [heatmapMetric, setHeatmapMetric] = useState(loadHeatmapMetric);
-  const [heatmapOpacity, setHeatmapOpacity] = useState(() => readStoredOpacity(HEATMAP_OPACITY_KEY, 0.62));
+  const [heatmapOriginalOpacity, setHeatmapOriginalOpacity] = useState(() =>
+    readStoredOpacity(HEATMAP_ORIGINAL_OPACITY_KEY, 0.5),
+  );
   const [heatmap, setHeatmap] = useState(null);
   const [previousHeatmap, setPreviousHeatmap] = useState(null);
   const [heatmapComparePrevious, setHeatmapComparePrevious] = useState(false);
@@ -357,8 +359,8 @@ export default function App() {
   }, [analysisPanelHeight]);
 
   useEffect(() => {
-    localStorage.setItem(HEATMAP_OPACITY_KEY, String(heatmapOpacity));
-  }, [heatmapOpacity]);
+    localStorage.setItem(HEATMAP_ORIGINAL_OPACITY_KEY, String(heatmapOriginalOpacity));
+  }, [heatmapOriginalOpacity]);
 
   useEffect(() => {
     const requestId = (heatmapRequestRef.current += 1);
@@ -1250,18 +1252,39 @@ export default function App() {
                   Compare Previous
                 </button>
               ) : null}
-              <label htmlFor="heatmap-opacity">
-                Opacity
+              <label htmlFor="heatmap-original-opacity">
+                Original opacity
                 <input
-                  id="heatmap-opacity"
+                  id="heatmap-original-opacity"
                   type="range"
-                  min="0.1"
+                  min="0"
                   max="1"
                   step="0.05"
-                  value={heatmapOpacity}
-                  onChange={(event) => setHeatmapOpacity(Number(event.target.value))}
+                  value={heatmapOriginalOpacity}
+                  onChange={(event) => setHeatmapOriginalOpacity(Number(event.target.value))}
                 />
               </label>
+            </div>
+            <div
+              className={heatmapComparison.value ? "heatmap-legend difference" : "heatmap-legend"}
+              aria-label="heatmap color legend"
+            >
+              <span aria-label={heatmapComparison.value ? "comparison maximum" : undefined}>
+                {heatmapComparison.value
+                  ? formatLegendValue(heatmapComparison.value.maxAbs, heatmapRange.unit)
+                  : formatLegendValue(heatmapRange.max, heatmapRange.unit)}
+              </span>
+              <div className="heatmap-legend-scale">
+                <i aria-hidden="true" />
+                {heatmapComparison.value ? (
+                  <span className="heatmap-legend-zero" aria-label="comparison zero">0</span>
+                ) : null}
+              </div>
+              <span aria-label={heatmapComparison.value ? "comparison minimum" : undefined}>
+                {heatmapComparison.value
+                  ? formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)
+                  : formatLegendValue(heatmapRange.min, heatmapRange.unit)}
+              </span>
             </div>
             <span className="heatmap-view-state" aria-live="polite">
               {heatmapViewStatus}
@@ -1528,6 +1551,7 @@ export default function App() {
               ref={canvasRef}
               className={imageLayer === "original" || imageLayer === "heatmap" ? "raw-canvas" : "raw-canvas hidden-layer"}
               aria-label="raw16 image"
+              style={{ opacity: imageLayer === "heatmap" ? heatmapOriginalOpacity : 1 }}
             />
             {activeImage && (imageLayer === "mask" || imageLayer === "fiber-qc") ? (
               <img
@@ -1549,32 +1573,8 @@ export default function App() {
                 metric={heatmapMetric}
                 calibration={densityCalibration}
                 comparison={heatmapComparison.value}
-                opacity={heatmapOpacity}
                 pointer={pointer}
               />
-            ) : null}
-            {imageLayer === "heatmap" ? (
-              <div
-                className={heatmapComparison.value ? "heatmap-legend difference" : "heatmap-legend"}
-                aria-label="heatmap color legend"
-              >
-                <span aria-label={heatmapComparison.value ? "comparison maximum" : undefined}>
-                  {heatmapComparison.value
-                    ? formatLegendValue(heatmapComparison.value.maxAbs, heatmapRange.unit)
-                    : formatLegendValue(heatmapRange.max, heatmapRange.unit)}
-                </span>
-                <div className="heatmap-legend-scale">
-                  <i aria-hidden="true" />
-                  {heatmapComparison.value ? (
-                    <span className="heatmap-legend-zero" aria-label="comparison zero">0</span>
-                  ) : null}
-                </div>
-                <span aria-label={heatmapComparison.value ? "comparison minimum" : undefined}>
-                  {heatmapComparison.value
-                    ? formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)
-                    : formatLegendValue(heatmapRange.min, heatmapRange.unit)}
-                </span>
-              </div>
             ) : null}
             {activeImage && hasActiveImageDimensions && bounds ? (
               <svg
@@ -2052,7 +2052,7 @@ function readStoredOpacity(key, fallback) {
   const stored = localStorage.getItem(key);
   if (stored === null) return fallback;
   const value = Number(stored);
-  return value >= 0.1 && value <= 1 ? value : fallback;
+  return value >= 0 && value <= 1 ? value : fallback;
 }
 
 function validHeatmapCellSize(value, fallback) {
