@@ -163,6 +163,69 @@ input[type="range"] {
   overflow: auto;
 }
 
+.heatmap-batch {
+  display: grid;
+  gap: 7px;
+  padding: 10px 0;
+  border-top: 1px solid #27313c;
+  border-bottom: 1px solid #27313c;
+}
+
+.heatmap-batch-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.heatmap-batch-heading button,
+.heatmap-batch > button {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 0.82rem;
+}
+
+.heatmap-batch-path {
+  overflow: hidden;
+  color: #7f8c99;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.heatmap-preset-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.heatmap-preset-fields label {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  color: #9faeba;
+  font-size: 0.76rem;
+}
+
+.heatmap-preset-fields input {
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 5px;
+}
+
+.heatmap-batch-state {
+  min-height: 16px;
+  overflow-wrap: anywhere;
+  color: #94a3af;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.heatmap-error {
+  color: #f6b9c2;
+}
+
 .group-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -293,6 +356,34 @@ input[type="range"] {
   width: 92px;
 }
 
+.heatmap-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.heatmap-controls > button {
+  min-height: 30px;
+}
+
+.heatmap-controls input[type="range"] {
+  width: 88px;
+}
+
+.heatmap-view-state {
+  display: block;
+  width: 210px;
+  min-height: 16px;
+  overflow: hidden;
+  color: #aab7c3;
+  font-size: 0.78rem;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .segmented-control {
   display: inline-grid;
   grid-auto-flow: column;
@@ -395,6 +486,7 @@ input[type="range"] {
 
 .raw-canvas,
 .layer-image,
+.heatmap-overlay,
 .overlay {
   position: absolute;
   inset: 0;
@@ -423,6 +515,82 @@ input[type="range"] {
 
 .skeleton-preview {
   z-index: 2;
+}
+
+.heatmap-overlay {
+  z-index: 1;
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+.heatmap-tooltip {
+  position: absolute;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  width: max-content;
+  max-width: min(280px, calc(100% - 16px));
+  padding: 7px 9px;
+  border: 1px solid #465666;
+  border-radius: 6px;
+  color: #e8edf2;
+  background: rgba(12, 18, 24, 0.94);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);
+  font-size: 0.76rem;
+  line-height: 1.3;
+  transform: translate(8px, calc(-100% - 8px));
+  pointer-events: none;
+}
+
+.heatmap-tooltip strong {
+  color: #ffffff;
+}
+
+.heatmap-tooltip.align-right {
+  transform: translate(-8px, calc(-100% - 8px));
+}
+
+.heatmap-tooltip.align-below {
+  transform: translate(8px, 8px);
+}
+
+.heatmap-tooltip.align-right.align-below {
+  transform: translate(-8px, 8px);
+}
+
+.heatmap-legend {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  display: grid;
+  grid-template-rows: auto 88px auto;
+  justify-items: end;
+  gap: 4px;
+  width: 66px;
+  padding: 6px;
+  border: 1px solid #465666;
+  border-radius: 5px;
+  color: #f3f7fa;
+  background: rgba(12, 18, 24, 0.86);
+  font-size: 0.7rem;
+  line-height: 1.1;
+  pointer-events: none;
+}
+
+.heatmap-legend i {
+  width: 12px;
+  height: 88px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: linear-gradient(to bottom, #fcffa4, #f98e09 25%, #bc3754 50%, #57106e 75%, #000004);
+}
+
+.heatmap-legend.difference {
+  grid-template-rows: auto 88px auto auto;
+}
+
+.heatmap-legend.difference i {
+  background: linear-gradient(to bottom, #dc2626, #f8fafc 50%, #2563eb);
 }
 
 .roi-overlay {

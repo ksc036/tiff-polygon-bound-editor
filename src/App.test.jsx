@@ -28,6 +28,36 @@ const images = [
 
 const imagesWithoutDimensions = images.map(({ height, width, ...image }) => image);
 
+function heatmapFixture(imageFolder, cellSize, pixelDensity = 0.04) {
+  return {
+    schemaVersion: 1,
+    imageFolder,
+    imageFile: `${imageFolder}.tif`,
+    width: 10,
+    height: 5,
+    cellWidth: cellSize,
+    cellHeight: cellSize,
+    rows: 1,
+    columns: 1,
+    cells: [
+      {
+        row: 0,
+        column: 0,
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 5,
+        areaPx: 50,
+        maskPixelCount: Math.round(pixelDensity * 50),
+        pixelDensity,
+      },
+    ],
+  };
+}
+
+const heatmapA5 = heatmapFixture("plate-a", 5, 0.04);
+const heatmapB5 = heatmapFixture("plate-b", 5, 0.08);
+
 const emptyBounds = {
   schemaVersion: 1,
   imageFolder: "plate-a",
@@ -262,12 +292,21 @@ function pngResponse() {
   );
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 function mockApi({
   boundsQueue = [savedBounds],
   rootImages = images,
   saveResponse = null,
   analysisResponse = { analysis: null, hasAnalysis: false },
   recalculateAnalysis = savedAnalysis,
+  heatmapResponse,
 } = {}) {
   const calls = [];
   const fetchMock = vi.fn((input, options = {}) => {
@@ -283,6 +322,27 @@ function mockApi({
     }
     if (url === "/api/root/select" && method === "POST") {
       return jsonResponse({ rootPath: "/selected/root", images: rootImages });
+    }
+    if (url === "/api/heatmaps/select-folder" && method === "POST") {
+      return jsonResponse({ rootPath: "/selected/heatmap-root" });
+    }
+    if (url === "/api/heatmaps/generate" && method === "POST") {
+      return jsonResponse({
+        discovered: 2,
+        completed: 2,
+        skipped: 0,
+        failed: 0,
+        generatedFiles: 6,
+        failures: [],
+      });
+    }
+    const heatmapMatch = url.match(/^\/api\/images\/(scan-a|scan-b)\/heatmap\?cellSize=(\d+)$/);
+    if (heatmapMatch && method === "GET") {
+      if (heatmapResponse) return heatmapResponse(url, Number(heatmapMatch[2]));
+      const imageId = heatmapMatch[1];
+      const cellSize = Number(heatmapMatch[2]);
+      const fixture = imageId === "scan-a" ? heatmapA5 : heatmapB5;
+      return jsonResponse({ heatmap: { ...fixture, cellWidth: cellSize, cellHeight: cellSize } });
     }
     if (url === "/api/images/scan-a" && method === "GET") {
       return jsonResponse({ image: images[0] });
@@ -904,6 +964,133 @@ describe("App", () => {
       "src",
       "/api/images/scan-a/skeleton-preview",
     );
+  });
+
+  test("opens the Heat Map layer with persisted default presets", async () => {
+    mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(screen.getByRole("button", { name: /Small 5x5/ })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByLabelText("heatmap overlay")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Large 20x20/ }));
+    expect(localStorage.getItem("raw16-editor-heatmap-selected-preset")).toBe("large");
+  });
+
+  test("keeps selected cell size when moving to the next image", async () => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.click(screen.getByRole("button", { name: /Large 20x20/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=20"),
+    );
+  });
+
+  test("uses an edited persisted preset for viewer navigation", async () => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+
+    const smallInput = await screen.findByLabelText("small heatmap cell size");
+    fireEvent.change(smallInput, { target: { value: "7" } });
+    fireEvent.blur(smallInput);
+    fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=7"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=7"),
+    );
+    expect(JSON.parse(localStorage.getItem("raw16-editor-heatmap-presets"))).toEqual({
+      small: 7,
+      medium: 10,
+      large: 20,
+    });
+  });
+
+  test("ignores a stale heatmap response after changing cell size", async () => {
+    const smallRequest = deferred();
+    const largeRequest = deferred();
+    const { fetchMock } = mockApi({
+      heatmapResponse: (_url, cellSize) =>
+        cellSize === 5 ? smallRequest.promise : largeRequest.promise,
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=5"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Large 20x20/ }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20"),
+    );
+
+    await act(async () => {
+      largeRequest.resolve(await jsonResponse({ heatmap: heatmapFixture("plate-a", 20, 0.8) }));
+    });
+    const currentFill = (await screen.findByLabelText("heatmap overlay")).querySelector("rect").getAttribute("fill");
+
+    await act(async () => {
+      smallRequest.resolve(await jsonResponse({ heatmap: heatmapA5 }));
+    });
+    expect(screen.getByLabelText("heatmap overlay").querySelector("rect")).toHaveAttribute("fill", currentFill);
+  });
+
+  test("shows current and estimated metrics using current calibration", async () => {
+    mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.click(screen.getByRole("button", { name: "Estimated Collagen Density" }));
+
+    expect(await screen.findByLabelText("heatmap color legend")).toHaveTextContent("0");
+    expect(screen.getByLabelText("heatmap color legend")).toHaveTextContent("3 mg/ml");
+  });
+
+  test("offers previous comparison only after the first image", async () => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(screen.queryByRole("button", { name: "Compare Previous" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compare Previous" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=5"),
+    );
+    expect(await screen.findByText(/Compared with plate-a/)).toBeInTheDocument();
+  });
+
+  test("selects a separate batch folder and generates edited preset sizes", async () => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
+    await screen.findByText("/selected/heatmap-root");
+    const smallInput = screen.getByLabelText("small heatmap cell size");
+    fireEvent.change(smallInput, { target: { value: "7" } });
+    fireEvent.blur(smallInput);
+    fireEvent.click(screen.getByRole("button", { name: "Generate Heatmaps" }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, options]) => url === "/api/heatmaps/generate" && options?.method === "POST",
+      );
+      expect(JSON.parse(call[1].body)).toEqual({
+        rootPath: "/selected/heatmap-root",
+        cellSizes: [7, 10, 20],
+      });
+    });
+    expect(screen.getByText(/2 discovered/)).toHaveTextContent("6 files");
   });
 
   test("renders ROI preview locally without requesting a server overlay", async () => {

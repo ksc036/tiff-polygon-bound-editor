@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import HeatmapOverlay from "./components/HeatmapOverlay.jsx";
 import {
   addGroup,
   addPoint,
@@ -18,6 +19,11 @@ import {
   setGroupRoiLimits,
 } from "./lib/editorState.js";
 import { findNearestSegment } from "./lib/geometry.js";
+import {
+  buildHeatmapDifference,
+  estimateHeatmapCollagenDensity,
+  heatmapDisplayRange,
+} from "./lib/heatmap.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
 import { fitAspectToBox } from "./lib/stageFit.js";
 
@@ -41,6 +47,12 @@ const MAX_ANALYSIS_PANEL_HEIGHT = 520;
 const DEFAULT_COLLAGEN_DENSITY_SLOPE = 0.069676956982087;
 const DEFAULT_COLLAGEN_DENSITY_INTERCEPT = 0.067893820336777;
 const ANALYSIS_MODE_LABELS = { outside: "Outside ROI", inside: "Inside area" };
+const DEFAULT_HEATMAP_PRESETS = { small: 5, medium: 10, large: 20 };
+const HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
+const HEATMAP_SELECTED_PRESET_KEY = "raw16-editor-heatmap-selected-preset";
+const HEATMAP_METRIC_KEY = "raw16-editor-heatmap-metric";
+const HEATMAP_OPACITY_KEY = "raw16-editor-heatmap-opacity";
+const HEATMAP_PRESET_LABELS = { small: "Small", medium: "Medium", large: "Large" };
 const ANALYSIS_COLUMNS = [
   {
     key: "roiAreaPx",
@@ -97,6 +109,7 @@ export default function App() {
   const canvasRef = useRef(null);
   const stageFrameRef = useRef(null);
   const loadRequestRef = useRef(0);
+  const heatmapRequestRef = useRef(0);
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [images, setImages] = useState([]);
@@ -145,8 +158,22 @@ export default function App() {
     slope: String(DEFAULT_COLLAGEN_DENSITY_SLOPE),
     intercept: String(DEFAULT_COLLAGEN_DENSITY_INTERCEPT),
   });
+  const [heatmapPresets, setHeatmapPresets] = useState(loadHeatmapPresets);
+  const [heatmapPreset, setHeatmapPreset] = useState(loadSelectedHeatmapPreset);
+  const [heatmapMetric, setHeatmapMetric] = useState(loadHeatmapMetric);
+  const [heatmapOpacity, setHeatmapOpacity] = useState(() => readStoredOpacity(HEATMAP_OPACITY_KEY, 0.62));
+  const [heatmap, setHeatmap] = useState(null);
+  const [previousHeatmap, setPreviousHeatmap] = useState(null);
+  const [heatmapComparePrevious, setHeatmapComparePrevious] = useState(false);
+  const [heatmapLoading, setHeatmapLoading] = useState(false);
+  const [heatmapError, setHeatmapError] = useState("");
+  const [heatmapBatchRoot, setHeatmapBatchRoot] = useState("");
+  const [heatmapBatchLoading, setHeatmapBatchLoading] = useState(false);
+  const [heatmapBatchError, setHeatmapBatchError] = useState("");
+  const [heatmapBatchResult, setHeatmapBatchResult] = useState(null);
 
   const activeImage = activeIndex >= 0 ? resolveImageDimensions(images[activeIndex], rawPixels, bounds) : null;
+  const previousImage = activeIndex > 0 ? images[activeIndex - 1] : null;
   const activeGroup = bounds?.groups.find((group) => group.id === activeGroupId) ?? null;
   const activeRoiLimits = groupRoiLimits(activeGroup);
   const activeGroupUsesOutsideRoi = (activeGroup?.analysisMode ?? "outside") === "outside";
@@ -156,6 +183,44 @@ export default function App() {
     (pointOrderOpen ? 0 : POINT_ORDER_COLLAPSED_STAGE_GAIN) +
     (roiSettingsOpen ? 0 : ROI_SETTINGS_COLLAPSED_STAGE_GAIN);
   const analysisPanelStageAdjustPx = DEFAULT_ANALYSIS_PANEL_HEIGHT - analysisPanelHeight;
+  const selectedHeatmapCellSize = validHeatmapCellSize(
+    heatmapPresets[heatmapPreset],
+    DEFAULT_HEATMAP_PRESETS[heatmapPreset],
+  );
+  const heatmapRange = heatmapDisplayRange(heatmapMetric);
+  const invalidHeatmapCalibration =
+    heatmapMetric === "estimated-collagen-density" &&
+    !Number.isFinite(estimateHeatmapCollagenDensity(0, densityCalibration));
+  const heatmapComparison = useMemo(() => {
+    if (!heatmapComparePrevious || !heatmap || !previousHeatmap) {
+      return { value: null, error: "" };
+    }
+
+    try {
+      return {
+        value: buildHeatmapDifference({
+          current: heatmap,
+          previous: previousHeatmap,
+          metric: heatmapMetric,
+          calibration: densityCalibration,
+        }),
+        error: "",
+      };
+    } catch (error) {
+      return { value: null, error: error.message };
+    }
+  }, [densityCalibration, heatmap, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
+  const heatmapViewStatus = heatmapLoading
+    ? "Loading heatmap"
+    : heatmapError
+      ? `Heatmap unavailable: ${heatmapError}`
+      : invalidHeatmapCalibration
+        ? "Estimated density requires valid calibration"
+        : heatmapComparison.error
+          ? heatmapComparison.error
+          : heatmapComparePrevious && previousHeatmap
+            ? `Compared with ${previousImage?.folder ?? previousImage?.imageFolder}`
+            : "";
 
   const loadImage = useCallback(
     async (index, nextImages) => {
@@ -277,6 +342,53 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(ANALYSIS_PANEL_HEIGHT_KEY, String(analysisPanelHeight));
   }, [analysisPanelHeight]);
+
+  useEffect(() => {
+    localStorage.setItem(HEATMAP_OPACITY_KEY, String(heatmapOpacity));
+  }, [heatmapOpacity]);
+
+  useEffect(() => {
+    const requestId = (heatmapRequestRef.current += 1);
+    const isCurrentRequest = () => requestId === heatmapRequestRef.current;
+
+    if (imageLayer !== "heatmap" || !activeImage || !selectedHeatmapCellSize) {
+      setHeatmapLoading(false);
+      return undefined;
+    }
+
+    setHeatmapLoading(true);
+    setHeatmapError("");
+    setHeatmap(null);
+    setPreviousHeatmap(null);
+
+    async function loadHeatmaps() {
+      try {
+        const currentPayload = await readJsonResponse(
+          await fetch(`/api/images/${activeImage.id}/heatmap?cellSize=${selectedHeatmapCellSize}`),
+        );
+        if (!isCurrentRequest()) return;
+        setHeatmap(currentPayload.heatmap);
+
+        if (heatmapComparePrevious && activeIndex > 0) {
+          const previousPayload = await readJsonResponse(
+            await fetch(`/api/images/${previousImage.id}/heatmap?cellSize=${selectedHeatmapCellSize}`),
+          );
+          if (!isCurrentRequest()) return;
+          setPreviousHeatmap(previousPayload.heatmap);
+        }
+      } catch (error) {
+        if (!isCurrentRequest()) return;
+        setHeatmapError(error.message);
+      } finally {
+        if (isCurrentRequest()) setHeatmapLoading(false);
+      }
+    }
+
+    loadHeatmaps();
+    return () => {
+      if (isCurrentRequest()) heatmapRequestRef.current += 1;
+    };
+  }, [activeImage?.id, activeIndex, heatmapComparePrevious, imageLayer, previousImage?.id, selectedHeatmapCellSize]);
 
   useEffect(() => {
     if (!analysisResizeDrag) return undefined;
@@ -650,6 +762,77 @@ export default function App() {
     setDensityCalibration((current) => ({ ...current, [key]: value }));
   }
 
+  function handleHeatmapPresetSelect(preset) {
+    setHeatmapPreset(preset);
+    localStorage.setItem(HEATMAP_SELECTED_PRESET_KEY, preset);
+  }
+
+  function handleHeatmapMetricSelect(metric) {
+    setHeatmapMetric(metric);
+    localStorage.setItem(HEATMAP_METRIC_KEY, metric);
+  }
+
+  function updateHeatmapPreset(preset, value) {
+    setHeatmapPresets((current) => ({ ...current, [preset]: value }));
+  }
+
+  function commitHeatmapPreset(preset) {
+    setHeatmapPresets((current) => {
+      const next = {
+        ...current,
+        [preset]: validHeatmapCellSize(current[preset], DEFAULT_HEATMAP_PRESETS[preset]),
+      };
+      localStorage.setItem(HEATMAP_PRESETS_KEY, JSON.stringify(next));
+      return next;
+    });
+  }
+
+  async function handleSelectHeatmapFolder() {
+    setHeatmapBatchError("");
+    try {
+      const payload = await readJsonResponse(
+        await fetch("/api/heatmaps/select-folder", { method: "POST" }),
+      );
+      setHeatmapBatchRoot(payload.rootPath ?? "");
+      setHeatmapBatchResult(null);
+    } catch (error) {
+      setHeatmapBatchError(error.message);
+    }
+  }
+
+  async function handleGenerateHeatmaps() {
+    if (!heatmapBatchRoot || heatmapBatchLoading) return;
+    const committedPresets = Object.fromEntries(
+      Object.entries(heatmapPresets).map(([preset, value]) => [
+        preset,
+        validHeatmapCellSize(value, DEFAULT_HEATMAP_PRESETS[preset]),
+      ]),
+    );
+    setHeatmapPresets(committedPresets);
+    localStorage.setItem(HEATMAP_PRESETS_KEY, JSON.stringify(committedPresets));
+    setHeatmapBatchLoading(true);
+    setHeatmapBatchError("");
+    setHeatmapBatchResult(null);
+
+    try {
+      const payload = await readJsonResponse(
+        await fetch("/api/heatmaps/generate", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            rootPath: heatmapBatchRoot,
+            cellSizes: Object.values(committedPresets),
+          }),
+        }),
+      );
+      setHeatmapBatchResult(payload);
+    } catch (error) {
+      setHeatmapBatchError(error.message);
+    } finally {
+      setHeatmapBatchLoading(false);
+    }
+  }
+
   function handleStageClick(event) {
     if (!hasActiveImageDimensions) return;
     const clickPoint = eventToImagePoint(event, activeImage, {
@@ -966,6 +1149,54 @@ export default function App() {
             );
           })}
         </div>
+        <section className="heatmap-batch" aria-labelledby="heatmap-batch-heading">
+          <div className="heatmap-batch-heading">
+            <strong id="heatmap-batch-heading">Heatmap batch</strong>
+            <button
+              type="button"
+              aria-label="Choose heatmap folder"
+              onClick={handleSelectHeatmapFolder}
+            >
+              Choose Folder
+            </button>
+          </div>
+          <span className="heatmap-batch-path" title={heatmapBatchRoot || undefined}>
+            {heatmapBatchRoot || "No folder selected"}
+          </span>
+          <div className="heatmap-preset-fields">
+            {Object.entries(heatmapPresets).map(([preset, value]) => (
+              <label key={preset}>
+                <span>{HEATMAP_PRESET_LABELS[preset]}</span>
+                <input
+                  aria-label={`${preset} heatmap cell size`}
+                  type="number"
+                  min="1"
+                  max="4096"
+                  value={value}
+                  onChange={(event) => updateHeatmapPreset(preset, event.target.value)}
+                  onBlur={() => commitHeatmapPreset(preset)}
+                />
+              </label>
+            ))}
+          </div>
+          <button
+            type="button"
+            disabled={!heatmapBatchRoot || heatmapBatchLoading}
+            onClick={handleGenerateHeatmaps}
+          >
+            {heatmapBatchLoading ? "Generating..." : "Generate Heatmaps"}
+          </button>
+          <div className="heatmap-batch-state" aria-live="polite">
+            {heatmapBatchError ? <span className="heatmap-error">{heatmapBatchError}</span> : null}
+            {heatmapBatchResult ? (
+              <span>
+                {`${heatmapBatchResult.discovered} discovered / ${heatmapBatchResult.completed} completed / ${
+                  heatmapBatchResult.skipped
+                } skipped / ${heatmapBatchResult.failed} failed / ${heatmapBatchResult.generatedFiles} files`}
+              </span>
+            ) : null}
+          </div>
+        </section>
         <button type="button" onClick={handleAddGroup} disabled={!bounds}>
           Add group
         </button>
@@ -1096,7 +1327,71 @@ export default function App() {
             >
               Fiber QC
             </button>
+            <button
+              type="button"
+              aria-pressed={imageLayer === "heatmap"}
+              onClick={() => setImageLayer("heatmap")}
+              disabled={!activeImage}
+            >
+              Heat Map
+            </button>
           </div>
+          {imageLayer === "heatmap" ? (
+            <div className="heatmap-controls" aria-label="Heatmap controls">
+              <div className="segmented-control heatmap-metric-control" aria-label="Heatmap metric">
+                <button
+                  type="button"
+                  aria-pressed={heatmapMetric === "pixel-density"}
+                  onClick={() => handleHeatmapMetricSelect("pixel-density")}
+                >
+                  Pixel Density
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={heatmapMetric === "estimated-collagen-density"}
+                  onClick={() => handleHeatmapMetricSelect("estimated-collagen-density")}
+                >
+                  Estimated Collagen Density
+                </button>
+              </div>
+              <div className="segmented-control heatmap-size-control" aria-label="Heatmap cell size">
+                {Object.entries(heatmapPresets).map(([preset, value]) => (
+                  <button
+                    type="button"
+                    key={preset}
+                    aria-pressed={heatmapPreset === preset}
+                    onClick={() => handleHeatmapPresetSelect(preset)}
+                  >
+                    {`${HEATMAP_PRESET_LABELS[preset]} ${value}x${value}`}
+                  </button>
+                ))}
+              </div>
+              {activeIndex > 0 ? (
+                <button
+                  type="button"
+                  aria-pressed={heatmapComparePrevious}
+                  onClick={() => setHeatmapComparePrevious((current) => !current)}
+                >
+                  Compare Previous
+                </button>
+              ) : null}
+              <label htmlFor="heatmap-opacity">
+                Opacity
+                <input
+                  id="heatmap-opacity"
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value={heatmapOpacity}
+                  onChange={(event) => setHeatmapOpacity(Number(event.target.value))}
+                />
+              </label>
+              <span className="heatmap-view-state" aria-live="polite">
+                {heatmapViewStatus}
+              </span>
+            </div>
+          ) : null}
           <label htmlFor="point-opacity">
             Point opacity
             <input
@@ -1167,7 +1462,7 @@ export default function App() {
           >
             <canvas
               ref={canvasRef}
-              className={imageLayer === "original" ? "raw-canvas" : "raw-canvas hidden-layer"}
+              className={imageLayer === "original" || imageLayer === "heatmap" ? "raw-canvas" : "raw-canvas hidden-layer"}
               aria-label="raw16 image"
             />
             {activeImage && (imageLayer === "mask" || imageLayer === "fiber-qc") ? (
@@ -1183,6 +1478,33 @@ export default function App() {
                 alt="skeleton preview"
                 src={`/api/images/${activeImage.id}/skeleton-preview`}
               />
+            ) : null}
+            {imageLayer === "heatmap" && heatmap ? (
+              <HeatmapOverlay
+                heatmap={heatmap}
+                metric={heatmapMetric}
+                calibration={densityCalibration}
+                comparison={heatmapComparison.value}
+                opacity={heatmapOpacity}
+                pointer={pointer}
+              />
+            ) : null}
+            {imageLayer === "heatmap" ? (
+              <div
+                className={heatmapComparison.value ? "heatmap-legend difference" : "heatmap-legend"}
+                aria-label="heatmap color legend"
+              >
+                <span>
+                  {heatmapComparison.value
+                    ? formatLegendValue(heatmapComparison.value.maxAbs, heatmapRange.unit)
+                    : formatLegendValue(heatmapRange.max, heatmapRange.unit)}
+                </span>
+                <i aria-hidden="true" />
+                <span>{heatmapComparison.value ? "0" : formatLegendValue(heatmapRange.min, heatmapRange.unit)}</span>
+                {heatmapComparison.value ? (
+                  <span>{formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)}</span>
+                ) : null}
+              </div>
             ) : null}
             {activeImage && hasActiveImageDimensions && bounds ? (
               <svg
@@ -1630,6 +1952,47 @@ async function readJsonResponse(response) {
   }
 
   return payload;
+}
+
+function loadHeatmapPresets() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(HEATMAP_PRESETS_KEY));
+    return Object.fromEntries(
+      Object.entries(DEFAULT_HEATMAP_PRESETS).map(([preset, fallback]) => [
+        preset,
+        validHeatmapCellSize(stored?.[preset], fallback),
+      ]),
+    );
+  } catch {
+    return { ...DEFAULT_HEATMAP_PRESETS };
+  }
+}
+
+function loadSelectedHeatmapPreset() {
+  const stored = localStorage.getItem(HEATMAP_SELECTED_PRESET_KEY);
+  return Object.hasOwn(DEFAULT_HEATMAP_PRESETS, stored) ? stored : "small";
+}
+
+function loadHeatmapMetric() {
+  const stored = localStorage.getItem(HEATMAP_METRIC_KEY);
+  return stored === "estimated-collagen-density" ? stored : "pixel-density";
+}
+
+function readStoredOpacity(key, fallback) {
+  const stored = localStorage.getItem(key);
+  if (stored === null) return fallback;
+  const value = Number(stored);
+  return value >= 0.1 && value <= 1 ? value : fallback;
+}
+
+function validHeatmapCellSize(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 1 && number <= 4096 ? number : fallback;
+}
+
+function formatLegendValue(value, unit) {
+  const formatted = Number.isInteger(value) ? String(value) : Number(value).toFixed(4);
+  return unit ? `${formatted} ${unit}` : formatted;
 }
 
 function normalizeAndClampBounds(bounds, image) {
