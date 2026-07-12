@@ -6,4 +6,4 @@ Heatmap workflows need the same safety invariants at generation, persistence, an
 - Bracket mask decoding with file snapshots and compare `dev`, `ino`, `size`, and `mtimeMs` so pixels cannot be paired with different metadata.
 - Keep durable user preferences separate from transient loaded data and errors; a failed comparison load should not disable future retries.
 - Draw large static grids in a canvas effect whose dependencies contain only visual inputs, never pointer-only tooltip state.
-- Give related async actions a shared request identity and let only the latest request update data, errors, or loading state.
+- Give related async actions a shared request identity and let only the latest request update data, errors, or loading state. React state is not a synchronous submission lock; use an in-flight ref set before any async boundary to prevent same-tick duplicate requests.

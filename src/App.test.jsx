@@ -1351,41 +1351,31 @@ describe("App", () => {
     expect(chooseButton).toBeEnabled();
   });
 
-  test("ignores an older generation response that resolves after the newest request", async () => {
-    const firstGeneration = deferred();
-    const secondGeneration = deferred();
-    let generationCount = 0;
-    mockApi({
-      generateHeatmapsResponse: () => {
-        generationCount += 1;
-        return generationCount === 1 ? firstGeneration.promise : secondGeneration.promise;
-      },
+  test("submits only one generation request for same-tick repeated clicks", async () => {
+    const pendingGeneration = deferred();
+    const { fetchMock } = mockApi({
+      generateHeatmapsResponse: () => pendingGeneration.promise,
     });
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
     await screen.findByText("/selected/heatmap-root");
     const generateButton = screen.getByRole("button", { name: "Generate Heatmaps" });
+    const chooseButton = screen.getByRole("button", { name: "Choose heatmap folder" });
     act(() => {
       generateButton.click();
       generateButton.click();
     });
-    await waitFor(() => expect(generationCount).toBe(2));
-
-    await act(async () => {
-      secondGeneration.resolve(await jsonResponse({
-        discovered: 2,
-        completed: 2,
-        skipped: 0,
-        failed: 0,
-        generatedFiles: 6,
-        failures: [],
-      }));
+    await waitFor(() => {
+      const generationCalls = fetchMock.mock.calls.filter(
+        ([url, options]) => url === "/api/heatmaps/generate" && options?.method === "POST",
+      );
+      expect(generationCalls).toHaveLength(1);
     });
-    expect(screen.getByText(/2 discovered/)).toHaveTextContent("2 completed");
+    expect(chooseButton).toBeDisabled();
 
     await act(async () => {
-      firstGeneration.resolve(await jsonResponse({
+      pendingGeneration.resolve(await jsonResponse({
         discovered: 1,
         completed: 1,
         skipped: 0,
@@ -1394,7 +1384,8 @@ describe("App", () => {
         failures: [],
       }));
     });
-    expect(screen.getByText(/2 discovered/)).toHaveTextContent("2 completed");
+    expect(screen.getByText(/1 discovered/)).toHaveTextContent("1 completed");
+    expect(chooseButton).toBeEnabled();
   });
 
   test("renders ROI preview locally without requesting a server overlay", async () => {

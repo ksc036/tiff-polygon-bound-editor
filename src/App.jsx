@@ -114,6 +114,7 @@ export default function App() {
   const heatmapRequestRef = useRef(0);
   const previousHeatmapRequestRef = useRef(0);
   const heatmapBatchRequestRef = useRef(0);
+  const heatmapGenerationInFlightRef = useRef(false);
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [images, setImages] = useState([]);
@@ -834,7 +835,7 @@ export default function App() {
   }
 
   async function handleSelectHeatmapFolder() {
-    if (heatmapBatchLoading) return;
+    if (heatmapGenerationInFlightRef.current || heatmapBatchLoading) return;
     const requestId = (heatmapBatchRequestRef.current += 1);
     const isCurrentRequest = () => requestId === heatmapBatchRequestRef.current;
     setHeatmapBatchError("");
@@ -851,28 +852,31 @@ export default function App() {
   }
 
   async function handleGenerateHeatmaps() {
-    if (!heatmapBatchRoot || heatmapBatchLoading) return;
+    if (!heatmapBatchRoot || heatmapGenerationInFlightRef.current) return;
+    heatmapGenerationInFlightRef.current = true;
     const requestId = (heatmapBatchRequestRef.current += 1);
     const isCurrentRequest = () => requestId === heatmapBatchRequestRef.current;
-    const committedPresets = Object.fromEntries(
-      Object.entries(heatmapPresets).map(([preset, value]) => [
-        preset,
-        validHeatmapCellSize(value, DEFAULT_HEATMAP_PRESETS[preset]),
-      ]),
-    );
-    setHeatmapPresets(committedPresets);
-    localStorage.setItem(HEATMAP_PRESETS_KEY, JSON.stringify(committedPresets));
-    setHeatmapBatchLoading(true);
-    setHeatmapBatchError("");
-    setHeatmapBatchResult(null);
+    const requestedRoot = heatmapBatchRoot;
 
     try {
+      const committedPresets = Object.fromEntries(
+        Object.entries(heatmapPresets).map(([preset, value]) => [
+          preset,
+          validHeatmapCellSize(value, DEFAULT_HEATMAP_PRESETS[preset]),
+        ]),
+      );
+      setHeatmapPresets(committedPresets);
+      localStorage.setItem(HEATMAP_PRESETS_KEY, JSON.stringify(committedPresets));
+      setHeatmapBatchLoading(true);
+      setHeatmapBatchError("");
+      setHeatmapBatchResult(null);
+
       const payload = await readJsonResponse(
         await fetch("/api/heatmaps/generate", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            rootPath: heatmapBatchRoot,
+            rootPath: requestedRoot,
             cellSizes: Object.values(committedPresets),
           }),
         }),
@@ -881,6 +885,7 @@ export default function App() {
     } catch (error) {
       if (isCurrentRequest()) setHeatmapBatchError(error.message);
     } finally {
+      heatmapGenerationInFlightRef.current = false;
       if (isCurrentRequest()) setHeatmapBatchLoading(false);
     }
   }
