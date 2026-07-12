@@ -83,6 +83,56 @@ describe("heatmap calculations", () => {
     });
   });
 
+  test("preserves unavailable estimated values for zero-slope calibration", () => {
+    const current = heatmapWithDensities([0.2, 0.1]);
+    const previous = heatmapWithDensities([0.05, 0.3]);
+
+    expect(
+      buildHeatmapDifference({
+        current,
+        previous,
+        metric: "estimated-collagen-density",
+        calibration: { slope: 0, intercept: 0.05 },
+      }),
+    ).toEqual({
+      currentValues: [null, null],
+      previousValues: [null, null],
+      values: [null, null],
+      maxAbs: 0,
+    });
+  });
+
+  test("preserves unavailable estimated values for non-numeric calibration", () => {
+    const current = heatmapWithDensities([0.2]);
+    const previous = heatmapWithDensities([0.05]);
+
+    expect(
+      buildHeatmapDifference({
+        current,
+        previous,
+        metric: "estimated-collagen-density",
+        calibration: { slope: "not-a-number", intercept: "0.05" },
+      }),
+    ).toEqual({
+      currentValues: [null],
+      previousValues: [null],
+      values: [null],
+      maxAbs: 0,
+    });
+  });
+
+  test("only includes finite deltas in maxAbs", () => {
+    const current = heatmapWithDensities([0.2, Number.NaN]);
+    const previous = heatmapWithDensities([0.1, 0.3]);
+
+    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density", calibration })).toEqual({
+      currentValues: [0.2, null],
+      previousValues: [0.1, 0.3],
+      values: [0.1, null],
+      maxAbs: 0.1,
+    });
+  });
+
   test("rejects incompatible dimensions and cell sizes", () => {
     expect(heatmapCompatibilityError(heatmap({ width: 10 }), heatmap({ width: 11 }))).toMatch(/dimensions/i);
     expect(heatmapCompatibilityError(heatmap({ cellWidth: 5 }), heatmap({ cellWidth: 10 }))).toMatch(/cell size/i);
@@ -99,6 +149,8 @@ describe("heatmap calculations", () => {
     expect(differenceColor(-1, 1)).toBe("#2563eb");
     expect(differenceColor(0, 1)).toBe("#f8fafc");
     expect(differenceColor(1, 1)).toBe("#dc2626");
+    expect(differenceColor(null, 1)).toBe("#f8fafc");
+    expect(differenceColor(Number.NaN, 1)).toBe("#f8fafc");
   });
 
   test("provides metric display ranges", () => {

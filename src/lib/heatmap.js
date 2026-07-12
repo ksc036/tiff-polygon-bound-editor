@@ -23,7 +23,7 @@ export function estimateHeatmapCollagenDensity(pixelDensity, calibration) {
 
 export function heatmapMetricValue(cell, metric, calibration) {
   if (metric === "pixel-density") {
-    return cell?.pixelDensity;
+    return Number.isFinite(cell?.pixelDensity) ? cell.pixelDensity : null;
   }
 
   if (metric === "estimated-collagen-density" || metric === "collagen-density") {
@@ -65,13 +65,19 @@ export function buildHeatmapDifference({ current, previous, metric, calibration 
 
   const currentValues = current.cells.map((cell) => heatmapMetricValue(cell, metric, calibration));
   const previousValues = previous.cells.map((cell) => heatmapMetricValue(cell, metric, calibration));
-  const values = currentValues.map((value, index) => cleanFloatingPoint(value - previousValues[index]));
+  const values = currentValues.map((value, index) => {
+    const previousValue = previousValues[index];
+    return Number.isFinite(value) && Number.isFinite(previousValue)
+      ? cleanFloatingPoint(value - previousValue)
+      : null;
+  });
+  const finiteValues = values.filter((value) => Number.isFinite(value));
 
   return {
     currentValues,
     previousValues,
     values,
-    maxAbs: cleanFloatingPoint(Math.max(0, ...values.map((value) => Math.abs(value)))),
+    maxAbs: finiteValues.length > 0 ? cleanFloatingPoint(Math.max(...finiteValues.map((value) => Math.abs(value)))) : 0,
   };
 }
 
