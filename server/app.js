@@ -5,6 +5,7 @@ import { createStorage } from "./storage.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
 import { AnalysisError, loadAnalysis, recalculateAnalysis } from "./analysisService.js";
 import { HeatmapError, generateHeatmapBatch, loadImageHeatmap } from "./heatmapService.js";
+import { validateCellSize } from "./maskHeatmap.js";
 import { createMaskPreview, createRoiOverlay, createSkeletonPreview } from "./previewLayers.js";
 
 const CONNECTION_MODE = "input-order-cycle";
@@ -285,7 +286,15 @@ export function createApp({
   app.get(
     "/api/images/:id/heatmap",
     asyncRoute(async (request, response) => {
-      response.json({ heatmap: await loadImageHeatmap(imageStorage, request.params.id, request.query.cellSize) });
+      let cellSize;
+      try {
+        cellSize = validateCellSize(request.query.cellSize);
+      } catch {
+        response.status(400).json({ error: "Invalid heatmap cell size." });
+        return;
+      }
+
+      response.json({ heatmap: await loadImageHeatmap(imageStorage, request.params.id, cellSize) });
     }),
   );
 

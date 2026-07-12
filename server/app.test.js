@@ -316,6 +316,21 @@ describe("createApp", () => {
     await expect(response.json()).resolves.toMatchObject({ heatmap: { cellWidth: 10 } });
   });
 
+  test("heatmap loading rejects invalid request cell sizes with a safe 400 error", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "sample-a", "frame001.tif");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    for (const query of ["", "0", "2.5", "abc"]) {
+      const suffix = query ? `?cellSize=${query}` : "";
+      const response = await request(app, `/api/images/sample-a/heatmap${suffix}`);
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "Invalid heatmap cell size." });
+    }
+  });
+
   test("heatmap loading maps missing, stale, and malformed saved data to safe statuses", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
