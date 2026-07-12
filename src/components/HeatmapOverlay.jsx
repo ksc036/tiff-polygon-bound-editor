@@ -8,7 +8,7 @@ import {
   infernoColor,
 } from "../lib/heatmap.js";
 
-export default function HeatmapOverlay({ heatmap, metric, calibration, comparison, opacity, pointer }) {
+export default function HeatmapOverlay({ heatmap, metric, calibration, comparison, pointer }) {
   const canvasRef = useRef(null);
   const hovered = heatmapCellAtPoint(heatmap, pointer);
   const hoveredIndex = hovered ? hovered.row * heatmap.columns + hovered.column : -1;
@@ -24,6 +24,7 @@ export default function HeatmapOverlay({ heatmap, metric, calibration, compariso
     if (!context) return;
 
     context.imageSmoothingEnabled = false;
+    context.globalAlpha = 1;
     context.clearRect(0, 0, heatmap.width, heatmap.height);
     if (
       metric === "estimated-collagen-density" &&
@@ -32,14 +33,13 @@ export default function HeatmapOverlay({ heatmap, metric, calibration, compariso
       return;
     }
 
-    context.globalAlpha = opacity;
     heatmap.cells.forEach((cell, index) => {
       context.fillStyle = comparison
         ? differenceColor(comparison.values[index], comparison.maxAbs)
         : infernoColor(heatmapMetricValue(cell, metric, calibration), range.min, range.max);
       context.fillRect(cell.x, cell.y, cell.width, cell.height);
     });
-  }, [calibration, comparison, heatmap, metric, opacity, range.max, range.min]);
+  }, [calibration, comparison, heatmap, metric, range.max, range.min]);
 
   return (
     <>

@@ -26,7 +26,7 @@ describe("HeatmapOverlay", () => {
       clearRect: vi.fn(),
       fillRect: vi.fn(),
       fillStyle: "",
-      globalAlpha: 1,
+      globalAlpha: 0.25,
       imageSmoothingEnabled: true,
     };
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context);
@@ -49,7 +49,6 @@ describe("HeatmapOverlay", () => {
           values: [0.02, 0.1],
           maxAbs: 0.1,
         }}
-        opacity={0.62}
         pointer={{ x: 1, y: 1 }}
       />,
     );
@@ -57,6 +56,7 @@ describe("HeatmapOverlay", () => {
     expect(screen.getByLabelText("heatmap overlay")).toHaveAttribute("width", "10");
     expect(screen.getByLabelText("heatmap overlay")).toHaveAttribute("height", "5");
     expect(context.imageSmoothingEnabled).toBe(false);
+    expect(context.globalAlpha).toBe(1);
     expect(context.fillRect).toHaveBeenCalledTimes(2);
     expect(context.fillRect).toHaveBeenNthCalledWith(1, 0, 0, 5, 5);
     expect(context.fillRect).toHaveBeenNthCalledWith(2, 5, 0, 5, 5);
@@ -72,7 +72,6 @@ describe("HeatmapOverlay", () => {
       metric: "pixel-density",
       calibration: { slope: 0.1, intercept: 0.01 },
       comparison: null,
-      opacity: 0.62,
     };
     const { rerender } = render(<HeatmapOverlay {...props} pointer={{ x: 1, y: 1 }} />);
 
@@ -93,7 +92,6 @@ describe("HeatmapOverlay", () => {
         metric="estimated-collagen-density"
         calibration={{ slope: "", intercept: 0.01 }}
         comparison={null}
-        opacity={0.62}
         pointer={null}
       />,
     );
@@ -110,7 +108,6 @@ describe("HeatmapOverlay", () => {
         metric="pixel-density"
         calibration={{ slope: "", intercept: 0.01 }}
         comparison={null}
-        opacity={0.62}
         pointer={{ x: 1, y: 1 }}
       />,
     );
