@@ -30,6 +30,16 @@ describe("application layout CSS", () => {
     expect(legendRule).toContain("grid-template-columns");
   });
 
+  test("reserves layout space below the comparison legend for its zero label", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const differenceLegendRule = css.match(/\.heatmap-legend\.difference\s*\{[^}]+\}/)?.[0] ?? "";
+    const scaleRule = css.match(/\.heatmap-legend-scale\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(differenceLegendRule).toContain("padding-bottom: 14px");
+    expect(scaleRule).toContain("height: 12px");
+  });
+
   test("stacks the Heat Map original TIFF above the opaque heatmap overlay", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 

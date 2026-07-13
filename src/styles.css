@@ -614,6 +614,10 @@ input[type="range"] {
   height: 12px;
 }
 
+.heatmap-legend.difference {
+  padding-bottom: 14px;
+}
+
 .heatmap-legend-scale i {
   position: absolute;
   inset: 0;
