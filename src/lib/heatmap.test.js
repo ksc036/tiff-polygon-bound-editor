@@ -133,6 +133,14 @@ describe("heatmap calculations", () => {
     });
   });
 
+  test("calculates maxAbs for a large heatmap without spreading arguments", () => {
+    const cellCount = 200_000;
+    const current = heatmapWithDensities(Array.from({ length: cellCount }, (_, index) => (index === cellCount - 1 ? 0.9 : 0.2)));
+    const previous = heatmapWithDensities(Array.from({ length: cellCount }, () => 0.1));
+
+    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density", calibration }).maxAbs).toBe(0.8);
+  });
+
   test("rejects incompatible dimensions and cell sizes", () => {
     expect(heatmapCompatibilityError(heatmap({ width: 10 }), heatmap({ width: 11 }))).toMatch(/dimensions/i);
     expect(heatmapCompatibilityError(heatmap({ cellWidth: 5 }), heatmap({ cellWidth: 10 }))).toMatch(/cell size/i);

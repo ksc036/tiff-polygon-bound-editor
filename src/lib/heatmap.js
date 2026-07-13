@@ -65,19 +65,25 @@ export function buildHeatmapDifference({ current, previous, metric, calibration 
 
   const currentValues = current.cells.map((cell) => heatmapMetricValue(cell, metric, calibration));
   const previousValues = previous.cells.map((cell) => heatmapMetricValue(cell, metric, calibration));
+  let maxAbs = 0;
   const values = currentValues.map((value, index) => {
     const previousValue = previousValues[index];
-    return Number.isFinite(value) && Number.isFinite(previousValue)
-      ? cleanFloatingPoint(value - previousValue)
-      : null;
+    if (!Number.isFinite(value) || !Number.isFinite(previousValue)) {
+      return null;
+    }
+
+    const delta = cleanFloatingPoint(value - previousValue);
+    if (Number.isFinite(delta)) {
+      maxAbs = Math.max(maxAbs, Math.abs(delta));
+    }
+    return delta;
   });
-  const finiteValues = values.filter((value) => Number.isFinite(value));
 
   return {
     currentValues,
     previousValues,
     values,
-    maxAbs: finiteValues.length > 0 ? cleanFloatingPoint(Math.max(...finiteValues.map((value) => Math.abs(value)))) : 0,
+    maxAbs: cleanFloatingPoint(maxAbs),
   };
 }
 
