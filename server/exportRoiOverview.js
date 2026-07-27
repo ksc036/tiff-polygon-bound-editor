@@ -1,5 +1,6 @@
 import sharp from "sharp";
 import { groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
+import { assignOutwardRoiPixels } from "./analysisGeometry.js";
 
 const DEFAULT_ROI_LIMITS = Object.freeze({ near: 20, mid: 50, far: 100 });
 const ROI_BANDS = Object.freeze([
@@ -10,8 +11,15 @@ const ROI_BANDS = Object.freeze([
 const LEGEND_WIDTH = 360;
 const IMAGE_MARGIN = 32;
 const IMAGE_TOP = 52;
+const OUTSIDE_BAND_COLORS = Object.freeze({
+  near: [239, 68, 68],
+  mid: [245, 158, 11],
+  far: [59, 130, 246],
+});
 
-export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, bounds }) {
+export const OUTSIDE_OVERLAY_ALPHA = 96;
+
+export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, outsideOverlayDataUrl = null, bounds }) {
   validateRoiBounds(bounds, width, height);
   if (typeof normalizedImageDataUrl !== "string" || normalizedImageDataUrl.length === 0) {
     throw new TypeError("A normalized image data URL is required.");
@@ -28,8 +36,13 @@ export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, bou
   const svgWidth = legendX + LEGEND_WIDTH + IMAGE_MARGIN;
   const svgHeight = Math.max(imageY + height + labelPadding, imageY + legendHeight);
 
-  const groupLayers = normalizedGroups.map((group) => renderGroupLayer({ group, imageX, imageY })).join("\n");
+  const groupLayers = normalizedGroups
+    .map((group) => renderGroupLayer({ group, imageX, imageY, includeOutsideBands: !outsideOverlayDataUrl }))
+    .join("\n");
   const legend = renderLegend({ groups: normalizedGroups, x: legendX, y: IMAGE_TOP });
+  const outsideOverlay = outsideOverlayDataUrl
+    ? `<image data-role="outside-overlay" data-alpha="${OUTSIDE_OVERLAY_ALPHA}" x="${imageX}" y="${imageY}" width="${width}" height="${height}" href="${escapeXml(outsideOverlayDataUrl)}" preserveAspectRatio="none"/>`
+    : "";
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
   <rect width="100%" height="100%" fill="#ffffff"/>
@@ -43,6 +56,7 @@ export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, bou
   </style>
   <text class="report-title" x="${imageX}" y="28">ROI overview</text>
   <image x="${imageX}" y="${imageY}" width="${width}" height="${height}" href="${escapeXml(normalizedImageDataUrl)}" preserveAspectRatio="none"/>
+  ${outsideOverlay}
   <rect x="${imageX}" y="${imageY}" width="${width}" height="${height}" fill="none" stroke="#334155" stroke-width="1"/>
   ${groupLayers}
   ${legend}
@@ -58,17 +72,42 @@ export async function renderRoiOverview({ imagePath, bounds, maxImagePixels }) {
   validateRoiBounds(bounds, width, height);
 
   const normalized = await source.clone().greyscale().normalize().png().toBuffer();
+  const outsideOverlay = await buildOutsideRoiOverlay({ width, height, bounds });
   const svg = buildRoiOverviewSvg({
     width,
     height,
     normalizedImageDataUrl: `data:image/png;base64,${normalized.toString("base64")}`,
+    outsideOverlayDataUrl: `data:image/png;base64,${outsideOverlay.toString("base64")}`,
     bounds,
   });
 
   return sharp(Buffer.from(svg)).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
 }
 
-function renderGroupLayer({ group, imageX, imageY }) {
+export async function buildOutsideRoiOverlay({ width, height, bounds }) {
+  validateRoiBounds(bounds, width, height);
+  const groups = bounds.groups
+    .filter((group) => group.analysisMode !== "inside")
+    .map((group) => ({ ...group, roiBands: deriveRoiBands(group.roiLimits) }));
+  const assignments = assignOutwardRoiPixels({ width, height, groups });
+  const data = new Uint8Array(width * height * 4);
+
+  for (const [key, assignment] of assignments) {
+    const color = OUTSIDE_BAND_COLORS[assignment.bandId];
+    if (!color) continue;
+
+    const [x, y] = key.split(",").map(Number);
+    const offset = (y * width + x) * 4;
+    data[offset] = color[0];
+    data[offset + 1] = color[1];
+    data[offset + 2] = color[2];
+    data[offset + 3] = OUTSIDE_OVERLAY_ALPHA;
+  }
+
+  return sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer();
+}
+
+function renderGroupLayer({ group, imageX, imageY, includeOutsideBands }) {
   const translatedPath = polygonPath(group.points, imageX, imageY);
   const maskId = `roi-overview-mask-${group.index}`;
   const centroid = polygonCentroid(group.points);
@@ -82,20 +121,22 @@ function renderGroupLayer({ group, imageX, imageY }) {
     </g>`;
   }
 
-  const bandPaths = [...group.bands]
-    .reverse()
-    .map((band) => `<path d="${translatedPath}" fill="none" stroke="${band.color}" stroke-width="${band.toPx * 2}"/>`)
-    .join("");
   const bandLabels = group.bands
     .map((band) => renderOutsideBandLabel({ band, group, centroid: translatedCentroid }))
     .join("");
-
-  return `<g data-role="outside-roi" data-group-id="${escapeXml(group.id)}">
-    <mask id="${maskId}" maskUnits="userSpaceOnUse" x="${imageX}" y="${imageY}" width="${group.imageWidth}" height="${group.imageHeight}">
+  const bandPaths = includeOutsideBands
+    ? `<mask id="${maskId}" maskUnits="userSpaceOnUse" x="${imageX}" y="${imageY}" width="${group.imageWidth}" height="${group.imageHeight}">
       <rect x="${imageX}" y="${imageY}" width="${group.imageWidth}" height="${group.imageHeight}" fill="#ffffff"/>
       <path d="${translatedPath}" fill="#000000"/>
     </mask>
-    <g mask="url(#${maskId})">${bandPaths}</g>
+    <g mask="url(#${maskId})">${[...group.bands]
+      .reverse()
+      .map((band) => `<path d="${translatedPath}" fill="none" stroke="${band.color}" stroke-opacity="${OUTSIDE_OVERLAY_ALPHA / 255}" stroke-width="${band.toPx * 2}"/>`)
+      .join("")}</g>`
+    : "";
+
+  return `<g data-role="outside-roi" data-group-id="${escapeXml(group.id)}">
+    ${bandPaths}
     <path d="${translatedPath}" fill="none" stroke="${escapeXml(group.color)}" stroke-width="2"/>
     ${bandLabels}
   </g>`;

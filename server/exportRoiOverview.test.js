@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { afterEach, expect, test } from "vitest";
-import { buildRoiOverviewSvg, renderRoiOverview } from "./exportRoiOverview.js";
+import { assignOutwardRoiPixels } from "./analysisGeometry.js";
+import {
+  buildOutsideRoiOverlay,
+  buildRoiOverviewSvg,
+  OUTSIDE_OVERLAY_ALPHA,
+  renderRoiOverview,
+} from "./exportRoiOverview.js";
 
 const tempDirectories = [];
 
@@ -55,6 +61,64 @@ const bounds = {
   ],
 };
 
+const nearbyOutsideBounds = {
+  width: 22,
+  height: 14,
+  groups: [
+    {
+      id: "a-left",
+      name: "Left boundary",
+      color: "#22c55e",
+      analysisMode: "outside",
+      roiLimits: { near: 1, mid: 2, far: 3 },
+      points: [
+        { x: 4, y: 4 },
+        { x: 8, y: 4 },
+        { x: 8, y: 8 },
+        { x: 4, y: 8 },
+      ],
+    },
+    {
+      id: "z-right",
+      name: "Right boundary",
+      color: "#a855f7",
+      analysisMode: "outside",
+      roiLimits: { near: 3, mid: 5, far: 7 },
+      points: [
+        { x: 12, y: 4 },
+        { x: 16, y: 4 },
+        { x: 16, y: 8 },
+        { x: 12, y: 8 },
+      ],
+    },
+  ],
+};
+
+const expectedRoiBands = [
+  { id: "near", label: "Near", fromPx: 0, toPx: 20 },
+  { id: "mid", label: "Mid", fromPx: 20, toPx: 50 },
+  { id: "far", label: "Far", fromPx: 50, toPx: 100 },
+];
+
+const nearbyGroupsWithBands = [
+  {
+    ...nearbyOutsideBounds.groups[0],
+    roiBands: [
+      { id: "near", label: "Near", fromPx: 0, toPx: 1 },
+      { id: "mid", label: "Mid", fromPx: 1, toPx: 2 },
+      { id: "far", label: "Far", fromPx: 2, toPx: 3 },
+    ],
+  },
+  {
+    ...nearbyOutsideBounds.groups[1],
+    roiBands: [
+      { id: "near", label: "Near", fromPx: 0, toPx: 3 },
+      { id: "mid", label: "Mid", fromPx: 3, toPx: 5 },
+      { id: "far", label: "Far", fromPx: 5, toPx: 7 },
+    ],
+  },
+];
+
 test("labels ROI identities and keeps editable handles out of the report", () => {
   const svg = buildRoiOverviewSvg({
     width: 80,
@@ -72,9 +136,51 @@ test("labels ROI identities and keeps editable handles out of the report", () =>
   expect(svg).toContain("0-30 px union");
   expect(svg).toContain('data-roi-id="G01-N"');
   expect(svg).not.toContain('<g clip-path=');
-  expect(svg).not.toContain("stroke-opacity");
+  expect(svg).toContain("stroke-opacity");
   expect(svg).not.toContain('data-role="point-handle"');
   expect(svg).not.toContain("<circle");
+});
+
+test("renders one semi-transparent outside overlay from canonical nearest-group assignments", async () => {
+  const assignments = assignOutwardRoiPixels({
+    width: nearbyOutsideBounds.width,
+    height: nearbyOutsideBounds.height,
+    groups: nearbyGroupsWithBands,
+    roiBands: expectedRoiBands,
+  });
+  const overlay = await buildOutsideRoiOverlay({
+    width: nearbyOutsideBounds.width,
+    height: nearbyOutsideBounds.height,
+    bounds: nearbyOutsideBounds,
+  });
+  const { data, info } = await sharp(overlay).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const pixelAt = (x, y) => Array.from(data.subarray((y * info.width + x) * info.channels, (y * info.width + x + 1) * info.channels));
+
+  expect(assignments.get("10,6")).toMatchObject({ groupId: "a-left", bandId: "far" });
+  expect(pixelAt(10, 6)).toEqual([59, 130, 246, OUTSIDE_OVERLAY_ALPHA]);
+
+  for (let y = 0; y < info.height; y += 1) {
+    for (let x = 0; x < info.width; x += 1) {
+      const assignment = assignments.get(`${x},${y}`);
+      const pixel = pixelAt(x, y);
+      if (!assignment) {
+        expect(pixel[3]).toBe(0);
+      } else {
+        expect(pixel[3]).toBe(OUTSIDE_OVERLAY_ALPHA);
+      }
+    }
+  }
+
+  const svg = buildRoiOverviewSvg({
+    width: nearbyOutsideBounds.width,
+    height: nearbyOutsideBounds.height,
+    normalizedImageDataUrl: "data:image/png;base64,AA==",
+    outsideOverlayDataUrl: `data:image/png;base64,${overlay.toString("base64")}`,
+    bounds: nearbyOutsideBounds,
+  });
+  expect(svg).toContain('data-role="outside-overlay"');
+  expect(svg).toContain(`data-alpha="${OUTSIDE_OVERLAY_ALPHA}"`);
+  expect(svg).not.toContain("roi-overview-mask");
 });
 
 test("normalizes a TIFF and renders image plus right legend", async () => {
