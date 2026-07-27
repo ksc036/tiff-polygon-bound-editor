@@ -889,6 +889,89 @@ describe("App", () => {
     expect(screen.queryByRole("columnheader", { name: "Coverage" })).not.toBeInTheDocument();
   });
 
+  test("shows matching saved-color group and ROI identities across the editor and statistics", async () => {
+    const mixedBounds = {
+      ...savedBounds,
+      groups: [
+        { ...savedBounds.groups[0], id: "outer", name: "Cell edge", color: "#22c55e", analysisMode: "outside" },
+        {
+          id: "whole",
+          name: "Whole image",
+          color: "#ef4444",
+          analysisMode: "inside",
+          points: [
+            { id: "q1", x: 0, y: 0 },
+            { id: "q2", x: 99, y: 0 },
+            { id: "q3", x: 99, y: 79 },
+            { id: "q4", x: 0, y: 79 },
+          ],
+        },
+      ],
+    };
+    const mixedAnalysis = {
+      ...savedAnalysis,
+      groups: [
+        { ...savedAnalysis.groups[0], groupId: "outer", groupName: "Cell edge" },
+        {
+          groupId: "whole",
+          groupName: "Whole image",
+          analysisMode: "inside",
+          area: {
+            roiAreaPx: 8_000,
+            maskPixelCount: 2_000,
+            density: 0.25,
+            globalAlignment: 0.7,
+            radialNormalAlignment: null,
+            tangentialAlignment: null,
+            migrationAlignment: null,
+            empty: false,
+          },
+        },
+      ],
+    };
+    mockApi({
+      boundsQueue: [mixedBounds],
+      analysisResponse: { analysis: mixedAnalysis, hasAnalysis: true },
+    });
+    render(<App />);
+
+    expect(await screen.findByText("G01")).toHaveAttribute("data-group-color", "#22c55e");
+    expect(screen.getByText("G02")).toHaveAttribute("data-group-color", "#ef4444");
+    expect(screen.getByRole("cell", { name: "G01-N" })).toHaveAttribute("data-group-color", "#22c55e");
+    expect(screen.getByRole("cell", { name: "G01-A" })).toHaveAttribute("data-group-color", "#22c55e");
+    expect(screen.getByRole("cell", { name: "G02-I" })).toHaveAttribute("data-group-color", "#ef4444");
+  });
+
+  test("labels visible outside ROI bands without rendering the all-band union twice", async () => {
+    const outsideBounds = {
+      ...savedBounds,
+      groups: [{ ...savedBounds.groups[0], id: "outer", color: "#22c55e", analysisMode: "outside" }],
+    };
+    const outsideAnalysis = {
+      ...savedAnalysis,
+      groups: [{ ...savedAnalysis.groups[0], groupId: "outer" }],
+    };
+    mockApi({
+      boundsQueue: [outsideBounds],
+      analysisResponse: { analysis: outsideAnalysis, hasAnalysis: true },
+    });
+    render(<App />);
+
+    expect(await screen.findByLabelText("ROI ID G01-N")).toBeVisible();
+    expect(screen.getByLabelText("ROI ID G01-M")).toBeVisible();
+    expect(screen.getByLabelText("ROI ID G01-F")).toBeVisible();
+    expect(screen.queryByLabelText("ROI ID G01-A")).not.toBeInTheDocument();
+  });
+
+  test("hides ROI labels in Heat Map mode", async () => {
+    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
+    render(<App />);
+
+    expect(await screen.findByLabelText("ROI ID G01-N")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
+    expect(screen.queryByLabelText("ROI ID G01-N")).not.toBeInTheDocument();
+  });
+
   test("hides active group drawing and stats with client-side toggles only", async () => {
     mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
 

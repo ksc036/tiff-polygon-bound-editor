@@ -27,6 +27,7 @@ import {
 } from "./lib/heatmap.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
 import { fitAspectToBox } from "./lib/stageFit.js";
+import { buildAnalysisRows, groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
 
 const OPACITY_KEY = "raw16-editor-point-opacity";
 const DEFAULT_OPACITY = 0.85;
@@ -1125,10 +1126,11 @@ export default function App() {
 
   const polygons = useMemo(() => {
     if (!bounds) return [];
-    return bounds.groups.map((group) => {
+    return bounds.groups.map((group, groupIndex) => {
       const ordered = group.points;
       return {
         ...group,
+        groupIndex,
         ordered,
         path: ordered.map((point) => `${point.x},${point.y}`).join(" "),
       };
@@ -1158,6 +1160,13 @@ export default function App() {
     if (!visiblePolygons.some((group) => group.points.length >= 3)) return "ROI preview needs polygon";
     return "ROI preview local";
   }, [activeImage, bounds, hasActiveImageDimensions, showRoiOverlay, visiblePolygons]);
+  const roiOverlayLabels = useMemo(
+    () =>
+      imageLayer !== "heatmap" && showRoiOverlay
+        ? buildRoiOverlayLabels(visiblePolygons)
+        : [],
+    [imageLayer, showRoiOverlay, visiblePolygons],
+  );
 
   return (
     <main className="app-shell">
@@ -1252,7 +1261,7 @@ export default function App() {
         </div>
         {imageLayer !== "heatmap" ? (
           <div className="group-list">
-            {bounds?.groups.map((group) => {
+            {bounds?.groups.map((group, groupIndex) => {
               const displayVisible = groupDisplayVisible(groupDrawVisibility, groupStatsVisibility, group.id);
               return (
                 <div className={group.id === activeGroupId ? "group-row active" : "group-row"} key={group.id}>
@@ -1266,7 +1275,14 @@ export default function App() {
                       setMigrationDraft(null);
                     }}
                   >
-                    <span className="swatch" style={{ backgroundColor: group.color }} />
+                    <span
+                      aria-label={`${groupDisplayId(groupIndex)} color ${group.color}`}
+                      className="group-color-swatch"
+                      style={{ "--group-color": group.color }}
+                    />
+                    <span className="roi-id" data-group-color={group.color}>
+                      {groupDisplayId(groupIndex)}
+                    </span>
                     <span>{group.name}</span>
                     <small>{group.points.length} / {ANALYSIS_MODE_LABELS[group.analysisMode] ?? ANALYSIS_MODE_LABELS.outside}</small>
                     <span className={groupVisible(groupDrawVisibility, group.id) ? "group-state on" : "group-state off"}>
@@ -1708,6 +1724,24 @@ export default function App() {
                   />
                 )),
               )}
+              {roiOverlayLabels.map((label) => (
+                <text
+                  aria-label={`ROI ID ${label.roiId}`}
+                  className="roi-overlay-label"
+                  dominantBaseline="middle"
+                  fill={label.color}
+                  key={label.roiId}
+                  paintOrder="stroke"
+                  pointerEvents="none"
+                  stroke="#081018"
+                  strokeWidth="3"
+                  textAnchor="middle"
+                  x={label.x}
+                  y={label.y}
+                >
+                  {label.roiId}
+                </text>
+              ))}
               {visibleMigrationPolygons.map((group) => (
                 <g key={`${group.id}-migration`} className="migration-vector">
                   <line
@@ -1987,9 +2021,10 @@ export default function App() {
               <div className="analysis-table-wrap">
                 <table className="analysis-table">
 	                  <thead>
-		                    <tr>
-		                      <th>Group</th>
-		                      <th>Mode</th>
+                    <tr>
+                      <th>ROI ID</th>
+                      <th>Group</th>
+                      <th>Mode</th>
 		                      <th>ROI</th>
 		                      {ANALYSIS_COLUMNS.map((column) => (
 	                        <MetricColumnHeader
@@ -2003,12 +2038,16 @@ export default function App() {
 	                    </tr>
 	                  </thead>
 	                  <tbody>
-	                    {analysisRows(analysis)
-                          .filter((row) => groupVisible(groupStatsVisibility, row.groupId))
+                    {buildAnalysisRows(analysis, bounds)
+                          .filter((row) => groupVisible(groupStatsVisibility, row.sourceGroupId))
                           .map((row) => (
-		                      <tr key={row.id}>
-		                        <td>{row.groupName}</td>
-		                        <td>{row.modeLabel}</td>
+	                      <tr key={row.id}>
+	                        <td className="roi-id" data-group-color={row.groupColor}>{row.roiId}</td>
+	                        <td>
+                              <span aria-hidden="true" className="group-color-swatch" style={{ "--group-color": row.groupColor }} />
+                              {row.groupName}
+                            </td>
+	                        <td>{row.modeLabel}</td>
 		                        <td>{row.bandLabel}</td>
 		                        {ANALYSIS_COLUMNS.map((column) => (
 	                          <td key={column.key}>
@@ -2063,8 +2102,8 @@ function analysisColumnValue(column, metrics, densityCalibration) {
 function buildRoiPreviewGroups(polygons, image) {
   return polygons
     .filter((group) => group.ordered.length >= 3 && (group.analysisMode ?? "outside") === "outside")
-    .map((group, groupIndex) => {
-      const clipId = `roi-preview-clip-${svgIdPart(group.id)}-${groupIndex}`;
+    .map((group) => {
+      const clipId = `roi-preview-clip-${svgIdPart(group.id)}-${group.groupIndex}`;
       return {
         clipId,
         outsidePath: `M 0 0 H ${image.width} V ${image.height} H 0 Z ${polygonPath(group.ordered)} Z`,
@@ -2080,6 +2119,62 @@ function buildRoiPreviewGroups(polygons, image) {
           })),
       };
     });
+}
+
+function buildRoiOverlayLabels(polygons) {
+  return polygons
+    .filter((group) => group.ordered.length >= 3)
+    .flatMap((group) => {
+      const centroid = polygonCentroid(group.ordered);
+      const analysisMode = group.analysisMode === "inside" ? "inside" : "outside";
+
+      if (analysisMode === "inside") {
+        return [{
+          roiId: roiDisplayId({ groupIndex: group.groupIndex, analysisMode, bandId: "inside" }),
+          color: group.color,
+          ...centroid,
+        }];
+      }
+
+      const firstPoint = group.ordered[0];
+      const direction = normalizedVector({ x: firstPoint.x - centroid.x, y: firstPoint.y - centroid.y }) ?? { x: 1, y: 0 };
+      return deriveRoiBands(groupRoiLimits(group)).map((band) => {
+        const distance = (band.fromPx + band.toPx) / 2;
+        return {
+          roiId: roiDisplayId({ groupIndex: group.groupIndex, analysisMode, bandId: band.id }),
+          color: ROI_BAND_COLORS[band.id] ?? group.color,
+          x: firstPoint.x + direction.x * distance,
+          y: firstPoint.y + direction.y * distance,
+        };
+      });
+    });
+}
+
+function polygonCentroid(points) {
+  let crossSum = 0;
+  let xSum = 0;
+  let ySum = 0;
+
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const cross = current.x * next.y - next.x * current.y;
+    crossSum += cross;
+    xSum += (current.x + next.x) * cross;
+    ySum += (current.y + next.y) * cross;
+  }
+
+  if (Math.abs(crossSum) > Number.EPSILON) {
+    return { x: xSum / (3 * crossSum), y: ySum / (3 * crossSum) };
+  }
+
+  const totals = points.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }), { x: 0, y: 0 });
+  return { x: totals.x / points.length, y: totals.y / points.length };
+}
+
+function normalizedVector(vector) {
+  const length = Math.hypot(vector.x, vector.y);
+  return length > Number.EPSILON ? { x: vector.x / length, y: vector.y / length } : null;
 }
 
 function polygonPath(points) {
@@ -2278,46 +2373,6 @@ function roiBandsByGroup(bounds) {
       .filter((group) => (group.analysisMode ?? "outside") === "outside")
       .map((group) => [group.id, deriveRoiBands(groupRoiLimits(group))]),
   );
-}
-
-function analysisRows(analysis) {
-  const labels = new Map((analysis.roiBands ?? []).map((band) => [band.id, band.label ?? band.id]));
-  return (analysis.groups ?? []).flatMap((group) => {
-    if (group.analysisMode === "inside" && group.area) {
-      return [
-        {
-          id: `${group.groupId}-inside`,
-          groupId: group.groupId,
-          groupName: group.groupName ?? group.groupId,
-          modeLabel: "Inside",
-          bandLabel: "영역",
-          metrics: group.area,
-        },
-      ];
-    }
-
-    const bandRows = ROI_BAND_IDS.filter((bandId) => group.bands?.[bandId]).map((bandId) => ({
-      id: `${group.groupId}-${bandId}`,
-      groupId: group.groupId,
-      groupName: group.groupName ?? group.groupId,
-      modeLabel: "Outside",
-      bandLabel: labels.get(bandId) ?? bandId,
-      metrics: group.bands[bandId],
-    }));
-
-    if (!group.allBands) return bandRows;
-    return [
-      ...bandRows,
-      {
-        id: `${group.groupId}-all`,
-        groupId: group.groupId,
-        groupName: group.groupName ?? group.groupId,
-        modeLabel: "Outside",
-        bandLabel: "전체",
-        metrics: group.allBands,
-      },
-    ];
-  });
 }
 
 function groupVisible(visibilityByGroupId, groupId) {

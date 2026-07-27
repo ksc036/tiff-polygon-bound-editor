@@ -297,11 +297,22 @@ input[type="range"] {
   background: #2b171d;
 }
 
-.swatch {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35);
+.group-color-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 2px;
+  background: var(--group-color, #94a3b8);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.roi-id {
+  color: #dce8f3;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
 .field-stack {
@@ -1056,6 +1067,24 @@ input[type="range"] {
 .analysis-table th:nth-child(3),
 .analysis-table td:nth-child(3) {
   text-align: left;
+}
+
+.analysis-table th:nth-child(4),
+.analysis-table td:nth-child(4) {
+  text-align: left;
+}
+
+.analysis-table td:nth-child(2) .group-color-swatch {
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
+.roi-overlay-label {
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0;
+  user-select: none;
 }
 
 .analysis-table th {
