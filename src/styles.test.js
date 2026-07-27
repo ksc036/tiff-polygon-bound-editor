@@ -30,6 +30,15 @@ describe("application layout CSS", () => {
     expect(legendRule).toContain("grid-template-columns");
   });
 
+  test("stacks comparison and opacity controls in the narrow side panel", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const actionsRule = css.match(/\.heatmap-display-actions\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(actionsRule).toContain("display: grid");
+    expect(actionsRule).toContain("grid-template-columns: minmax(0, 1fr)");
+  });
+
   test("reserves layout space below the comparison legend for its zero label", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 

@@ -386,7 +386,8 @@ input[type="range"] {
 }
 
 .heatmap-display-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 7px;
 }
