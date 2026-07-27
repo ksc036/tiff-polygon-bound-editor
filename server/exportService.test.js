@@ -38,6 +38,19 @@ async function openWorkbookEntry(archive, suffix) {
   return workbook;
 }
 
+async function exportFixtureArchive(fixture) {
+  const output = new PassThrough();
+  const zipPromise = collectStream(output);
+  const writePromise = writeDatasetZip({
+    storage: fixture.storage,
+    output,
+    calibration: { slope: 0.1, intercept: 0 },
+  });
+  const archive = await unzipper.Open.buffer(await zipPromise);
+  await writePromise;
+  return archive;
+}
+
 function analysisMetrics(maskPixelCount, areaPx) {
   return {
     roiAreaPx: areaPx,
@@ -357,6 +370,81 @@ test("reports semantically invalid bounds and analysis without rendering ROI", a
   expect(reportMessages).not.toContain("Saved analysis loaded for export.");
 });
 
+test.each([
+  {
+    name: "self-intersecting polygon",
+    mutate: (savedBounds) => ({
+      ...savedBounds,
+      groups: [{
+        ...savedBounds.groups[0],
+        points: [
+          { x: 2, y: 2 },
+          { x: 30, y: 30 },
+          { x: 2, y: 30 },
+          { x: 30, y: 2 },
+        ],
+      }],
+    }),
+  },
+  {
+    name: "unknown analysis mode",
+    mutate: (savedBounds) => ({
+      ...savedBounds,
+      groups: [{ ...savedBounds.groups[0], analysisMode: "sideways" }],
+    }),
+  },
+])("rejects bounds with a $name", async ({ mutate }) => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const boundsPath = path.join(fixture.rootDir, "T01", "bound", "T01.bounds.json");
+  await writeFile(boundsPath, JSON.stringify(mutate(JSON.parse(await readFile(boundsPath, "utf8")))));
+
+  const archive = await exportFixtureArchive(fixture);
+
+  expect(archive.files.some((file) => file.path.includes("/roi/"))).toBe(false);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+  const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
+  expect(reportMessages).toContain("Saved bounds are missing or invalid.");
+  expect(reportMessages).not.toContain("Saved bounds loaded for export.");
+});
+
+test.each([
+  {
+    name: "inside group without area metrics",
+    group: {
+      groupId: "whole",
+      groupName: "Whole image",
+      analysisMode: "inside",
+    },
+  },
+  {
+    name: "outside group without every required band",
+    group: {
+      groupId: "whole",
+      groupName: "Whole image",
+      analysisMode: "outside",
+      bands: { near: analysisMetrics(10, 100) },
+      allBands: analysisMetrics(10, 100),
+    },
+  },
+])("rejects analysis with an $name", async ({ group }) => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  await writeFile(analysisPath, JSON.stringify({ ...analysis, groups: [group] }));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+  const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
+  expect(reportMessages).toContain("Saved analysis is missing or invalid.");
+  expect(reportMessages).not.toContain("Saved analysis loaded for export.");
+});
+
 test("uses a safe text fallback when workbook generation fails", async () => {
   const fixture = await createExportFixture({
     imageFolders: ["T01"],
@@ -412,18 +500,10 @@ test("aborts active archive output on signal cancellation", async () => {
   expect(output.destroyed).toBe(true);
 });
 
-test("stops before source discovery when cancellation arrives during image scanning", async () => {
-  let finishScan;
-  const scanImages = new Promise((resolve) => {
-    finishScan = resolve;
-  });
-  const getImage = vi.fn(() => {
-    throw new Error("Source discovery should not run.");
-  });
+test("aborts promptly when image scanning stays pending", async () => {
   const storage = {
     getRoot: () => "/data/fixture",
-    scanImages: () => scanImages,
-    getImage,
+    scanImages: () => new Promise(() => {}),
   };
   const controller = new AbortController();
   const writePromise = writeDatasetZip({
@@ -433,8 +513,9 @@ test("stops before source discovery when cancellation arrives during image scann
     signal: controller.signal,
   });
   controller.abort();
-  finishScan([{ id: "T01", imageFolder: "T01", imageFile: "T01.tif" }]);
 
-  await expect(writePromise).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
-  expect(getImage).not.toHaveBeenCalled();
+  await expect(Promise.race([
+    writePromise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Export did not abort promptly.")), 100)),
+  ])).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
 });

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { assignOutwardRoiPixels } from "./analysisGeometry.js";
 import {
   buildOutsideRoiOverlay,
@@ -209,6 +209,22 @@ test("normalizes a TIFF and renders image plus right legend", async () => {
   const metadata = await sharp(output).metadata();
   expect(metadata.format).toBe("png");
   expect(metadata.width).toBeGreaterThan(metadata.height);
+});
+
+test("cancels the active Sharp pipeline and detaches its abort listener", async () => {
+  const imagePath = await writeTestTiff({ width: 80, height: 60 });
+  const controller = new AbortController();
+  const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+  const rendering = renderRoiOverview({
+    imagePath,
+    bounds,
+    maxImagePixels: 1_000_000,
+    signal: controller.signal,
+  });
+  controller.abort();
+
+  await expect(rendering).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+  expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
 });
 
 test("rejects non-finite and out-of-bounds polygon coordinates", async () => {

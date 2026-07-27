@@ -1,5 +1,5 @@
 import sharp from "sharp";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   EXPORT_CELL_SIZES,
   buildHeatmapFigureSvg,
@@ -87,5 +87,30 @@ describe("heatmap export", () => {
     const metadata = await sharp(await renderHeatmapFigure(figure)).metadata();
     expect(metadata.format).toBe("png");
     expect(metadata.width).toBeGreaterThan(700);
+  });
+
+  test("cancels the active Sharp pipeline and detaches its abort listener", async () => {
+    const figure = {
+      kind: "absolute",
+      metric: "pixel-density",
+      metricLabel: "Pixel Density",
+      unit: "ratio",
+      currentImage: "T01",
+      previousImage: null,
+      cellWidth: 20,
+      cellHeight: 20,
+      columns: 2,
+      rows: 1,
+      values: [0.25, 0.75],
+      colorRange: { min: 0, max: 1 },
+      calibration,
+    };
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+    const rendering = renderHeatmapFigure(figure, { signal: controller.signal });
+    controller.abort();
+
+    await expect(rendering).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 });

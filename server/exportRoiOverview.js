@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import { groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
 import { assignOutwardRoiPixels } from "./analysisGeometry.js";
+import { runSharpWithSignal } from "./sharpRender.js";
 
 const DEFAULT_ROI_LIMITS = Object.freeze({ near: 20, mid: 50, far: 100 });
 const ROI_BANDS = Object.freeze([
@@ -65,28 +66,39 @@ export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, out
 </svg>`;
 }
 
-export async function renderRoiOverview({ imagePath, bounds, maxImagePixels }) {
+export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, signal }) {
   const pixelLimit = inputPixelLimitFor(maxImagePixels);
   const source = sharp(imagePath, { limitInputPixels: pixelLimit });
-  const metadata = await source.metadata();
-  const { width, height } = imageDimensions(metadata);
-  assertMaximumImagePixels(width, height, maxImagePixels);
-  validateRoiBounds(bounds, width, height);
+  try {
+    const metadata = await runSharpWithSignal(source, () => source.metadata(), signal);
+    const { width, height } = imageDimensions(metadata);
+    assertMaximumImagePixels(width, height, maxImagePixels);
+    validateRoiBounds(bounds, width, height);
 
-  const normalized = await source.clone().greyscale().normalize().png().toBuffer();
-  const outsideOverlay = await buildOutsideRoiOverlay({ width, height, bounds });
-  const svg = buildRoiOverviewSvg({
-    width,
-    height,
-    normalizedImageDataUrl: `data:image/png;base64,${normalized.toString("base64")}`,
-    outsideOverlayDataUrl: `data:image/png;base64,${outsideOverlay.toString("base64")}`,
-    bounds,
-  });
+    const normalizedPipeline = source.clone().greyscale().normalize().png();
+    const normalized = await runSharpWithSignal(
+      normalizedPipeline,
+      () => normalizedPipeline.toBuffer(),
+      signal,
+    );
+    const outsideOverlay = await buildOutsideRoiOverlay({ width, height, bounds, signal });
+    const svg = buildRoiOverviewSvg({
+      width,
+      height,
+      normalizedImageDataUrl: `data:image/png;base64,${normalized.toString("base64")}`,
+      outsideOverlayDataUrl: `data:image/png;base64,${outsideOverlay.toString("base64")}`,
+      bounds,
+    });
 
-  return sharp(Buffer.from(svg)).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
+    const outputPipeline = sharp(Buffer.from(svg))
+      .png({ compressionLevel: 9, adaptiveFiltering: true });
+    return await runSharpWithSignal(outputPipeline, () => outputPipeline.toBuffer(), signal);
+  } finally {
+    source.destroy();
+  }
 }
 
-export async function buildOutsideRoiOverlay({ width, height, bounds }) {
+export async function buildOutsideRoiOverlay({ width, height, bounds, signal }) {
   validateRoiBounds(bounds, width, height);
   const groups = outsideGroupsForAssignment(bounds);
   const assignments = assignOutwardRoiPixels({ width, height, groups });
@@ -104,7 +116,8 @@ export async function buildOutsideRoiOverlay({ width, height, bounds }) {
     data[offset + 3] = OUTSIDE_OVERLAY_ALPHA;
   }
 
-  return sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer();
+  const pipeline = sharp(data, { raw: { width, height, channels: 4 } }).png();
+  return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
 
 function renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY }) {

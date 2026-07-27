@@ -3,6 +3,7 @@ import path from "node:path";
 import { finished } from "node:stream/promises";
 import { ZipArchive } from "archiver";
 import { selectMaskSource } from "./analysisService.js";
+import { polygonSelfIntersects } from "./analysisGeometry.js";
 import {
   collectSavedHeatmaps,
   planHeatmapFigures,
@@ -10,6 +11,9 @@ import {
 } from "./exportHeatmaps.js";
 import { renderRoiOverview } from "./exportRoiOverview.js";
 import { createImageWorkbook, workbookFailureText } from "./exportWorkbook.js";
+
+const ANALYSIS_MODES = new Set(["outside", "inside"]);
+const REQUIRED_BAND_IDS = ["near", "mid", "far"];
 
 export class ExportError extends Error {
   constructor(code, message, status = 500, { cause } = {}) {
@@ -80,21 +84,21 @@ export async function writeDatasetZip({
   let exportedAt;
   let records;
   try {
-    images = await storage.scanImages();
-    throwIfAborted(signal);
+    images = await raceWithSignal(storage.scanImages(), signal);
     rootDirectory = safeArchiveSegment(datasetExportDirectory(rootPath));
     exportedAt = validExportDate(now());
-    const sources = await collectSavedHeatmaps({ storage, images });
-    throwIfAborted(signal);
+    const sources = await raceWithSignal(collectSavedHeatmaps({ storage, images }), signal);
     const plan = planHeatmapFigures({ images, sources, calibration: checkedCalibration });
-    records = await collectImageExportRecords({
-      storage,
-      images,
-      plan,
-      autoSavedImageId,
+    records = await raceWithSignal(
+      collectImageExportRecords({
+        storage,
+        images,
+        plan,
+        autoSavedImageId,
+        signal,
+      }),
       signal,
-    });
-    throwIfAborted(signal);
+    );
   } catch (error) {
     throw publicExportError(error, signal);
   }
@@ -297,6 +301,7 @@ async function appendRoiEntry({ archive, base, record, maxImagePixels, abortStat
         imagePath: record.imageSource.path,
         bounds: record.bounds,
         maxImagePixels,
+        signal: abortState.signal,
       }),
     );
     await appendBufferAndWait(
@@ -320,7 +325,9 @@ async function appendHeatmapEntry({ archive, base, record, figure, abortState })
   const relativePath = `heatmap/${folder}/${archiveFile}`;
 
   try {
-    const buffer = await abortState.render(renderHeatmapFigure(figure));
+    const buffer = await abortState.render(
+      renderHeatmapFigure(figure, { signal: abortState.signal }),
+    );
     await appendBufferAndWait(
       archive,
       buffer,
@@ -468,6 +475,10 @@ function validateSavedBounds(value, image) {
       typeof group.id !== "string" ||
       group.id.length === 0 ||
       ids.has(group.id) ||
+      (group.name !== undefined && typeof group.name !== "string") ||
+      (group.color !== undefined && typeof group.color !== "string") ||
+      !ANALYSIS_MODES.has(group.analysisMode) ||
+      !isOptionalMigrationVector(group.migrationVector) ||
       !Array.isArray(group.points) ||
       group.points.length < 3
     ) {
@@ -478,7 +489,9 @@ function validateSavedBounds(value, image) {
     for (const point of group.points) {
       if (
         !isPlainObject(point) ||
+        typeof point.x !== "number" ||
         !Number.isFinite(point.x) ||
+        typeof point.y !== "number" ||
         !Number.isFinite(point.y) ||
         point.x < 0 ||
         point.x >= value.width ||
@@ -487,6 +500,9 @@ function validateSavedBounds(value, image) {
       ) {
         throw new TypeError("Invalid saved bounds.");
       }
+    }
+    if (polygonSelfIntersects(group.points)) {
+      throw new TypeError("Invalid saved bounds.");
     }
   }
 
@@ -500,17 +516,56 @@ function validateSavedAnalysis(value, image) {
     value.imageFolder !== image.imageFolder ||
     value.imageFile !== image.imageFile ||
     !Array.isArray(value.groups) ||
-    value.groups.some((group) =>
-      !isPlainObject(group) || typeof group.groupId !== "string" || group.groupId.length === 0
-    )
+    value.groups.length === 0
   ) {
     throw new TypeError("Invalid saved analysis.");
+  }
+
+  const ids = new Set();
+  for (const group of value.groups) {
+    if (
+      !isPlainObject(group) ||
+      typeof group.groupId !== "string" ||
+      group.groupId.length === 0 ||
+      ids.has(group.groupId) ||
+      !ANALYSIS_MODES.has(group.analysisMode)
+    ) {
+      throw new TypeError("Invalid saved analysis.");
+    }
+    ids.add(group.groupId);
+
+    if (group.analysisMode === "inside") {
+      if (!isPlainObject(group.area)) throw new TypeError("Invalid saved analysis.");
+      continue;
+    }
+
+    if (
+      !isPlainObject(group.bands) ||
+      REQUIRED_BAND_IDS.some((bandId) => !isPlainObject(group.bands[bandId])) ||
+      !isPlainObject(group.allBands)
+    ) {
+      throw new TypeError("Invalid saved analysis.");
+    }
   }
   return value;
 }
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isFinitePoint(value) {
+  return isPlainObject(value) &&
+    typeof value.x === "number" &&
+    Number.isFinite(value.x) &&
+    typeof value.y === "number" &&
+    Number.isFinite(value.y);
+}
+
+function isOptionalMigrationVector(value) {
+  return value === undefined ||
+    value === null ||
+    (isPlainObject(value) && isFinitePoint(value.start) && isFinitePoint(value.end));
 }
 
 function archiveName(...segments) {
@@ -614,6 +669,32 @@ function attachAbort(signal, archive, output) {
 
 function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError();
+}
+
+function raceWithSignal(promise, signal) {
+  if (!signal) return Promise.resolve(promise);
+  if (signal.aborted) return Promise.reject(abortError());
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(abortError());
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
 }
 
 function abortError() {

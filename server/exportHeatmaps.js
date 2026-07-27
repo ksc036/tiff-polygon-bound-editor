@@ -8,6 +8,7 @@ import {
   heatmapMetricValue,
   infernoColor,
 } from "../src/lib/heatmap.js";
+import { runSharpWithSignal } from "./sharpRender.js";
 
 export const EXPORT_CELL_SIZES = Object.freeze([20, 50, 100]);
 export const EXPORT_METRICS = Object.freeze(["pixel-density", "estimated-collagen-density"]);
@@ -190,10 +191,10 @@ export function buildHeatmapFigureSvg(figure) {
 </svg>`;
 }
 
-export async function renderHeatmapFigure(figure) {
-  return sharp(Buffer.from(buildHeatmapFigureSvg(figure)))
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
+export async function renderHeatmapFigure(figure, { signal } = {}) {
+  const pipeline = sharp(Buffer.from(buildHeatmapFigureSvg(figure)))
+    .png({ compressionLevel: 9, adaptiveFiltering: true });
+  return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
 
 function createAbsoluteFigure({ image, heatmap, cellSize, metric, calibration }) {
