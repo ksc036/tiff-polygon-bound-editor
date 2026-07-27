@@ -5,6 +5,7 @@ import sharp from "sharp";
 import unzipper from "unzipper";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
+import { createStorage } from "./storage.js";
 
 const tempRoots = [];
 
@@ -160,10 +161,62 @@ describe("createApp", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/zip");
     expect(response.headers.get("content-disposition")).toMatch(
-      /^attachment; filename=".+_export_\d{8}-\d{6}\.zip"$/,
+      /^attachment; filename=".+_export_\d{8}-\d{6}\.zip"; filename\*=UTF-8''.+_export_\d{8}-\d{6}\.zip$/,
     );
     const archive = await unzipper.Open.buffer(Buffer.from(await response.arrayBuffer()));
     expect(archive.files.some((file) => file.path.endsWith("/statistics/T01_statistics.xlsx"))).toBe(true);
+  });
+
+  test("uses one root snapshot for validation, naming, and ZIP contents", async () => {
+    const appRoot = await createTempRoot();
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeImage(firstRoot, "T01", "frame001.tif", [10, 20, 30, 40]);
+    await writeImage(secondRoot, "T01", "frame001.tif", [900, 910, 920, 930]);
+    const expectedTiff = await readFile(path.join(firstRoot, "T01", "image", "frame001.tif"));
+    const storage = createStorage({ initialRoot: firstRoot });
+    const getRoot = storage.getRoot;
+    storage.getRoot = () => {
+      const root = getRoot();
+      storage.setRoot(secondRoot);
+      return root;
+    };
+
+    const response = await jsonRequest(createApp({ rootDir: appRoot, storage }), "/api/export", {
+      method: "POST",
+      body: {
+        calibration: { slope: 0.1, intercept: 0 },
+        autoSavedImageId: "T01",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const archive = await unzipper.Open.buffer(Buffer.from(await response.arrayBuffer()));
+    const image = archive.files.find((file) => file.path.endsWith("/T01/image/frame001.tif"));
+    expect(image).toBeDefined();
+    expect(await image.buffer()).toEqual(expectedTiff);
+  });
+
+  test("streams exports for a Korean root with ASCII fallback and UTF-8 filename", async () => {
+    const appRoot = await createTempRoot();
+    const parent = await createTempRoot();
+    const imageRoot = path.join(parent, "데이터");
+    await mkdir(imageRoot);
+    await writeImage(imageRoot, "T01", "frame001.tif");
+
+    const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+      method: "POST",
+      body: { calibration: { slope: 0.1, intercept: 0 } },
+    });
+
+    expect(response.status).toBe(200);
+    const disposition = response.headers.get("content-disposition");
+    expect(disposition).toMatch(/^attachment; filename="[ -~]+\.zip"; filename\*=UTF-8''/);
+    expect(decodeURIComponent(disposition.match(/filename\*=UTF-8''(.+)$/)?.[1] ?? "")).toMatch(
+      /^데이터_export_\d{8}-\d{6}\.zip$/,
+    );
+    const archive = await unzipper.Open.buffer(Buffer.from(await response.arrayBuffer()));
+    expect(archive.files.some((file) => file.path.endsWith("/T01/image/frame001.tif"))).toBe(true);
   });
 
   test.each([

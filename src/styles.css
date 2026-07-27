@@ -81,7 +81,7 @@ input[type="range"] {
 .top-toolbar {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) auto minmax(112px, auto) auto auto auto auto;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto minmax(96px, 0.72fr) auto auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 9px 12px;
@@ -110,13 +110,20 @@ input[type="range"] {
 .image-counter {
   display: grid;
   gap: 1px;
-  min-width: 96px;
+  min-width: 0;
   color: #9faeba;
   line-height: 1.1;
 }
 
 .image-counter strong {
   color: #f3f7fa;
+}
+
+.image-counter span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .side-panel {
@@ -212,11 +219,19 @@ input[type="range"] {
   font-size: 0.76rem;
 }
 
-.heatmap-preset-fields input {
-  width: 100%;
+.heatmap-preset-value {
+  display: block;
   min-width: 0;
   min-height: 28px;
   padding: 0 5px;
+  color: #e8edf2;
+  font-variant-numeric: tabular-nums;
+  line-height: 28px;
+  text-align: center;
+  white-space: nowrap;
+  background: #1c252f;
+  border: 1px solid #35404c;
+  border-radius: 4px;
 }
 
 .heatmap-batch-state {

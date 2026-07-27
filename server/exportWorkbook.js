@@ -71,10 +71,10 @@ function addRoiStatisticsSheet(workbook, input) {
     const values = [
       row.roiId,
       row.groupId,
-      row.groupName,
+      safeText(row.groupName),
       groupColor,
-      row.modeLabel,
-      row.bandLabel,
+      safeText(row.modeLabel),
+      safeText(row.bandLabel) ?? safeText(row.bandId),
       numberOrBlank(row.fromPx),
       numberOrBlank(row.toPx),
       numberOrBlank(metrics.roiAreaPx),
@@ -144,7 +144,7 @@ function addHeatmapIndexSheet(workbook, input) {
   for (const entry of input.heatmapEntries ?? []) {
     sheet.addRow([
       safeStatus(entry.status),
-      entry.metric ?? null,
+      safeText(entry.metric),
       safeFileName(entry.currentImage),
       safeFileName(entry.previousImage),
       numberOrBlank(entry.cellWidth),
@@ -153,9 +153,9 @@ function addHeatmapIndexSheet(workbook, input) {
       numberOrBlank(entry.rows),
       numberOrBlank(entry.colorMin),
       numberOrBlank(entry.colorMax),
-      entry.unit ?? null,
+      safeText(entry.unit),
       artifactValue({ entry, label: "Open PNG", directory: "heatmap" }),
-      entry.reason || null,
+      safeText(entry.reason),
     ]);
   }
   applyAutoFilter(sheet, "M");
@@ -174,8 +174,8 @@ function addExportReportSheet(workbook, input) {
     sheet.addRow([
       dateValue(input.exportedAt),
       safeStatus(entry.status),
-      entry.artifact ?? null,
-      entry.message ?? entry.reason ?? null,
+      safeText(entry.artifact),
+      safeText(entry.message ?? entry.reason),
       numberOrBlank(input.calibration?.slope),
       numberOrBlank(input.calibration?.intercept),
     ]);
@@ -232,24 +232,32 @@ function applyAutoFilter(sheet, lastColumn) {
 function artifactValue({ entry, label, directory }) {
   const relativePath = artifactRelativePath(entry?.path, directory);
   if (entry?.status === "Included" && relativePath) return { text: label, hyperlink: relativePath };
-  return `Skipped: ${entry?.reason || "Artifact unavailable."}`;
+  return `Skipped: ${safeText(entry?.reason) || "Artifact unavailable."}`;
 }
 
 function estimatedCollagenDensity(density, calibration) {
-  const slope = Number(calibration?.slope);
-  const intercept = Number(calibration?.intercept);
-  if (!Number.isFinite(Number(density)) || !Number.isFinite(slope) || slope === 0 || !Number.isFinite(intercept)) return null;
-  return (Number(density) - intercept) / slope;
+  const normalizedDensity = finiteNumber(density);
+  const slope = finiteNumber(calibration?.slope);
+  const intercept = finiteNumber(calibration?.intercept);
+  if (normalizedDensity == null || slope == null || slope === 0 || intercept == null) return null;
+  return (normalizedDensity - intercept) / slope;
 }
 
 function numberOrBlank(value) {
-  if (value == null || value === "") return null;
-  return Number.isFinite(Number(value)) ? Number(value) : null;
+  return finiteNumber(value);
+}
+
+function finiteNumber(value) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function dateValue(value) {
   if (value == null || value === "") return null;
   if (value instanceof Date && Number.isFinite(value.getTime())) return value;
+  if (typeof value !== "number" && typeof value !== "string") return null;
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date : null;
 }
@@ -265,7 +273,7 @@ function artifactRelativePath(value, directory) {
 }
 
 function normalizeColor(value) {
-  return /^#[0-9a-f]{6}$/i.test(value ?? "") ? value.toUpperCase() : DEFAULT_GROUP_COLOR.toUpperCase();
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value.toUpperCase() : DEFAULT_GROUP_COLOR.toUpperCase();
 }
 
 function colorToArgb(color) {
@@ -280,8 +288,8 @@ function contrastFontColor(color) {
 }
 
 function safeFileName(value) {
-  if (value == null) return null;
-  return String(value).split(/[\\/]/).filter(Boolean).at(-1) ?? null;
+  if (typeof value !== "string") return null;
+  return value.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
 }
 
 function safeImageFolder(value) {
@@ -291,6 +299,10 @@ function safeImageFolder(value) {
 
 function safeStatus(value) {
   return ["Included", "Skipped", "Warning"].includes(value) ? value : "Warning";
+}
+
+function safeText(value) {
+  return typeof value === "string" ? value : null;
 }
 
 function safeErrorCategory(error) {

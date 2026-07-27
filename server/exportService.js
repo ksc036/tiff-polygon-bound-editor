@@ -5,8 +5,8 @@ import { ZipArchive } from "archiver";
 import { selectMaskSource } from "./analysisService.js";
 import { polygonSelfIntersects } from "./analysisGeometry.js";
 import {
-  collectSavedHeatmaps,
-  planHeatmapFigures,
+  hydrateHeatmapFigure,
+  planSavedHeatmapFigures,
   renderHeatmapFigure,
 } from "./exportHeatmaps.js";
 import { renderRoiOverview } from "./exportRoiOverview.js";
@@ -14,6 +14,40 @@ import { createImageWorkbook, workbookFailureText } from "./exportWorkbook.js";
 
 const ANALYSIS_MODES = new Set(["outside", "inside"]);
 const REQUIRED_BAND_IDS = ["near", "mid", "far"];
+const METRIC_FIELDS = new Set([
+  "bandId",
+  "roiAreaPx",
+  "maskPixelCount",
+  "density",
+  "globalAlignment",
+  "globalOrientationDeg",
+  "circularVariance",
+  "radialNormalAlignment",
+  "tangentialAlignment",
+  "migrationAlignment",
+  "orientationDispersion",
+  "empty",
+]);
+const NUMERIC_METRIC_FIELDS = new Set([
+  "roiAreaPx",
+  "maskPixelCount",
+  "density",
+  "globalAlignment",
+  "globalOrientationDeg",
+  "circularVariance",
+  "radialNormalAlignment",
+  "tangentialAlignment",
+  "migrationAlignment",
+  "orientationDispersion",
+]);
+const DEFAULT_ROI_LIMITS = Object.freeze({ near: 20, mid: 50, far: 100 });
+
+class StaleAnalysisError extends Error {
+  constructor() {
+    super("Saved analysis is stale or incompatible.");
+    this.name = "StaleAnalysisError";
+  }
+}
 
 export class ExportError extends Error {
   constructor(code, message, status = 500, { cause } = {}) {
@@ -73,7 +107,8 @@ export async function writeDatasetZip({
   signal,
 }) {
   const checkedCalibration = validateExportCalibration(calibration);
-  const rootPath = storage?.getRoot?.();
+  const exportStorage = storage?.createSnapshot?.() ?? storage;
+  const rootPath = exportStorage?.getRoot?.();
   if (!rootPath) {
     throw new ExportError("ROOT_UNSET", "Storage root has not been set.", 400);
   }
@@ -84,14 +119,21 @@ export async function writeDatasetZip({
   let exportedAt;
   let records;
   try {
-    images = await raceWithSignal(storage.scanImages(), signal);
+    images = await raceWithSignal(exportStorage.scanImages(), signal);
     rootDirectory = safeArchiveSegment(datasetExportDirectory(rootPath));
     exportedAt = validExportDate(now());
-    const sources = await raceWithSignal(collectSavedHeatmaps({ storage, images }), signal);
-    const plan = planHeatmapFigures({ images, sources, calibration: checkedCalibration });
+    const plan = await raceWithSignal(
+      planSavedHeatmapFigures({
+        storage: exportStorage,
+        images,
+        calibration: checkedCalibration,
+        signal,
+      }),
+      signal,
+    );
     records = await raceWithSignal(
       collectImageExportRecords({
-        storage,
+        storage: exportStorage,
         images,
         plan,
         autoSavedImageId,
@@ -117,6 +159,7 @@ export async function writeDatasetZip({
       calibration: checkedCalibration,
       exportedAt,
       maxImagePixels,
+      storage: exportStorage,
       abortState,
     });
     throwIfAborted(signal);
@@ -190,12 +233,27 @@ async function collectImageExportRecords({ storage, images, plan, autoSavedImage
     try {
       record.analysis = validateSavedAnalysis(await storage.loadAnalysis(image.id), image);
       const metadata = await stat(paths.analysisPath);
+      assertSavedAnalysisCurrent({
+        analysis: record.analysis,
+        bounds: record.bounds,
+        maskSource: record.maskSource,
+        boundsMtimeMs: record.sourceFiles.bounds?.mtimeMs,
+        analysisMtimeMs: metadata.mtimeMs,
+      });
       const analysisFile = safeArchiveSegment(path.basename(paths.analysisPath));
       record.sourceFiles.analysis = { file: analysisFile, mtimeMs: metadata.mtimeMs };
       reportEntries.push(report("Included", "Analysis", "Saved analysis loaded for export."));
-    } catch {
+    } catch (error) {
       record.analysis = null;
-      reportEntries.push(report("Skipped", "Analysis", "Saved analysis is missing or invalid."));
+      reportEntries.push(
+        report(
+          "Skipped",
+          "Analysis",
+          error instanceof StaleAnalysisError
+            ? "Saved analysis is stale or incompatible with current bounds or mask."
+            : "Saved analysis is missing or invalid.",
+        ),
+      );
     }
 
     if (record.autoSavedBounds) {
@@ -222,6 +280,7 @@ async function appendDatasetEntries({
   calibration,
   exportedAt,
   maxImagePixels,
+  storage,
   abortState,
 }) {
   for (const record of records) {
@@ -268,6 +327,7 @@ async function appendDatasetEntries({
         base,
         record,
         figure,
+        storage,
         abortState,
       });
     }
@@ -319,14 +379,20 @@ async function appendRoiEntry({ archive, base, record, maxImagePixels, abortStat
   }
 }
 
-async function appendHeatmapEntry({ archive, base, record, figure, abortState }) {
+async function appendHeatmapEntry({ archive, base, record, figure, storage, abortState }) {
   const folder = `${figure.cellWidth}x${figure.cellHeight}`;
   const archiveFile = safeArchiveSegment(figure.archiveName);
   const relativePath = `heatmap/${folder}/${archiveFile}`;
 
   try {
+    const hydratedFigure = await abortState.race(
+      hydrateHeatmapFigure(figure, {
+        storage,
+        signal: abortState.signal,
+      }),
+    );
     const buffer = await abortState.render(
-      renderHeatmapFigure(figure, { signal: abortState.signal }),
+      renderHeatmapFigure(hydratedFigure, { signal: abortState.signal }),
     );
     await appendBufferAndWait(
       archive,
@@ -521,6 +587,27 @@ function validateSavedAnalysis(value, image) {
     throw new TypeError("Invalid saved analysis.");
   }
 
+  const sanitized = {
+    schemaVersion: 5,
+    imageFolder: value.imageFolder,
+    imageFile: value.imageFile,
+    roiBands: sanitizeSavedRoiBands(value.roiBands ?? []),
+    groups: [],
+  };
+  if (value.boundsFile !== undefined) {
+    if (typeof value.boundsFile !== "string") throw new TypeError("Invalid saved analysis.");
+    sanitized.boundsFile = value.boundsFile;
+  }
+  if (value.maskSource !== undefined) {
+    sanitized.maskSource = sanitizeSavedMaskSource(value.maskSource);
+  }
+  if (value.updatedAt !== undefined) {
+    if (typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt))) {
+      throw new TypeError("Invalid saved analysis.");
+    }
+    sanitized.updatedAt = value.updatedAt;
+  }
+
   const ids = new Set();
   for (const group of value.groups) {
     if (
@@ -534,8 +621,32 @@ function validateSavedAnalysis(value, image) {
     }
     ids.add(group.groupId);
 
+    const sanitizedGroup = {
+      groupId: group.groupId,
+      analysisMode: group.analysisMode,
+    };
+    for (const field of ["groupName", "color"]) {
+      if (group[field] !== undefined && group[field] !== null && typeof group[field] !== "string") {
+        throw new TypeError("Invalid saved analysis.");
+      }
+      if (group[field] !== undefined) sanitizedGroup[field] = group[field];
+    }
+    if (!isOptionalMigrationVector(group.migrationVector)) {
+      throw new TypeError("Invalid saved analysis.");
+    }
+    if (group.migrationVector !== undefined) {
+      sanitizedGroup.migrationVector = group.migrationVector === null
+        ? null
+        : {
+            start: { x: group.migrationVector.start.x, y: group.migrationVector.start.y },
+            end: { x: group.migrationVector.end.x, y: group.migrationVector.end.y },
+          };
+    }
+
     if (group.analysisMode === "inside") {
       if (!isPlainObject(group.area)) throw new TypeError("Invalid saved analysis.");
+      sanitizedGroup.area = sanitizeSavedMetric(group.area);
+      sanitized.groups.push(sanitizedGroup);
       continue;
     }
 
@@ -546,8 +657,197 @@ function validateSavedAnalysis(value, image) {
     ) {
       throw new TypeError("Invalid saved analysis.");
     }
+    if (group.roiBands !== undefined) {
+      sanitizedGroup.roiBands = sanitizeSavedRoiBands(group.roiBands);
+    }
+    sanitizedGroup.bands = Object.fromEntries(
+      REQUIRED_BAND_IDS.map((bandId) => [bandId, sanitizeSavedMetric(group.bands[bandId])]),
+    );
+    sanitizedGroup.allBands = sanitizeSavedMetric(group.allBands);
+    sanitized.groups.push(sanitizedGroup);
   }
-  return value;
+  return sanitized;
+}
+
+function sanitizeSavedMetric(value) {
+  if (!isPlainObject(value)) throw new TypeError("Invalid saved analysis.");
+  const sanitized = {};
+  for (const [field, leaf] of Object.entries(value)) {
+    if (!METRIC_FIELDS.has(field)) throw new TypeError("Invalid saved analysis.");
+    if (field === "bandId") {
+      if (leaf !== null && typeof leaf !== "string") {
+        throw new TypeError("Invalid saved analysis.");
+      }
+      sanitized[field] = leaf;
+      continue;
+    }
+    if (field === "empty") {
+      if (typeof leaf !== "boolean") throw new TypeError("Invalid saved analysis.");
+      sanitized[field] = leaf;
+      continue;
+    }
+    if (NUMERIC_METRIC_FIELDS.has(field)) {
+      if (leaf !== null && (typeof leaf !== "number" || !Number.isFinite(leaf))) {
+        throw new TypeError("Invalid saved analysis.");
+      }
+      if (leaf !== null && !validMetricNumber(field, leaf)) {
+        throw new TypeError("Invalid saved analysis.");
+      }
+      sanitized[field] = leaf;
+    }
+  }
+  return sanitized;
+}
+
+function validMetricNumber(field, value) {
+  if (field === "roiAreaPx" || field === "maskPixelCount") {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+  if (
+    field === "density" ||
+    field === "globalAlignment" ||
+    field === "circularVariance" ||
+    field === "orientationDispersion"
+  ) {
+    return value >= -1e-9 && value <= 1 + 1e-9;
+  }
+  if (
+    field === "radialNormalAlignment" ||
+    field === "tangentialAlignment" ||
+    field === "migrationAlignment"
+  ) {
+    return value >= -1 - 1e-9 && value <= 1 + 1e-9;
+  }
+  if (field === "globalOrientationDeg") {
+    return value >= -1e-9 && value <= 180 + 1e-9;
+  }
+  return true;
+}
+
+function sanitizeSavedRoiBands(value) {
+  if (!Array.isArray(value)) throw new TypeError("Invalid saved analysis.");
+  return value.map((band) => {
+    if (
+      !isPlainObject(band) ||
+      !REQUIRED_BAND_IDS.includes(band.id) ||
+      typeof band.label !== "string" ||
+      typeof band.fromPx !== "number" ||
+      !Number.isFinite(band.fromPx) ||
+      typeof band.toPx !== "number" ||
+      !Number.isFinite(band.toPx) ||
+      band.fromPx < 0 ||
+      band.toPx <= band.fromPx ||
+      Object.keys(band).some((key) => !["id", "label", "fromPx", "toPx"].includes(key))
+    ) {
+      throw new TypeError("Invalid saved analysis.");
+    }
+    return { id: band.id, label: band.label, fromPx: band.fromPx, toPx: band.toPx };
+  });
+}
+
+function sanitizeSavedMaskSource(value) {
+  if (
+    !isPlainObject(value) ||
+    typeof value.file !== "string" ||
+    value.file.length === 0 ||
+    typeof value.format !== "string" ||
+    !Number.isSafeInteger(value.width) ||
+    value.width <= 0 ||
+    !Number.isSafeInteger(value.height) ||
+    value.height <= 0 ||
+    typeof value.mtimeMs !== "number" ||
+    !Number.isFinite(value.mtimeMs)
+  ) {
+    throw new TypeError("Invalid saved analysis.");
+  }
+  return {
+    file: value.file,
+    format: value.format,
+    width: value.width,
+    height: value.height,
+    mtimeMs: value.mtimeMs,
+  };
+}
+
+function assertSavedAnalysisCurrent({
+  analysis,
+  bounds,
+  maskSource,
+  boundsMtimeMs,
+  analysisMtimeMs,
+}) {
+  if (!bounds || !analysis) throw new StaleAnalysisError();
+  if (
+    Number.isFinite(boundsMtimeMs) &&
+    Number.isFinite(analysisMtimeMs) &&
+    analysisMtimeMs < boundsMtimeMs
+  ) {
+    throw new StaleAnalysisError();
+  }
+  const boundsUpdatedAt = Date.parse(bounds.updatedAt);
+  const analysisUpdatedAt = Date.parse(analysis.updatedAt);
+  if (
+    Number.isFinite(boundsUpdatedAt) &&
+    Number.isFinite(analysisUpdatedAt) &&
+    analysisUpdatedAt < boundsUpdatedAt
+  ) {
+    throw new StaleAnalysisError();
+  }
+  if (
+    analysis.maskSource &&
+    (
+      !maskSource ||
+      analysis.maskSource.file !== maskSource.file ||
+      Math.abs(analysis.maskSource.mtimeMs - maskSource.mtimeMs) > 0.001 ||
+      analysis.maskSource.width !== bounds.width ||
+      analysis.maskSource.height !== bounds.height
+    )
+  ) {
+    throw new StaleAnalysisError();
+  }
+
+  const boundsGroups = new Map(bounds.groups.map((group) => [group.id, group]));
+  if (boundsGroups.size !== analysis.groups.length) throw new StaleAnalysisError();
+
+  for (const analysisGroup of analysis.groups) {
+    const boundsGroup = boundsGroups.get(analysisGroup.groupId);
+    if (!boundsGroup || boundsGroup.analysisMode !== analysisGroup.analysisMode) {
+      throw new StaleAnalysisError();
+    }
+    if (analysisGroup.analysisMode === "outside") {
+      const savedBands = analysisGroup.roiBands?.length
+        ? analysisGroup.roiBands
+        : analysis.roiBands;
+      if (!sameRoiBands(savedBands, roiBandsFromBounds(boundsGroup.roiLimits))) {
+        throw new StaleAnalysisError();
+      }
+    }
+  }
+}
+
+function roiBandsFromBounds(roiLimits) {
+  const near = roiLimit(roiLimits?.near, DEFAULT_ROI_LIMITS.near);
+  const mid = Math.max(roiLimit(roiLimits?.mid, DEFAULT_ROI_LIMITS.mid), near + 1);
+  const far = Math.max(roiLimit(roiLimits?.far, DEFAULT_ROI_LIMITS.far), mid + 1);
+  return [
+    { id: "near", fromPx: 0, toPx: near },
+    { id: "mid", fromPx: near, toPx: mid },
+    { id: "far", fromPx: mid, toPx: far },
+  ];
+}
+
+function roiLimit(value, fallback) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 1 ? Math.round(numeric) : fallback;
+}
+
+function sameRoiBands(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  const actualById = new Map(actual.map((band) => [band.id, band]));
+  return expected.every((band) => {
+    const candidate = actualById.get(band.id);
+    return candidate?.fromPx === band.fromPx && candidate?.toPx === band.toPx;
+  });
 }
 
 function isPlainObject(value) {
@@ -711,7 +1011,7 @@ function isAbortError(error) {
 function publicExportError(error, signal) {
   if (isAbortError(error) || signal?.aborted) return abortError();
   if (error instanceof ExportError) return error;
-  return new ExportError("EXPORT_FAILED", "Dataset export failed.", 500, { cause: error });
+  return new ExportError("EXPORT_FAILED", "Dataset export failed.", 500);
 }
 
 function validExportDate(value) {

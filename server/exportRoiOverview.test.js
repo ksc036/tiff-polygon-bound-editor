@@ -7,7 +7,9 @@ import { assignOutwardRoiPixels } from "./analysisGeometry.js";
 import {
   buildOutsideRoiOverlay,
   buildRoiOverviewSvg,
+  MAX_ROI_OVERVIEW_PIXELS,
   OUTSIDE_OVERLAY_ALPHA,
+  planRoiOverviewFrame,
   renderRoiOverview,
 } from "./exportRoiOverview.js";
 
@@ -209,6 +211,64 @@ test("normalizes a TIFF and renders image plus right legend", async () => {
   const metadata = await sharp(output).metadata();
   expect(metadata.format).toBe("png");
   expect(metadata.width).toBeGreaterThan(metadata.height);
+});
+
+test("plans a capped render frame for a 10000 by 10000 source without allocating source-sized pixels", () => {
+  const hugeBounds = {
+    width: 10_000,
+    height: 10_000,
+    groups: [{
+      id: "outside",
+      name: "Large boundary",
+      color: "#22c55e",
+      analysisMode: "outside",
+      roiLimits: { near: 100, mid: 200, far: 300 },
+      points: [
+        { x: 2_500, y: 2_500 },
+        { x: 7_500, y: 2_500 },
+        { x: 7_500, y: 7_500 },
+        { x: 2_500, y: 7_500 },
+      ],
+    }],
+  };
+
+  const frame = planRoiOverviewFrame({
+    width: 10_000,
+    height: 10_000,
+    bounds: hugeBounds,
+  });
+
+  expect(frame.width * frame.height).toBeLessThanOrEqual(MAX_ROI_OVERVIEW_PIXELS);
+  expect(frame.width).toBeLessThan(10_000);
+  expect(frame.renderBounds.groups[0].points[0]).toEqual({ x: 500, y: 500 });
+  expect(frame.renderBounds.groups[0].roiLimits).toEqual({ near: 20, mid: 40, far: 60 });
+  expect(frame.legendBounds.groups[0].roiLimits).toEqual({ near: 100, mid: 200, far: 300 });
+});
+
+test("scales default outside distances when large-image bounds omit explicit ROI limits", () => {
+  const hugeBounds = {
+    width: 10_000,
+    height: 10_000,
+    groups: [{
+      id: "outside",
+      analysisMode: "outside",
+      points: [
+        { x: 2_500, y: 2_500 },
+        { x: 7_500, y: 2_500 },
+        { x: 7_500, y: 7_500 },
+        { x: 2_500, y: 7_500 },
+      ],
+    }],
+  };
+
+  const frame = planRoiOverviewFrame({
+    width: 10_000,
+    height: 10_000,
+    bounds: hugeBounds,
+  });
+
+  expect(frame.renderBounds.groups[0].roiLimits).toEqual({ near: 4, mid: 10, far: 20 });
+  expect(frame.legendBounds.groups[0].roiLimits).toBeUndefined();
 });
 
 test("cancels the active Sharp pipeline and detaches its abort listener", async () => {

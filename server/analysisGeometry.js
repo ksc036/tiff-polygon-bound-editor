@@ -736,35 +736,30 @@ export function roiScanWindows({ width, height, groups, roiBands } = {}) {
   return scanWindowsForPolygons(normalizeAnalysisPolygons(groups), bands, width, height);
 }
 
-export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {}) {
+export function visitOutwardRoiPixels({ width, height, groups, roiBands, visit } = {}) {
   const bands = validateRoiBands(roiBands);
   validateImageDimensions(width, height);
+  if (typeof visit !== "function") {
+    throw new TypeError("Outward ROI pixel visitor must be a function.");
+  }
 
   const polygons = normalizeAnalysisPolygons(groups);
   const polygonById = new Map(polygons.map((group) => [group.id, group]));
   const bandsByGroupId = new Map(
     polygons.map((group) => [group.id, validateRoiBands(group.roiBands ?? bands)]),
   );
-  const assignments = new Map();
-
   if (polygons.length === 0) {
-    return assignments;
+    return 0;
   }
 
-  const visitedPixels = new Set();
   const windows = polygons.flatMap((group) =>
     scanWindowsForPolygons([group], bandsByGroupId.get(group.id) ?? bands, width, height),
   );
+  let count = 0;
 
-  for (const window of windows) {
-    for (let y = window.minY; y <= window.maxY; y += 1) {
-      for (let x = window.minX; x <= window.maxX; x += 1) {
-        const pixelKey = keyFor(x, y);
-        if (visitedPixels.has(pixelKey)) {
-          continue;
-        }
-        visitedPixels.add(pixelKey);
-
+  for (let y = 0; y < height; y += 1) {
+    for (const [minX, maxX] of mergedScanlineIntervals(windows, y)) {
+      for (let x = minX; x <= maxX; x += 1) {
         const pixel = { x, y };
         if (polygons.some((group) => pointStrictlyInPolygon(pixel, group.points))) {
           continue;
@@ -788,7 +783,7 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
           continue;
         }
 
-        assignments.set(pixelKey, {
+        visit(x, y, {
           groupId: nearest.groupId,
           bandId: band.id,
           distancePx: nearest.distancePx,
@@ -797,11 +792,42 @@ export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {})
           outwardNormal: nearest.outwardNormal,
           migrationVector: migrationVectorFor(polygonById.get(nearest.groupId)),
         });
+        count += 1;
       }
     }
   }
 
+  return count;
+}
+
+export function assignOutwardRoiPixels({ width, height, groups, roiBands } = {}) {
+  const assignments = new Map();
+  visitOutwardRoiPixels({
+    width,
+    height,
+    groups,
+    roiBands,
+    visit: (x, y, assignment) => assignments.set(keyFor(x, y), assignment),
+  });
   return assignments;
+}
+
+function mergedScanlineIntervals(windows, y) {
+  const intervals = windows
+    .filter((window) => y >= window.minY && y <= window.maxY)
+    .map((window) => [window.minX, window.maxX])
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  const merged = [];
+
+  for (const interval of intervals) {
+    const previous = merged[merged.length - 1];
+    if (!previous || interval[0] > previous[1] + 1) {
+      merged.push([...interval]);
+    } else {
+      previous[1] = Math.max(previous[1], interval[1]);
+    }
+  }
+  return merged;
 }
 
 export function assignInsideRoiPixels({ width, height, groups } = {}) {

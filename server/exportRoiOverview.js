@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
-import { assignOutwardRoiPixels } from "./analysisGeometry.js";
+import { assignOutwardRoiPixels, visitOutwardRoiPixels } from "./analysisGeometry.js";
 import { runSharpWithSignal } from "./sharpRender.js";
 
 const DEFAULT_ROI_LIMITS = Object.freeze({ near: 20, mid: 50, far: 100 });
@@ -19,8 +19,16 @@ const OUTSIDE_BAND_COLORS = Object.freeze({
 });
 
 export const OUTSIDE_OVERLAY_ALPHA = 96;
+export const MAX_ROI_OVERVIEW_PIXELS = 4_000_000;
 
-export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, outsideOverlayDataUrl = null, bounds }) {
+export function buildRoiOverviewSvg({
+  width,
+  height,
+  normalizedImageDataUrl,
+  outsideOverlayDataUrl = null,
+  bounds,
+  legendBounds = bounds,
+}) {
   validateRoiBounds(bounds, width, height);
   if (typeof normalizedImageDataUrl !== "string" || normalizedImageDataUrl.length === 0) {
     throw new TypeError("A normalized image data URL is required.");
@@ -33,12 +41,15 @@ export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, out
   const normalizedGroups = bounds.groups.map((group, index) =>
     normalizeGroup(group, index, { imageWidth: width, imageHeight: height, imageX, imageY }),
   );
-  const legendHeight = legendHeightFor(normalizedGroups);
+  const legendGroups = legendBounds.groups.map((group, index) =>
+    normalizeGroup(group, index, { imageWidth: width, imageHeight: height, imageX, imageY }),
+  );
+  const legendHeight = legendHeightFor(legendGroups);
   const svgWidth = legendX + LEGEND_WIDTH + IMAGE_MARGIN;
   const svgHeight = Math.max(imageY + height + labelPadding, imageY + legendHeight);
 
   const groupLayers = normalizedGroups.map((group) => renderGroupLayer({ group, imageX, imageY })).join("\n");
-  const legend = renderLegend({ groups: normalizedGroups, x: legendX, y: IMAGE_TOP });
+  const legend = renderLegend({ groups: legendGroups, x: legendX, y: IMAGE_TOP });
   const outsideOverlay = outsideOverlayDataUrl
     ? `<image data-role="outside-overlay" data-alpha="${OUTSIDE_OVERLAY_ALPHA}" x="${imageX}" y="${imageY}" width="${width}" height="${height}" href="${escapeXml(outsideOverlayDataUrl)}" preserveAspectRatio="none"/>`
     : "";
@@ -74,20 +85,32 @@ export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, sig
     const { width, height } = imageDimensions(metadata);
     assertMaximumImagePixels(width, height, maxImagePixels);
     validateRoiBounds(bounds, width, height);
+    const frame = planRoiOverviewFrame({ width, height, bounds });
 
-    const normalizedPipeline = source.clone().greyscale().normalize().png();
+    const normalizedPipeline = source
+      .clone()
+      .greyscale()
+      .normalize()
+      .resize(frame.width, frame.height, { fit: "fill" })
+      .png();
     const normalized = await runSharpWithSignal(
       normalizedPipeline,
       () => normalizedPipeline.toBuffer(),
       signal,
     );
-    const outsideOverlay = await buildOutsideRoiOverlay({ width, height, bounds, signal });
+    const outsideOverlay = await buildOutsideRoiOverlay({
+      width: frame.width,
+      height: frame.height,
+      bounds: frame.renderBounds,
+      signal,
+    });
     const svg = buildRoiOverviewSvg({
-      width,
-      height,
+      width: frame.width,
+      height: frame.height,
       normalizedImageDataUrl: `data:image/png;base64,${normalized.toString("base64")}`,
       outsideOverlayDataUrl: `data:image/png;base64,${outsideOverlay.toString("base64")}`,
-      bounds,
+      bounds: frame.renderBounds,
+      legendBounds: frame.legendBounds,
     });
 
     const outputPipeline = sharp(Buffer.from(svg))
@@ -101,23 +124,85 @@ export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, sig
 export async function buildOutsideRoiOverlay({ width, height, bounds, signal }) {
   validateRoiBounds(bounds, width, height);
   const groups = outsideGroupsForAssignment(bounds);
-  const assignments = assignOutwardRoiPixels({ width, height, groups });
   const data = new Uint8Array(width * height * 4);
 
-  for (const [key, assignment] of assignments) {
-    const color = OUTSIDE_BAND_COLORS[assignment.bandId];
-    if (!color) continue;
+  visitOutwardRoiPixels({
+    width,
+    height,
+    groups,
+    visit: (x, y, assignment) => {
+      const color = OUTSIDE_BAND_COLORS[assignment.bandId];
+      if (!color) return;
 
-    const [x, y] = key.split(",").map(Number);
-    const offset = (y * width + x) * 4;
-    data[offset] = color[0];
-    data[offset + 1] = color[1];
-    data[offset + 2] = color[2];
-    data[offset + 3] = OUTSIDE_OVERLAY_ALPHA;
-  }
+      const offset = (y * width + x) * 4;
+      data[offset] = color[0];
+      data[offset + 1] = color[1];
+      data[offset + 2] = color[2];
+      data[offset + 3] = OUTSIDE_OVERLAY_ALPHA;
+    },
+  });
 
   const pipeline = sharp(data, { raw: { width, height, channels: 4 } }).png();
   return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
+}
+
+export function planRoiOverviewFrame({ width, height, bounds }) {
+  validateRoiBounds(bounds, width, height);
+  const scale = Math.min(1, Math.sqrt(MAX_ROI_OVERVIEW_PIXELS / (width * height)));
+  const renderWidth = Math.max(1, Math.floor(width * scale));
+  const renderHeight = Math.max(1, Math.floor(height * scale));
+  const scaleX = renderWidth / width;
+  const scaleY = renderHeight / height;
+  const distanceScale = Math.min(scaleX, scaleY);
+  const renderBounds = {
+    ...bounds,
+    width: renderWidth,
+    height: renderHeight,
+    groups: bounds.groups.map((group) => ({
+      ...group,
+      points: group.points.map((point) => ({
+        ...point,
+        x: Math.min(renderWidth - 1, point.x * scaleX),
+        y: Math.min(renderHeight - 1, point.y * scaleY),
+      })),
+      ...(group.analysisMode === "inside"
+        ? {}
+        : { roiLimits: scaledRoiLimits(group.roiLimits, distanceScale) }),
+      ...(group.migrationVector
+        ? {
+            migrationVector: {
+              start: {
+                x: Math.min(renderWidth - 1, group.migrationVector.start.x * scaleX),
+                y: Math.min(renderHeight - 1, group.migrationVector.start.y * scaleY),
+              },
+              end: {
+                x: Math.min(renderWidth - 1, group.migrationVector.end.x * scaleX),
+                y: Math.min(renderHeight - 1, group.migrationVector.end.y * scaleY),
+              },
+            },
+          }
+        : {}),
+    })),
+  };
+  return {
+    width: renderWidth,
+    height: renderHeight,
+    scaleX,
+    scaleY,
+    renderBounds,
+    legendBounds: bounds,
+  };
+}
+
+function scaledRoiLimits(roiLimits, scale) {
+  const near = roiLimitNumber(roiLimits?.near, DEFAULT_ROI_LIMITS.near);
+  const mid = Math.max(roiLimitNumber(roiLimits?.mid, DEFAULT_ROI_LIMITS.mid), near + 1);
+  const far = Math.max(roiLimitNumber(roiLimits?.far, DEFAULT_ROI_LIMITS.far), mid + 1);
+  return {
+    near: near * scale,
+    mid: mid * scale,
+    far: far * scale,
+  };
 }
 
 function renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY }) {

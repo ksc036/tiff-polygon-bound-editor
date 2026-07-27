@@ -9,6 +9,7 @@ import {
   polygonSelfIntersects,
   roiScanWindows,
   validateRoiBands,
+  visitOutwardRoiPixels,
 } from "./analysisGeometry.js";
 
 const defaultBands = [
@@ -119,6 +120,31 @@ describe("analysis geometry", () => {
       bandId: "mid",
     });
     expect(assignments.size).toBe(new Set(assignments.keys()).size);
+  });
+
+  test("visits the same exclusive outward assignments without retaining an assignment map", () => {
+    const groups = [square("left", 1, 1, 3, 3), square("right", 6, 1, 8, 3)];
+    const roiBands = [
+      { id: "near", label: "Near", fromPx: 0, toPx: 1.1 },
+      { id: "mid", label: "Mid", fromPx: 1.1, toPx: 3 },
+      { id: "far", label: "Far", fromPx: 3, toPx: 4 },
+    ];
+    const expected = assignOutwardRoiPixels({ width: 10, height: 5, groups, roiBands });
+    const visited = new Map();
+
+    const count = visitOutwardRoiPixels({
+      width: 10,
+      height: 5,
+      groups,
+      roiBands,
+      visit: (x, y, assignment) => visited.set(`${x},${y}`, assignment),
+    });
+
+    expect(count).toBe(expected.size);
+    expect([...visited.keys()].sort()).toEqual([...expected.keys()].sort());
+    for (const [key, assignment] of expected) {
+      expect(visited.get(key)).toEqual(assignment);
+    }
   });
 
   test("assignOutwardRoiPixels assigns polygon boundary pixels to the near band at distance zero", () => {

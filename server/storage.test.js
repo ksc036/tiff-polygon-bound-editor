@@ -75,6 +75,27 @@ describe("createStorage", () => {
     });
   });
 
+  test("keeps an export snapshot bound to its original root after the active root changes", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeImage(firstRoot, "shared-id", "first.tif");
+    await writeImage(secondRoot, "shared-id", "second.tif");
+    const storage = createStorage({ initialRoot: firstRoot });
+
+    const snapshot = storage.createSnapshot();
+    storage.setRoot(secondRoot);
+
+    expect(snapshot.getRoot()).toBe(firstRoot);
+    await expect(snapshot.scanImages()).resolves.toEqual([
+      { id: "shared-id", imageFolder: "shared-id", imageFile: "first.tif" },
+    ]);
+    expect(snapshot.getImage("shared-id").imageFile).toBe("first.tif");
+    expect(snapshot.imagePaths("shared-id").imagePath).toBe(
+      path.join(firstRoot, "shared-id", "image", "first.tif"),
+    );
+    expect(Object.isFrozen(snapshot)).toBe(true);
+  });
+
   test("rejects roots with no folders containing image and mask directories", async () => {
     const rootDir = await createTempRoot();
     await mkdir(path.join(rootDir, "not-ready", "image"), { recursive: true });

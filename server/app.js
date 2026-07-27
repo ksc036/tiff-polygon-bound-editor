@@ -118,6 +118,16 @@ function validOptionalString(value) {
   return value === undefined || typeof value === "string";
 }
 
+function exportContentDisposition(filename) {
+  const fallback = filename
+    .replace(/[^\x20-\x7e]/g, "_")
+    .replace(/["\\\r\n]/g, "_");
+  const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
 function validFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -427,7 +437,13 @@ export function createApp({
   app.post("/api/export", async (request, response, next) => {
     try {
       const calibration = validateExportCalibration(request.body?.calibration);
-      const rootPath = imageStorage.getRoot();
+      let exportStorage;
+      try {
+        exportStorage = imageStorage.createSnapshot?.() ?? imageStorage;
+      } catch {
+        throw new ExportError("ROOT_UNSET", "Storage root has not been set.", 400);
+      }
+      const rootPath = exportStorage.getRoot();
       if (!rootPath) {
         throw new ExportError("ROOT_UNSET", "Storage root has not been set.", 400);
       }
@@ -439,7 +455,7 @@ export function createApp({
       const autoSavedImageId = requestedImageId ?? null;
       if (autoSavedImageId !== null) {
         try {
-          imageStorage.getImage(autoSavedImageId);
+          exportStorage.getImage(autoSavedImageId);
         } catch {
           throw new ExportError("INVALID_IMAGE", "Export image id is invalid.", 400);
         }
@@ -455,10 +471,10 @@ export function createApp({
 
       response.status(200);
       response.setHeader("Content-Type", "application/zip");
-      response.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      response.setHeader("Content-Disposition", exportContentDisposition(filename));
 
       await writeDatasetZip({
-        storage: imageStorage,
+        storage: exportStorage,
         output: response,
         calibration,
         autoSavedImageId,

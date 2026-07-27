@@ -50,8 +50,8 @@ const MAX_ANALYSIS_PANEL_HEIGHT = 520;
 const DEFAULT_COLLAGEN_DENSITY_SLOPE = 0.069676956982087;
 const DEFAULT_COLLAGEN_DENSITY_INTERCEPT = 0.067893820336777;
 const ANALYSIS_MODE_LABELS = { outside: "Outside ROI", inside: "Inside area" };
-const DEFAULT_HEATMAP_PRESETS = { small: 5, medium: 10, large: 20 };
-const HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
+const FIXED_HEATMAP_PRESETS = { small: 20, medium: 50, large: 100 };
+const LEGACY_HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
 const HEATMAP_SELECTED_PRESET_KEY = "raw16-editor-heatmap-selected-preset";
 const HEATMAP_METRIC_KEY = "raw16-editor-heatmap-metric";
 const HEATMAP_ORIGINAL_OPACITY_KEY = "raw16-editor-heatmap-original-opacity";
@@ -169,7 +169,6 @@ export default function App() {
     slope: String(DEFAULT_COLLAGEN_DENSITY_SLOPE),
     intercept: String(DEFAULT_COLLAGEN_DENSITY_INTERCEPT),
   });
-  const [heatmapPresets, setHeatmapPresets] = useState(loadHeatmapPresets);
   const [heatmapPreset, setHeatmapPreset] = useState(loadSelectedHeatmapPreset);
   const [heatmapMetric, setHeatmapMetric] = useState(loadHeatmapMetric);
   const [heatmapOriginalOpacity, setHeatmapOriginalOpacity] = useState(() =>
@@ -199,10 +198,7 @@ export default function App() {
     (pointOrderOpen ? 0 : POINT_ORDER_COLLAPSED_STAGE_GAIN) +
     (roiSettingsOpen ? 0 : ROI_SETTINGS_COLLAPSED_STAGE_GAIN);
   const analysisPanelStageAdjustPx = DEFAULT_ANALYSIS_PANEL_HEIGHT - analysisPanelHeight;
-  const selectedHeatmapCellSize = validHeatmapCellSize(
-    heatmapPresets[heatmapPreset],
-    DEFAULT_HEATMAP_PRESETS[heatmapPreset],
-  );
+  const selectedHeatmapCellSize = FIXED_HEATMAP_PRESETS[heatmapPreset];
   const heatmapRange = heatmapDisplayRange(heatmapMetric);
   const invalidHeatmapCalibration =
     heatmapMetric === "estimated-collagen-density" &&
@@ -378,6 +374,10 @@ export default function App() {
   }, [heatmapOriginalOpacity]);
 
   useEffect(() => {
+    localStorage.removeItem(LEGACY_HEATMAP_PRESETS_KEY);
+  }, []);
+
+  useEffect(() => {
     const requestId = (heatmapRequestRef.current += 1);
     const isCurrentRequest = () => requestId === heatmapRequestRef.current;
 
@@ -523,6 +523,7 @@ export default function App() {
   }, [displayMax, displayMin, rawPixels]);
 
   const replaceRoot = async (endpoint, body) => {
+    if (exportInFlightRef.current) return;
     if (!confirmReplaceDirty()) return;
 
     try {
@@ -561,7 +562,12 @@ export default function App() {
 
   const navigateTo = useCallback(
     async (nextIndex) => {
-      if (nextIndex < 0 || nextIndex >= images.length || nextIndex === activeIndex) return;
+      if (
+        exportInFlightRef.current ||
+        nextIndex < 0 ||
+        nextIndex >= images.length ||
+        nextIndex === activeIndex
+      ) return;
       if (!confirmReplaceDirty()) return;
       await loadImage(nextIndex, images);
     },
@@ -841,21 +847,6 @@ export default function App() {
     localStorage.setItem(HEATMAP_METRIC_KEY, metric);
   }
 
-  function updateHeatmapPreset(preset, value) {
-    setHeatmapPresets((current) => ({ ...current, [preset]: value }));
-  }
-
-  function commitHeatmapPreset(preset) {
-    setHeatmapPresets((current) => {
-      const next = {
-        ...current,
-        [preset]: validHeatmapCellSize(current[preset], DEFAULT_HEATMAP_PRESETS[preset]),
-      };
-      localStorage.setItem(HEATMAP_PRESETS_KEY, JSON.stringify(next));
-      return next;
-    });
-  }
-
   async function handleSelectHeatmapFolder() {
     if (heatmapGenerationInFlightRef.current || heatmapBatchLoading) return;
     const requestId = (heatmapBatchRequestRef.current += 1);
@@ -881,14 +872,6 @@ export default function App() {
     const requestedRoot = heatmapBatchRoot;
 
     try {
-      const committedPresets = Object.fromEntries(
-        Object.entries(heatmapPresets).map(([preset, value]) => [
-          preset,
-          validHeatmapCellSize(value, DEFAULT_HEATMAP_PRESETS[preset]),
-        ]),
-      );
-      setHeatmapPresets(committedPresets);
-      localStorage.setItem(HEATMAP_PRESETS_KEY, JSON.stringify(committedPresets));
       setHeatmapBatchLoading(true);
       setHeatmapBatchError("");
       setHeatmapBatchResult(null);
@@ -899,7 +882,7 @@ export default function App() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             rootPath: requestedRoot,
-            cellSizes: Object.values(committedPresets),
+            cellSizes: Object.values(FIXED_HEATMAP_PRESETS),
           }),
         }),
       );
@@ -944,6 +927,7 @@ export default function App() {
   }
 
   async function handleSave() {
+    if (exportInFlightRef.current) return;
     try {
       const savedBounds = await saveCurrentBounds();
       if (!savedBounds) return;
@@ -1029,6 +1013,7 @@ export default function App() {
   }
 
   async function handleImportPrevious() {
+    if (exportInFlightRef.current) return;
     if (!activeImage || !confirmReplaceDirty()) return;
     try {
       const payload = await readJsonResponse(
@@ -1175,10 +1160,10 @@ export default function App() {
         className="top-toolbar"
         onSubmit={(event) => {
           event.preventDefault();
-          replaceRoot("/api/root", { rootPath });
+          if (!exporting) replaceRoot("/api/root", { rootPath });
         }}
       >
-        <button type="button" onClick={() => replaceRoot("/api/root/select")}>
+        <button type="button" disabled={exporting} onClick={() => replaceRoot("/api/root/select")}>
           Find root
         </button>
         <label className="path-field" htmlFor="root-path">
@@ -1189,14 +1174,15 @@ export default function App() {
             type="text"
             value={rootPath}
             placeholder="No root selected"
+            disabled={exporting}
             onChange={(event) => setRootPath(event.target.value)}
           />
         </label>
-        <button type="submit">Set root</button>
+        <button type="submit" disabled={exporting}>Set root</button>
         <button
           type="button"
           aria-label="Previous image"
-          disabled={activeIndex <= 0}
+          disabled={exporting || activeIndex <= 0}
           onClick={() => navigateTo(activeIndex - 1)}
         >
           Prev
@@ -1208,17 +1194,17 @@ export default function App() {
         <button
           type="button"
           aria-label="Next image"
-          disabled={activeIndex >= images.length - 1}
+          disabled={exporting || activeIndex >= images.length - 1}
           onClick={() => navigateTo(activeIndex + 1)}
         >
           Next
         </button>
         {imageLayer !== "heatmap" ? (
           <>
-            <button type="button" disabled={!activeImage || !bounds} onClick={handleSave}>
+            <button type="button" disabled={exporting || !activeImage || !bounds} onClick={handleSave}>
               Save
             </button>
-            <button type="button" disabled={!activeImage} onClick={handleImportPrevious}>
+            <button type="button" disabled={exporting || !activeImage} onClick={handleImportPrevious}>
               Import previous bound
             </button>
           </>
@@ -1326,7 +1312,7 @@ export default function App() {
               </button>
             </div>
             <div className="segmented-control heatmap-size-control" aria-label="Heatmap cell size">
-              {Object.entries(heatmapPresets).map(([preset, value]) => (
+              {Object.entries(FIXED_HEATMAP_PRESETS).map(([preset, value]) => (
                 <button
                   type="button"
                   key={preset}
@@ -1405,18 +1391,10 @@ export default function App() {
             {heatmapBatchRoot || "No folder selected"}
           </span>
           <div className="heatmap-preset-fields">
-            {Object.entries(heatmapPresets).map(([preset, value]) => (
+            {Object.entries(FIXED_HEATMAP_PRESETS).map(([preset, value]) => (
               <label key={preset}>
                 <span>{HEATMAP_PRESET_LABELS[preset]}</span>
-                <input
-                  aria-label={`${preset} heatmap cell size`}
-                  type="number"
-                  min="1"
-                  max="4096"
-                  value={value}
-                  onChange={(event) => updateHeatmapPreset(preset, event.target.value)}
-                  onBlur={() => commitHeatmapPreset(preset)}
-                />
+                <span className="heatmap-preset-value">{`${value} x ${value}`}</span>
               </label>
             ))}
           </div>
@@ -2380,23 +2358,9 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function loadHeatmapPresets() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(HEATMAP_PRESETS_KEY));
-    return Object.fromEntries(
-      Object.entries(DEFAULT_HEATMAP_PRESETS).map(([preset, fallback]) => [
-        preset,
-        validHeatmapCellSize(stored?.[preset], fallback),
-      ]),
-    );
-  } catch {
-    return { ...DEFAULT_HEATMAP_PRESETS };
-  }
-}
-
 function loadSelectedHeatmapPreset() {
   const stored = localStorage.getItem(HEATMAP_SELECTED_PRESET_KEY);
-  return Object.hasOwn(DEFAULT_HEATMAP_PRESETS, stored) ? stored : "small";
+  return Object.hasOwn(FIXED_HEATMAP_PRESETS, stored) ? stored : "small";
 }
 
 function loadHeatmapMetric() {
@@ -2409,11 +2373,6 @@ function readStoredOpacity(key, fallback) {
   if (stored === null) return fallback;
   const value = Number(stored);
   return value >= 0 && value <= 1 ? value : fallback;
-}
-
-function validHeatmapCellSize(value, fallback) {
-  const number = Number(value);
-  return Number.isInteger(number) && number >= 1 && number <= 4096 ? number : fallback;
 }
 
 function formatLegendValue(value, unit) {

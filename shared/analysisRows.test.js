@@ -87,4 +87,35 @@ describe("ROI export identities", () => {
       }),
     ]);
   });
+
+  test("uses the analysis group's saved ROI bands before legacy top-level bands", () => {
+    const bounds = {
+      groups: [{ id: "cell", name: "Cell", color: "#22c55e", roiLimits: { nearPx: 2, midPx: 4, farPx: 6 } }],
+    };
+    const analysis = {
+      roiBands: [
+        { id: "near", label: "Legacy near", fromPx: 0, toPx: 20 },
+        { id: "mid", label: "Legacy mid", fromPx: 20, toPx: 50 },
+        { id: "far", label: "Legacy far", fromPx: 50, toPx: 100 },
+      ],
+      groups: [{
+        groupId: "cell",
+        analysisMode: "outside",
+        roiBands: [
+          { id: "near", label: "Near", fromPx: 0, toPx: 2 },
+          { id: "mid", label: "Middle", fromPx: 2, toPx: 4 },
+          { id: "far", label: "Far", fromPx: 4, toPx: 6 },
+        ],
+        bands: { near: { roiAreaPx: 1 }, mid: { roiAreaPx: 2 }, far: { roiAreaPx: 3 } },
+        allBands: { roiAreaPx: 6 },
+      }],
+    };
+
+    expect(buildAnalysisRows(analysis, bounds).map(({ bandId, bandLabel, fromPx, toPx }) => ({ bandId, bandLabel, fromPx, toPx }))).toEqual([
+      { bandId: "near", bandLabel: "Near", fromPx: 0, toPx: 2 },
+      { bandId: "mid", bandLabel: "Middle", fromPx: 2, toPx: 4 },
+      { bandId: "far", bandLabel: "Far", fromPx: 4, toPx: 6 },
+      { bandId: "all", bandLabel: "전체", fromPx: 0, toPx: 6 },
+    ]);
+  });
 });

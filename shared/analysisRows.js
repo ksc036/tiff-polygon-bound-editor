@@ -51,9 +51,6 @@ export function buildAnalysisRows(analysis, bounds) {
   const analysisGroups = Array.isArray(analysis?.groups) ? analysis.groups : [];
   const analysisBands = Array.isArray(analysis?.roiBands) ? analysis.roiBands : [];
   const savedGroupById = new Map(savedGroups.map((group, index) => [group.id, { group, index }]));
-  const bandById = new Map(analysisBands.map((band) => [band.id, band]));
-  const firstBand = analysisBands[0];
-  const lastBand = analysisBands[analysisBands.length - 1];
 
   return analysisGroups.flatMap((analysisGroup) => {
     const savedMatch = savedGroupById.get(analysisGroup?.groupId);
@@ -77,6 +74,15 @@ export function buildAnalysisRows(analysis, bounds) {
         }),
       ];
     }
+
+    // Recalculation saves the effective group-specific limits with the group.
+    // Older analysis files only have the top-level bands, which remain the fallback.
+    const groupBands = Array.isArray(analysisGroup.roiBands) && analysisGroup.roiBands.length > 0
+      ? analysisGroup.roiBands
+      : analysisBands;
+    const bandById = new Map(groupBands.map((band) => [band.id, band]));
+    const firstBand = groupBands[0];
+    const lastBand = groupBands[groupBands.length - 1];
 
     const rows = OUTSIDE_BAND_IDS.flatMap((bandId) => {
       const metrics = analysisGroup.bands?.[bandId];

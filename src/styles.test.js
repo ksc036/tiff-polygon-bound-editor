@@ -68,13 +68,22 @@ describe("application layout CSS", () => {
     expect(hiddenLayerRule).toContain("opacity: 0");
   });
 
-  test("keeps the ZIP export action compact in the toolbar", async () => {
+  test("keeps all nine toolbar actions on a compact single row", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
+    const toolbarRule = css.match(/\.top-toolbar\s*\{[^}]+\}/)?.[0] ?? "";
     const exportButtonRule = css.match(/\.export-button\s*\{[^}]+\}/)?.[0] ?? "";
+    const imageCounterRule = css.match(/\.image-counter\s*\{[^}]+\}/)?.[0] ?? "";
+    const imageCounterTextRule = css.match(/\.image-counter span\s*\{[^}]+\}/)?.[0] ?? "";
 
+    expect(toolbarRule).toContain(
+      "grid-template-columns: auto minmax(180px, 1fr) auto auto minmax(96px, 0.72fr) auto auto auto auto",
+    );
+    expect(toolbarRule).not.toContain("nth-child");
     expect(exportButtonRule).toContain("min-width: 128px");
     expect(exportButtonRule).toContain("white-space: nowrap");
+    expect(imageCounterRule).toContain("min-width: 0");
+    expect(imageCounterTextRule).toContain("text-overflow: ellipsis");
   });
 
   test("lays out group identity with named roles instead of child-order selectors", async () => {

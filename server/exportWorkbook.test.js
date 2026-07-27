@@ -148,3 +148,66 @@ test("keeps missing timestamps blank and refuses artifact links outside their di
   expect(summary.getCell("B11").value).toBeNull();
   expect(workbook.getWorksheet("ROI Statistics").getCell("R2").value).toBe("Skipped: Artifact unavailable.");
 });
+
+test("writes loaded workbook text as primitive strings instead of Excel formulas or objects", async () => {
+  const formulaObject = { formula: "HYPERLINK(\"https://malicious.example\", \"open\")", result: "open" };
+  const input = workbookInput({
+    image: { id: "=T01", imageFolder: "@folder", imageFile: formulaObject },
+    sourceFiles: {
+      image: { file: formulaObject, mtimeMs: 1_721_000_000_000 },
+      mask: { file: "+mask.png", mtimeMs: null },
+      bounds: { file: "-bounds.json", mtimeMs: null },
+      analysis: { file: formulaObject, mtimeMs: null },
+    },
+    bounds: { groups: [{ id: "cell", name: "=not-a-formula", color: formulaObject }] },
+    analysis: {
+      roiBands: [{ id: "near", label: formulaObject, fromPx: 0, toPx: 20 }],
+      groups: [{
+        groupId: "cell",
+        groupName: formulaObject,
+        analysisMode: "outside",
+        bands: { near: { roiAreaPx: 2, maskPixelCount: 1, density: 0.5 } },
+      }],
+    },
+    heatmapEntries: [{
+      status: "Included",
+      metric: formulaObject,
+      currentImage: formulaObject,
+      previousImage: "=previous",
+      unit: formulaObject,
+      path: "heatmap/20x20/current.png",
+      reason: formulaObject,
+    }],
+    reportEntries: [{ status: "Warning", artifact: formulaObject, message: formulaObject }],
+  });
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(await createImageWorkbook(input));
+
+  const roi = workbook.getWorksheet("ROI Statistics");
+  expect(roi.getCell("C2").type).toBe(ExcelJS.ValueType.String);
+  expect(roi.getCell("C2").value).toBe("=not-a-formula");
+  expect(roi.getCell("D2").value).toBe("#94A3B8");
+  expect(roi.getCell("F2").value).toBe("near");
+
+  const summary = workbook.getWorksheet("Image Summary");
+  expect(summary.getCell("B2").value).toBe("@folder");
+  expect(summary.getCell("B3").value).toBeNull();
+  expect(summary.getCell("B4").type).toBe(ExcelJS.ValueType.String);
+  expect(summary.getCell("B4").value).toBe("+mask.png");
+  expect(summary.getCell("B5").value).toBe("-bounds.json");
+  expect(summary.getCell("B6").value).toBeNull();
+
+  const heatmaps = workbook.getWorksheet("Heatmap Index");
+  expect(heatmaps.getCell("B2").value).toBeNull();
+  expect(heatmaps.getCell("C2").value).toBeNull();
+  expect(heatmaps.getCell("D2").value).toBe("=previous");
+  expect(heatmaps.getCell("K2").value).toBeNull();
+  expect(heatmaps.getCell("M2").value).toBeNull();
+
+  const report = workbook.getWorksheet("Export Report");
+  expect(report.getCell("C2").value).toBeNull();
+  expect(report.getCell("D2").value).toBeNull();
+  for (const sheet of workbook.worksheets) {
+    sheet.eachRow((row) => row.eachCell((cell) => expect(cell.type).not.toBe(ExcelJS.ValueType.Formula)));
+  }
+});

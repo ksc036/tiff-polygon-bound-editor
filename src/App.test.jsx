@@ -681,6 +681,33 @@ describe("App", () => {
     );
   });
 
+  test("locks root and image controls while ZIP export is active", async () => {
+    const { releaseExport } = mockApi({ delayedExport: true });
+    render(<App />);
+
+    const download = await screen.findByRole("button", { name: "Download as ZIP" });
+    fireEvent.click(download);
+
+    await waitFor(() => expect(download).toHaveTextContent("Preparing ZIP..."));
+    expect(screen.getByRole("button", { name: "Find root" })).toBeDisabled();
+    expect(screen.getByLabelText(/root path/i)).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Set root" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next image" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Import previous bound" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing ZIP...");
+
+    releaseExport(
+      new Response(new Blob(["zip"], { type: "application/zip" }), {
+        status: 200,
+        headers: { "content-disposition": 'attachment; filename="dataset_export.zip"' },
+      }),
+    );
+    await waitFor(() => expect(download).toHaveTextContent("Download as ZIP"));
+    expect(screen.getByRole("button", { name: "Find root" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Next image" })).toBeEnabled();
+  });
+
   test("keeps later local geometry edits dirty when an export auto-save resolves", async () => {
     const pendingSave = deferred();
     let savedSnapshot = null;
@@ -1409,7 +1436,7 @@ describe("App", () => {
     expect(screen.getByLabelText("raw16 image")).not.toHaveAttribute("style");
   });
 
-  test("opens the Heat Map layer with persisted default presets", async () => {
+  test("opens the Heat Map layer with fixed cell-size presets", async () => {
     mockApi();
     const { container } = render(<App />);
 
@@ -1417,10 +1444,10 @@ describe("App", () => {
     const heatmapControls = screen.getByLabelText("Heatmap controls");
     expect(screen.getByLabelText("Groups")).toContainElement(heatmapControls);
     expect(container.querySelector(".stage-tools")).not.toContainElement(heatmapControls);
-    expect(screen.getByRole("button", { name: /Small 5x5/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Small 20x20/ })).toHaveAttribute("aria-pressed", "true");
     expect(await screen.findByLabelText("heatmap overlay")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Large 20x20/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Large 100x100/ }));
     expect(localStorage.getItem("raw16-editor-heatmap-selected-preset")).toBe("large");
   });
 
@@ -1429,35 +1456,35 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
-    fireEvent.click(screen.getByRole("button", { name: /Large 20x20/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Large 100x100/ }));
     fireEvent.click(screen.getByRole("button", { name: "Next image" }));
 
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=20"),
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=100"),
     );
   });
 
-  test("uses an edited persisted preset for viewer navigation", async () => {
+  test("ignores stale editable heatmap presets and keeps fixed viewer sizes", async () => {
     const { fetchMock } = mockApi();
+    localStorage.setItem(
+      "raw16-editor-heatmap-presets",
+      JSON.stringify({ small: 5, medium: 10, large: 20 }),
+    );
     render(<App />);
 
-    const smallInput = await screen.findByLabelText("small heatmap cell size");
-    fireEvent.change(smallInput, { target: { value: "7" } });
-    fireEvent.blur(smallInput);
+    await screen.findByRole("button", { name: "Saved Tissue" });
     fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
 
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=7"),
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20"),
     );
+    expect(screen.queryByLabelText("small heatmap cell size")).not.toBeInTheDocument();
+    expect(screen.getByText("20 x 20")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Next image" }));
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=7"),
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=20"),
     );
-    expect(JSON.parse(localStorage.getItem("raw16-editor-heatmap-presets"))).toEqual({
-      small: 7,
-      medium: 10,
-      large: 20,
-    });
+    expect(localStorage.getItem("raw16-editor-heatmap-presets")).toBeNull();
   });
 
   test("ignores a stale heatmap response after changing cell size", async () => {
@@ -1465,21 +1492,21 @@ describe("App", () => {
     const largeRequest = deferred();
     const { fetchMock } = mockApi({
       heatmapResponse: (_url, cellSize) =>
-        cellSize === 5 ? smallRequest.promise : largeRequest.promise,
+        cellSize === 20 ? smallRequest.promise : largeRequest.promise,
     });
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=5"),
-    );
-    fireEvent.click(screen.getByRole("button", { name: /Large 20x20/ }));
-    await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Large 100x100/ }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=100"),
     );
 
     await act(async () => {
-      largeRequest.resolve(await jsonResponse({ heatmap: heatmapFixture("plate-a", 20, 0.8) }));
+      largeRequest.resolve(await jsonResponse({ heatmap: heatmapFixture("plate-a", 100, 0.8) }));
     });
     const overlay = await screen.findByLabelText("heatmap overlay");
     const currentFill = canvasContexts.get(overlay).fillStyle;
@@ -1725,7 +1752,7 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Compare Previous" }));
 
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=5"),
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20"),
     );
     expect(await screen.findByText(/Compared with plate-a/)).toBeInTheDocument();
   });
@@ -1853,15 +1880,15 @@ describe("App", () => {
     expect(markers[2]).toHaveTextContent("0.04");
   });
 
-  test("selects a separate batch folder and generates edited preset sizes", async () => {
+  test("selects a separate batch folder and generates the fixed preset sizes", async () => {
     const { fetchMock } = mockApi();
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
     await screen.findByText("/selected/heatmap-root");
-    const smallInput = screen.getByLabelText("small heatmap cell size");
-    fireEvent.change(smallInput, { target: { value: "7" } });
-    fireEvent.blur(smallInput);
+    expect(screen.getByText("20 x 20")).toBeInTheDocument();
+    expect(screen.getByText("50 x 50")).toBeInTheDocument();
+    expect(screen.getByText("100 x 100")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Generate Heatmaps" }));
 
     await waitFor(() => {
@@ -1870,7 +1897,7 @@ describe("App", () => {
       );
       expect(JSON.parse(call[1].body)).toEqual({
         rootPath: "/selected/heatmap-root",
-        cellSizes: [7, 10, 20],
+        cellSizes: [20, 50, 100],
       });
     });
     expect(screen.getByText(/2 discovered/)).toHaveTextContent("6 files");

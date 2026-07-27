@@ -24,6 +24,7 @@ const METRIC_DETAILS = Object.freeze({
 
 const CANVAS_MARGIN = 72;
 const CELL_DISPLAY_SIZE = 24;
+const MAX_GRID_DISPLAY_SIZE = 4096;
 const COLOR_BAR_WIDTH = 28;
 const COLOR_BAR_GAP = 56;
 const COLOR_BAR_HEIGHT = 300;
@@ -137,47 +138,241 @@ export function planHeatmapFigures({ images, sources, calibration }) {
 
   for (const figure of comparisonCandidates) {
     const key = `${figure.metric}:${figure.cellWidth}`;
-    const maxAbs = comparisonMaxAbs.get(key) || 1;
-    figure.colorRange = { min: -maxAbs, max: maxAbs };
+    const maxAbs = comparisonMaxAbs.get(key) ?? 0;
+    figure.colorRange = maxAbs === 0
+      ? { min: 0, max: 0 }
+      : { min: -maxAbs, max: maxAbs };
     figures.push(figure);
   }
 
   return { figures, reportEntries };
 }
 
+export async function planSavedHeatmapFigures({
+  storage,
+  images,
+  calibration,
+  loadHeatmap = loadImageHeatmap,
+  signal,
+}) {
+  const figures = [];
+  const reportEntries = [];
+  const availability = new Map();
+
+  for (const image of images) {
+    for (const cellSize of EXPORT_CELL_SIZES) {
+      throwIfPlanningAborted(signal);
+      const key = sourceKey(image.id, cellSize);
+      try {
+        const heatmap = await loadHeatmap(storage, image.id, cellSize);
+        availability.set(key, {
+          status: "Included",
+          metadata: heatmapMetadata(heatmap),
+        });
+        for (const metric of EXPORT_METRICS) {
+          figures.push(createAbsoluteDescriptor({
+            image,
+            heatmap,
+            cellSize,
+            metric,
+            calibration,
+          }));
+        }
+      } catch (error) {
+        throwIfPlanningAborted(signal);
+        const source = { status: "Skipped", reason: heatmapSkipReason(error) };
+        availability.set(key, source);
+        for (const metric of EXPORT_METRICS) {
+          reportEntries.push(skippedReportEntry({
+            kind: "absolute",
+            metric,
+            image,
+            cellSize,
+            reason: source.reason,
+          }));
+        }
+      }
+    }
+  }
+
+  const comparisonMaxAbs = new Map();
+  for (let index = 1; index < images.length; index += 1) {
+    const currentImage = images[index];
+    const previousImage = images[index - 1];
+
+    for (const cellSize of EXPORT_CELL_SIZES) {
+      throwIfPlanningAborted(signal);
+      const currentSource = availability.get(sourceKey(currentImage.id, cellSize));
+      const previousSource = availability.get(sourceKey(previousImage.id, cellSize));
+      const sourceReason = comparisonSourceReason(currentSource, previousSource);
+      let currentHeatmap;
+      let previousHeatmap;
+      let compatibilityError = null;
+
+      if (!sourceReason) {
+        try {
+          currentHeatmap = await loadHeatmap(storage, currentImage.id, cellSize);
+          previousHeatmap = await loadHeatmap(storage, previousImage.id, cellSize);
+          compatibilityError = heatmapCompatibilityError(currentHeatmap, previousHeatmap);
+        } catch (error) {
+          throwIfPlanningAborted(signal);
+          compatibilityError = heatmapSkipReason(error);
+        }
+      }
+
+      for (const metric of EXPORT_METRICS) {
+        if (sourceReason || compatibilityError) {
+          reportEntries.push(skippedReportEntry({
+            kind: "comparison",
+            metric,
+            image: currentImage,
+            previousImage,
+            cellSize,
+            reason: sourceReason ?? compatibilityError,
+          }));
+          continue;
+        }
+
+        const descriptor = createComparisonDescriptor({
+          currentImage,
+          previousImage,
+          heatmap: currentHeatmap,
+          cellSize,
+          metric,
+          calibration,
+        });
+        const rangeKey = `${metric}:${descriptor.cellWidth}`;
+        const maxAbs = comparisonMaxAbsFor({
+          current: currentHeatmap,
+          previous: previousHeatmap,
+          metric,
+          calibration,
+        });
+        comparisonMaxAbs.set(
+          rangeKey,
+          Math.max(comparisonMaxAbs.get(rangeKey) ?? 0, maxAbs),
+        );
+        descriptor.comparisonRangeKey = rangeKey;
+        figures.push(descriptor);
+      }
+    }
+  }
+
+  for (const figure of figures) {
+    if (figure.kind !== "comparison") continue;
+    const maxAbs = comparisonMaxAbs.get(figure.comparisonRangeKey) ?? 0;
+    figure.colorRange = maxAbs === 0
+      ? { min: 0, max: 0 }
+      : { min: -maxAbs, max: maxAbs };
+    delete figure.comparisonRangeKey;
+  }
+
+  return { figures, reportEntries };
+}
+
+export async function hydrateHeatmapFigure(
+  figure,
+  { storage, loadHeatmap = loadImageHeatmap, signal } = {},
+) {
+  throwIfPlanningAborted(signal);
+  const current = await loadHeatmap(storage, figure.currentImageId, figure.sourceCellSize);
+  throwIfPlanningAborted(signal);
+
+  if (figure.kind === "absolute") {
+    return {
+      ...figure,
+      values: current.cells.map((cell) =>
+        heatmapMetricValue(cell, figure.metric, figure.calibration)
+      ),
+    };
+  }
+
+  const previous = await loadHeatmap(storage, figure.previousImageId, figure.sourceCellSize);
+  throwIfPlanningAborted(signal);
+  const compatibilityError = heatmapCompatibilityError(current, previous);
+  if (compatibilityError) throw new Error(compatibilityError);
+
+  return {
+    ...figure,
+    values: comparisonValues({
+      current,
+      previous,
+      metric: figure.metric,
+      calibration: figure.calibration,
+    }),
+  };
+}
+
 export function buildHeatmapFigureSvg(figure) {
   const columns = positiveInteger(figure.columns);
   const rows = positiveInteger(figure.rows);
-  const cellSize = Math.max(CELL_DISPLAY_SIZE, Number(figure.cellDisplaySize) || 0);
+  const requestedCellSize = Number.isFinite(Number(figure.cellDisplaySize))
+    ? Math.max(Number(figure.cellDisplaySize), 0.25)
+    : CELL_DISPLAY_SIZE;
+  const cellSize = Math.min(
+    requestedCellSize,
+    MAX_GRID_DISPLAY_SIZE / Math.max(columns, rows),
+  );
   const gridWidth = columns * cellSize;
   const gridHeight = rows * cellSize;
   const gridX = CANVAS_MARGIN + 58;
-  const gridY = 150;
-  const colorBarX = gridX + gridWidth + COLOR_BAR_GAP;
-  const colorBarY = Math.max(gridY, gridY + Math.floor((gridHeight - COLOR_BAR_HEIGHT) / 2));
-  const width = Math.max(760, colorBarX + COLOR_BAR_WIDTH + 152);
-  const height = Math.max(520, Math.max(gridY + gridHeight + 104, colorBarY + COLOR_BAR_HEIGHT + 62));
   const { min, max } = figure.colorRange;
   const isComparison = figure.kind === "comparison";
   const title = figureTitle(figure, { includeRange: isComparison });
-  const calibration = calibrationText(figure.calibration);
+  const titleLines = [
+    ...wrapSvgText(`Current: ${figure.currentImage}`, 80),
+    ...(figure.previousImage ? wrapSvgText(`Previous: ${figure.previousImage}`, 80) : []),
+    ...wrapSvgText(
+      `${figure.metricLabel} | Cell ${figure.cellWidth}x${figure.cellHeight} px | Grid ${columns}x${rows}`,
+      80,
+    ),
+    ...(isComparison ? wrapSvgText(`Range ${formatRange(min, max, true)}`, 80) : []),
+  ];
+  const calibrationLines = wrapSvgText(calibrationText(figure.calibration), 96);
+  const titleStartY = 42;
+  const calibrationStartY = titleStartY + titleLines.length * 24 + 4;
+  const rangeY = calibrationStartY + calibrationLines.length * 20 + 8;
+  const gridY = rangeY + 52;
+  const colorBarX = gridX + gridWidth + COLOR_BAR_GAP;
+  const colorBarY = Math.max(gridY, gridY + Math.floor((gridHeight - COLOR_BAR_HEIGHT) / 2));
+  const width = Math.max(960, colorBarX + COLOR_BAR_WIDTH + 152);
+  const height = Math.max(520, Math.max(gridY + gridHeight + 104, colorBarY + COLOR_BAR_HEIGHT + 62));
   const colorBarLabel = isComparison
     ? comparisonColorBarLabel(figure.metric)
     : `${figure.metricLabel} (${figure.unit || "ratio"})`;
-  const cellElements = Array.from({ length: rows * columns }, (_, index) => {
+  const emptyCellFill = isComparison
+    ? differenceColor(null, Math.max(Math.abs(min), Math.abs(max)))
+    : infernoColor(null, min, max);
+  const pathsByFill = new Map();
+  for (let index = 0; index < rows * columns; index += 1) {
     const value = figure.values?.[index] ?? null;
+    if (value === null) continue;
     const column = index % columns;
     const row = Math.floor(index / columns);
     const fill = isComparison ? differenceColor(value, Math.max(Math.abs(min), Math.abs(max))) : infernoColor(value, min, max);
-    return `<rect x="${gridX + column * cellSize}" y="${gridY + row * cellSize}" width="${cellSize}" height="${cellSize}" fill="${fill}"/>`;
-  }).join("");
+    const commands = pathsByFill.get(fill) ?? [];
+    commands.push(`M${gridX + column * cellSize} ${gridY + row * cellSize}h${cellSize}v${cellSize}h-${cellSize}z`);
+    pathsByFill.set(fill, commands);
+  }
+  const cellElements = [...pathsByFill]
+    .map(([fill, commands]) => `<path fill="${fill}" d="${commands.join("")}"/>`)
+    .join("");
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  const titleElements = titleLines
+    .map((line, index) => `<text class="title" data-role="title-line" x="${CANVAS_MARGIN}" y="${titleStartY + index * 24}">${escapeXml(line)}</text>`)
+    .join("");
+  const calibrationElements = calibrationLines
+    .map((line, index) => `<text class="subtitle" x="${CANVAS_MARGIN}" y="${calibrationStartY + index * 20}">${escapeXml(line)}</text>`)
+    .join("");
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" data-current-image="${escapeXml(figure.currentImage)}"${figure.previousImage ? ` data-previous-image="${escapeXml(figure.previousImage)}"` : ""}>
+  <title>${escapeXml(title)}</title>
   <rect width="100%" height="100%" fill="#ffffff"/>
   <style>text { font-family: Arial, sans-serif; fill: #111827; } .title { font-size: 18px; font-weight: 700; } .subtitle { font-size: 14px; } .axis { font-size: 13px; font-weight: 700; } .tick { font-size: 12px; } .range { font-size: 12px; }</style>
-  <text class="title" x="${CANVAS_MARGIN}" y="42">${escapeXml(title)}</text>
-  <text class="subtitle" x="${CANVAS_MARGIN}" y="70">${escapeXml(calibration)}</text>
-  <text class="range" x="${CANVAS_MARGIN}" y="98">${escapeXml(`Color range: ${formatRange(min, max, isComparison)}${figure.unit ? ` ${figure.unit}` : ""}`)}</text>
+  ${titleElements}
+  ${calibrationElements}
+  <text class="range" x="${CANVAS_MARGIN}" y="${rangeY}">${escapeXml(`Color range: ${formatRange(min, max, isComparison)}${figure.unit ? ` ${figure.unit}` : ""}`)}</text>
+  <rect x="${gridX}" y="${gridY}" width="${gridWidth}" height="${gridHeight}" fill="${emptyCellFill}" shape-rendering="crispEdges"/>
   <g shape-rendering="crispEdges">${cellElements}</g>
   <rect x="${gridX}" y="${gridY}" width="${gridWidth}" height="${gridHeight}" fill="none" stroke="#111827" stroke-width="1" shape-rendering="crispEdges"/>
   ${axisTicks({ gridX, gridY, gridWidth, gridHeight, columns, rows, cellSize })}
@@ -244,6 +439,98 @@ function createComparisonFigure({ currentImage, previousImage, heatmap, cellSize
   };
 }
 
+function createAbsoluteDescriptor({ image, heatmap, cellSize, metric, calibration }) {
+  const displayRange = heatmapDisplayRange(metric);
+  const details = METRIC_DETAILS[metric];
+  const currentImage = imageLabel(image);
+  return {
+    kind: "absolute",
+    metric,
+    metricLabel: details.label,
+    unit: displayRange.unit || details.fallbackUnit,
+    currentImage,
+    currentImageId: image.id,
+    previousImage: null,
+    previousImageId: null,
+    sourceCellSize: cellSize,
+    ...heatmapMetadata(heatmap),
+    colorRange: { min: displayRange.min, max: displayRange.max },
+    calibration,
+    archiveName: `${currentImage}_cell_${cellSize}px_${details.archiveName}.png`,
+  };
+}
+
+function createComparisonDescriptor({
+  currentImage,
+  previousImage,
+  heatmap,
+  cellSize,
+  metric,
+  calibration,
+}) {
+  const details = METRIC_DETAILS[metric];
+  const currentLabel = imageLabel(currentImage);
+  const previousLabel = imageLabel(previousImage);
+  const displayRange = heatmapDisplayRange(metric);
+  return {
+    kind: "comparison",
+    metric,
+    metricLabel: details.label,
+    unit: displayRange.unit || details.fallbackUnit,
+    currentImage: currentLabel,
+    currentImageId: currentImage.id,
+    previousImage: previousLabel,
+    previousImageId: previousImage.id,
+    sourceCellSize: cellSize,
+    ...heatmapMetadata(heatmap),
+    colorRange: null,
+    calibration,
+    archiveName: `${currentLabel}_cell_${cellSize}px_${details.archiveName}_vs_${previousLabel}.png`,
+  };
+}
+
+function heatmapMetadata(heatmap) {
+  return {
+    cellWidth: heatmap.cellWidth,
+    cellHeight: heatmap.cellHeight,
+    columns: heatmap.columns,
+    rows: heatmap.rows,
+  };
+}
+
+function comparisonMaxAbsFor({ current, previous, metric, calibration }) {
+  let maximum = 0;
+  for (let index = 0; index < current.cells.length; index += 1) {
+    const currentValue = heatmapMetricValue(current.cells[index], metric, calibration);
+    const previousValue = heatmapMetricValue(previous.cells[index], metric, calibration);
+    if (!Number.isFinite(currentValue) || !Number.isFinite(previousValue)) continue;
+    maximum = Math.max(maximum, Math.abs(cleanDifference(currentValue - previousValue)));
+  }
+  return maximum;
+}
+
+function comparisonValues({ current, previous, metric, calibration }) {
+  return current.cells.map((cell, index) => {
+    const currentValue = heatmapMetricValue(cell, metric, calibration);
+    const previousValue = heatmapMetricValue(previous.cells[index], metric, calibration);
+    return Number.isFinite(currentValue) && Number.isFinite(previousValue)
+      ? cleanDifference(currentValue - previousValue)
+      : null;
+  });
+}
+
+function cleanDifference(value) {
+  return Number(value.toPrecision(15));
+}
+
+function throwIfPlanningAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error("Heatmap export planning aborted.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  throw error;
+}
+
 function skippedReportEntry({ kind, metric, image, previousImage = null, cellSize, reason }) {
   const details = METRIC_DETAILS[metric];
   const currentImage = imageLabel(image);
@@ -302,6 +589,19 @@ function figureTitle(figure, { includeRange }) {
   const comparison = figure.previousImage ? `${figure.currentImage} vs ${figure.previousImage}` : figure.currentImage;
   const title = `${comparison} | ${figure.metricLabel} | Cell ${figure.cellWidth}x${figure.cellHeight} px | Grid ${figure.columns}x${figure.rows}`;
   return includeRange ? `${title} | Range ${formatRange(figure.colorRange.min, figure.colorRange.max, true)}` : title;
+}
+
+function wrapSvgText(value, maxLength) {
+  const lines = [];
+  let remaining = String(value);
+  while (remaining.length > maxLength) {
+    const whitespace = remaining.lastIndexOf(" ", maxLength);
+    const splitAt = whitespace > 0 ? whitespace : maxLength;
+    lines.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+  if (remaining.length > 0) lines.push(remaining);
+  return lines;
 }
 
 function comparisonColorBarLabel(metric) {

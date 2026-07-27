@@ -3,7 +3,9 @@ import { describe, expect, test, vi } from "vitest";
 import {
   EXPORT_CELL_SIZES,
   buildHeatmapFigureSvg,
+  hydrateHeatmapFigure,
   planHeatmapFigures,
+  planSavedHeatmapFigures,
   renderHeatmapFigure,
 } from "./exportHeatmaps.js";
 
@@ -60,6 +62,72 @@ describe("heatmap export", () => {
     expect(buildHeatmapFigureSvg(collagenComparison)).toContain("Delta Collagen Density (mg/ml)");
   });
 
+  test("keeps an all-zero comparison on its true zero range", () => {
+    const images = [{ id: "T01", imageFolder: "T01" }, { id: "T02", imageFolder: "T02" }];
+    const sources = new Map([
+      ["T01:20", { status: "Included", heatmap: map("T01", [0.2, 0.4]) }],
+      ["T02:20", { status: "Included", heatmap: map("T02", [0.2, 0.4]) }],
+    ]);
+
+    const plan = planHeatmapFigures({ images, sources, calibration });
+    const comparison = plan.figures.find(
+      (figure) => figure.kind === "comparison" && figure.metric === "pixel-density",
+    );
+
+    expect(comparison.colorRange).toEqual({ min: 0, max: 0 });
+    const svg = buildHeatmapFigureSvg(comparison);
+    expect(svg).toContain("Color range: 0 to 0");
+    expect(svg).not.toContain("Color range: -1 to +1");
+  });
+
+  test("plans shared ranges with lightweight descriptors and reloads only the rendered figure", async () => {
+    const images = [
+      { id: "T01", imageFolder: "T01" },
+      { id: "T02", imageFolder: "T02" },
+      { id: "T03", imageFolder: "T03" },
+    ];
+    const heatmaps = new Map([
+      ["T01:20", map("T01", [0.1, 0.2])],
+      ["T02:20", map("T02", [0.4, 0.1])],
+      ["T03:20", map("T03", [0.6, 0.5])],
+    ]);
+    const loads = [];
+    const loadHeatmap = async (_storage, id, cellSize) => {
+      loads.push(`${id}:${cellSize}`);
+      const heatmap = heatmaps.get(`${id}:${cellSize}`);
+      if (!heatmap) {
+        const error = new Error("missing");
+        error.code = "MISSING_HEATMAP";
+        throw error;
+      }
+      return heatmap;
+    };
+
+    const plan = await planSavedHeatmapFigures({
+      storage: {},
+      images,
+      calibration,
+      loadHeatmap,
+    });
+    const comparison = plan.figures.find(
+      (figure) => figure.kind === "comparison" &&
+        figure.metric === "pixel-density" &&
+        figure.currentImage === "T03",
+    );
+
+    expect(plan.figures.every((figure) => !("values" in figure) && !("heatmap" in figure))).toBe(true);
+    expect(comparison.colorRange).toEqual({ min: -0.4, max: 0.4 });
+    const loadsBeforeHydration = loads.length;
+
+    const hydrated = await hydrateHeatmapFigure(comparison, {
+      storage: {},
+      loadHeatmap,
+    });
+
+    expect(hydrated.values).toEqual([0.2, 0.4]);
+    expect(loads.slice(loadsBeforeHydration)).toEqual(["T03:20", "T02:20"]);
+  });
+
   test("renders a report PNG with title, axes, range, unit, and color bar", async () => {
     const figure = {
       kind: "absolute",
@@ -87,6 +155,60 @@ describe("heatmap export", () => {
     const metadata = await sharp(await renderHeatmapFigure(figure)).metadata();
     expect(metadata.format).toBe("png");
     expect(metadata.width).toBeGreaterThan(700);
+  });
+
+  test("caps a valid 680 by 680 grid below Sharp's output pixel limit", async () => {
+    const figure = {
+      kind: "absolute",
+      metric: "pixel-density",
+      metricLabel: "Pixel Density",
+      unit: "ratio",
+      currentImage: "T-large",
+      previousImage: null,
+      cellWidth: 20,
+      cellHeight: 20,
+      columns: 680,
+      rows: 680,
+      values: [],
+      colorRange: { min: 0, max: 1 },
+      calibration,
+    };
+
+    const svg = buildHeatmapFigureSvg(figure);
+    const [, width, height] = svg.match(/<svg[^>]+width="([^"]+)" height="([^"]+)"/) ?? [];
+    expect(Number(width) * Number(height)).toBeLessThan(100_000_000);
+
+    const metadata = await sharp(await renderHeatmapFigure(figure)).metadata();
+    expect(metadata.format).toBe("png");
+    expect(metadata.width * metadata.height).toBeLessThan(100_000_000);
+  }, 30_000);
+
+  test("wraps long current and previous names without dropping their full values", () => {
+    const currentImage = `current-${"a".repeat(180)}`;
+    const previousImage = `previous-${"b".repeat(180)}`;
+    const figure = {
+      kind: "comparison",
+      metric: "pixel-density",
+      metricLabel: "Pixel Density",
+      unit: "ratio",
+      currentImage,
+      previousImage,
+      cellWidth: 20,
+      cellHeight: 20,
+      columns: 2,
+      rows: 1,
+      values: [0, 0],
+      colorRange: { min: 0, max: 0 },
+      calibration,
+    };
+
+    const svg = buildHeatmapFigureSvg(figure);
+    expect(svg).toContain(`data-current-image="${currentImage}"`);
+    expect(svg).toContain(`data-previous-image="${previousImage}"`);
+    const titleLines = [...svg.matchAll(/data-role="title-line"[^>]*>([^<]*)<\/text>/g)]
+      .map((match) => match[1]);
+    expect(titleLines.length).toBeGreaterThan(4);
+    expect(titleLines.every((line) => line.length <= 80)).toBe(true);
   });
 
   test("cancels the active Sharp pipeline and detaches its abort listener", async () => {

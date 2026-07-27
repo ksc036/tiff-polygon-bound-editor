@@ -212,7 +212,49 @@ test("wraps storage discovery failures without exposing host paths", async () =>
   } catch (error) {
     expect(error).toBeInstanceOf(ExportError);
     expect(error.message).not.toContain(rootPath);
+    expect(error.cause).toBeUndefined();
   }
+});
+
+test("exports every file from one captured root when the active root switches during startup", async () => {
+  const parent = await createTempRoot("dataset-root-snapshot-");
+  const firstRoot = path.join(parent, "first-dataset");
+  const secondRoot = path.join(parent, "second-dataset");
+  await Promise.all([mkdir(firstRoot), mkdir(secondRoot)]);
+  await writeExportBundle(firstRoot, "T01", 100);
+  await writeExportBundle(secondRoot, "T01", 200);
+  const firstImagePath = path.join(firstRoot, "T01", "image", "T01.tif");
+  const secondImagePath = path.join(secondRoot, "T01", "image", "T01.tif");
+  await sharp(Buffer.alloc(40 * 40, 32), {
+    raw: { width: 40, height: 40, channels: 1 },
+  }).tiff().toFile(firstImagePath);
+  await sharp(Buffer.alloc(40 * 40, 224), {
+    raw: { width: 40, height: 40, channels: 1 },
+  }).tiff().toFile(secondImagePath);
+  const firstBytes = await readFile(firstImagePath);
+  const storage = createStorage({ initialRoot: firstRoot });
+  const getRoot = storage.getRoot;
+  storage.getRoot = () => {
+    const captured = getRoot();
+    storage.setRoot(secondRoot);
+    return captured;
+  };
+
+  const output = new PassThrough();
+  const zipPromise = collectStream(output);
+  const writePromise = writeDatasetZip({
+    storage,
+    output,
+    calibration: { slope: 0.1, intercept: 0 },
+  });
+  const archive = await unzipper.Open.buffer(await zipPromise);
+  await writePromise;
+
+  const tiff = archive.files.find(
+    (file) => file.path === "first_dataset_export/T01/image/T01.tif",
+  );
+  expect(tiff).toBeDefined();
+  expect(await tiff.buffer()).toEqual(firstBytes);
 });
 
 test("streams source bytes, reports missing artifacts, and never leaks host paths", async () => {
@@ -331,6 +373,24 @@ test("keeps sources, ROI, and workbook when analysis is missing", async () => {
   expect(report.getColumn(4).values).toContain("Saved analysis is missing or invalid.");
 });
 
+test("accepts null band ids used by saved aggregate and inside metrics", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  analysis.groups[0].area.bandId = null;
+  await writeFile(analysisPath, JSON.stringify(analysis));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+  const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(2);
+  expect(reportMessages).toContain("Saved analysis loaded for export.");
+});
+
 test("reports semantically invalid bounds and analysis without rendering ROI", async () => {
   const fixture = await createExportFixture({
     imageFolders: ["T01"],
@@ -443,6 +503,192 @@ test.each([
   const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
   expect(reportMessages).toContain("Saved analysis is missing or invalid.");
   expect(reportMessages).not.toContain("Saved analysis loaded for export.");
+});
+
+test("skips analysis with an Excel formula object instead of passing it to the workbook", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  analysis.groups[0].area.density = {
+    formula: 'HYPERLINK("https://example.invalid","open")',
+    result: "open",
+  };
+  await writeFile(analysisPath, JSON.stringify(analysis));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
+  expect(reportMessages).toContain("Saved analysis is missing or invalid.");
+  expect(JSON.stringify(workbook.worksheets.map((sheet) => sheet.getSheetValues()))).not.toContain("HYPERLINK");
+});
+
+test("skips analysis with an out-of-domain metric number", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  analysis.groups[0].area.roiAreaPx = -1;
+  await writeFile(analysisPath, JSON.stringify(analysis));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
+    "Saved analysis is missing or invalid.",
+  );
+});
+
+test("skips saved analysis when current bounds changed the group from inside to outside", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const boundsPath = path.join(fixture.rootDir, "T01", "bound", "T01.bounds.json");
+  const bounds = JSON.parse(await readFile(boundsPath, "utf8"));
+  bounds.groups[0] = {
+    ...bounds.groups[0],
+    analysisMode: "outside",
+    roiLimits: { near: 5, mid: 10, far: 15 },
+  };
+  await writeFile(boundsPath, JSON.stringify(bounds));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
+  expect(reportMessages).toContain("Saved analysis is stale or incompatible with current bounds or mask.");
+  expect(reportMessages).not.toContain("Saved analysis loaded for export.");
+});
+
+test("skips saved analysis when its recorded mask snapshot no longer matches the selected mask", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const maskPath = path.join(fixture.rootDir, "T01", "mask", "T01.png");
+  const maskMetadata = await stat(maskPath);
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  analysis.maskSource = {
+    file: "T01.png",
+    format: "png",
+    width: 40,
+    height: 40,
+    mtimeMs: maskMetadata.mtimeMs,
+  };
+  await writeFile(analysisPath, JSON.stringify(analysis));
+  const changedTime = new Date(maskMetadata.mtimeMs + 2_000);
+  await utimes(maskPath, changedTime, changedTime);
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
+    "Saved analysis is stale or incompatible with current bounds or mask.",
+  );
+});
+
+test("skips saved analysis when the bounds file is newer than the analysis file", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const boundsPath = path.join(fixture.rootDir, "T01", "bound", "T01.bounds.json");
+  const analysisMetadata = await stat(analysisPath);
+  const changedTime = new Date(analysisMetadata.mtimeMs + 2_000);
+  await utimes(boundsPath, changedTime, changedTime);
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
+    "Saved analysis is stale or incompatible with current bounds or mask.",
+  );
+});
+
+test("skips saved analysis when saved timestamps show newer bounds despite file mtime order", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const boundsPath = path.join(fixture.rootDir, "T01", "bound", "T01.bounds.json");
+  const bounds = JSON.parse(await readFile(boundsPath, "utf8"));
+  bounds.updatedAt = "2026-07-27T02:00:00.000Z";
+  await writeFile(boundsPath, JSON.stringify(bounds));
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  analysis.updatedAt = "2026-07-27T01:00:00.000Z";
+  await writeFile(analysisPath, JSON.stringify(analysis));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
+    "Saved analysis is stale or incompatible with current bounds or mask.",
+  );
+});
+
+test("skips outside analysis whose saved per-group ROI bands differ from current limits", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const boundsPath = path.join(fixture.rootDir, "T01", "bound", "T01.bounds.json");
+  const bounds = JSON.parse(await readFile(boundsPath, "utf8"));
+  bounds.groups[0] = {
+    ...bounds.groups[0],
+    analysisMode: "outside",
+    roiLimits: { near: 5, mid: 10, far: 15 },
+  };
+  await writeFile(boundsPath, JSON.stringify(bounds));
+
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const metric = analysisMetrics(10, 100);
+  const analysis = {
+    schemaVersion: 5,
+    imageFolder: "T01",
+    imageFile: "T01.tif",
+    roiBands: [
+      { id: "near", label: "Near", fromPx: 0, toPx: 5 },
+      { id: "mid", label: "Mid", fromPx: 5, toPx: 10 },
+      { id: "far", label: "Far", fromPx: 10, toPx: 15 },
+    ],
+    groups: [{
+      groupId: "whole",
+      groupName: "Whole image",
+      analysisMode: "outside",
+      roiBands: [
+        { id: "near", label: "Near", fromPx: 0, toPx: 4 },
+        { id: "mid", label: "Mid", fromPx: 4, toPx: 9 },
+        { id: "far", label: "Far", fromPx: 9, toPx: 14 },
+      ],
+      bands: { near: metric, mid: metric, far: metric },
+      allBands: metric,
+    }],
+    updatedAt: new Date().toISOString(),
+  };
+  await writeFile(analysisPath, JSON.stringify(analysis));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
+    "Saved analysis is stale or incompatible with current bounds or mask.",
+  );
 });
 
 test("uses a safe text fallback when workbook generation fails", async () => {
