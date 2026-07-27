@@ -160,7 +160,9 @@ export function buildHeatmapFigureSvg(figure) {
   const isComparison = figure.kind === "comparison";
   const title = figureTitle(figure, { includeRange: isComparison });
   const calibration = calibrationText(figure.calibration);
-  const colorBarLabel = `${figure.metricLabel} (${figure.unit || "ratio"})`;
+  const colorBarLabel = isComparison
+    ? comparisonColorBarLabel(figure.metric)
+    : `${figure.metricLabel} (${figure.unit || "ratio"})`;
   const cellElements = Array.from({ length: rows * columns }, (_, index) => {
     const value = figure.values?.[index] ?? null;
     const column = index % columns;
@@ -299,6 +301,10 @@ function figureTitle(figure, { includeRange }) {
   const comparison = figure.previousImage ? `${figure.currentImage} vs ${figure.previousImage}` : figure.currentImage;
   const title = `${comparison} | ${figure.metricLabel} | Cell ${figure.cellWidth}x${figure.cellHeight} px | Grid ${figure.columns}x${figure.rows}`;
   return includeRange ? `${title} | Range ${formatRange(figure.colorRange.min, figure.colorRange.max, true)}` : title;
+}
+
+function comparisonColorBarLabel(metric) {
+  return metric === "pixel-density" ? "Delta Pixel Density" : "Delta Collagen Density (mg/ml)";
 }
 
 function calibrationText(calibration) {

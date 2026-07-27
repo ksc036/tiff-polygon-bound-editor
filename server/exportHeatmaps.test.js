@@ -53,6 +53,11 @@ describe("heatmap export", () => {
       { min: -0.4, max: 0.4 },
     ]);
     expect(plan.figures.some((figure) => figure.currentImage === "T01" && figure.kind === "comparison")).toBe(false);
+    expect(buildHeatmapFigureSvg(pixelComparisons[0])).toContain(">Delta Pixel Density</text>");
+    const collagenComparison = plan.figures.find(
+      (figure) => figure.kind === "comparison" && figure.metric === "estimated-collagen-density",
+    );
+    expect(buildHeatmapFigureSvg(collagenComparison)).toContain("Delta Collagen Density (mg/ml)");
   });
 
   test("renders a report PNG with title, axes, range, unit, and color bar", async () => {
