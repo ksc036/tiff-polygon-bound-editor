@@ -11,3 +11,10 @@ semi-transparent alpha, then composite that PNG above the normalized source.
 
 Keep polygon boundaries and labels in SVG. The `Gxx-A` union remains
 legend-only.
+
+The synchronous `buildRoiOverviewSvg` fallback follows the same ownership
+rule. It must not restore independent cumulative polygon strokes when no PNG
+overlay URL is supplied. Convert the assignment map into contiguous per-row
+rectangles grouped by group and band, with the same semi-transparent fill.
+This keeps the builder compatible and inspectable without creating one SVG
+element per pixel.
