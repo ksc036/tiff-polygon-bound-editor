@@ -116,8 +116,11 @@ export default function App() {
   const heatmapBatchRequestRef = useRef(0);
   const heatmapGenerationInFlightRef = useRef(false);
   const exportInFlightRef = useRef(false);
+  const activeImageIdRef = useRef(null);
+  const boundsRevisionRef = useRef(0);
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
+  const [activeRootPath, setActiveRootPath] = useState("");
   const [images, setImages] = useState([]);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [bounds, setBounds] = useState(null);
@@ -245,6 +248,8 @@ export default function App() {
       const isCurrentRequest = () => requestId === loadRequestRef.current;
       const image = nextImages[index];
       if (!image) {
+        activeImageIdRef.current = null;
+        boundsRevisionRef.current += 1;
         setActiveIndex(-1);
         setBounds(null);
         setActiveGroupId(null);
@@ -256,6 +261,8 @@ export default function App() {
         return;
       }
 
+      activeImageIdRef.current = image.id;
+      boundsRevisionRef.current += 1;
       setActiveIndex(index);
       clearPointer();
       setMigrationDraft(null);
@@ -316,9 +323,11 @@ export default function App() {
             candidate.id === image.id ? { ...candidate, width, height } : candidate,
           ),
         );
-        setBounds((currentBounds) =>
-          currentBounds ? normalizeAndClampBounds(currentBounds, imageWithDimensions) : currentBounds,
-        );
+        setBounds((currentBounds) => {
+          const nextBounds = currentBounds ? normalizeAndClampBounds(currentBounds, imageWithDimensions) : currentBounds;
+          if (nextBounds !== currentBounds) boundsRevisionRef.current += 1;
+          return nextBounds;
+        });
         setRawPixels({ pixels: new Uint16Array(buffer), width, height });
       } catch {
         if (!isCurrentRequest()) return;
@@ -336,7 +345,9 @@ export default function App() {
         const payload = await readJsonResponse(await fetch("/api/root"));
         if (!alive) return;
         const nextImages = payload.images ?? [];
-        setRootPath(payload.rootPath ?? "");
+        const nextRootPath = typeof payload.rootPath === "string" ? payload.rootPath : "";
+        setRootPath(nextRootPath);
+        setActiveRootPath(nextRootPath);
         setImages(nextImages);
         if (nextImages.length > 0) {
           await loadImage(0, nextImages);
@@ -521,13 +532,17 @@ export default function App() {
         }),
       );
       const nextImages = payload.images ?? [];
-      setRootPath(payload.rootPath ?? body?.rootPath ?? "");
+      const nextRootPath = typeof payload.rootPath === "string" ? payload.rootPath : "";
+      setRootPath(nextRootPath);
+      setActiveRootPath(nextRootPath);
       setImages(nextImages);
       setDirty(false);
       if (nextImages.length > 0) {
         await loadImage(0, nextImages);
       } else {
         loadRequestRef.current += 1;
+        activeImageIdRef.current = null;
+        boundsRevisionRef.current += 1;
         setActiveIndex(-1);
         setBounds(null);
         setActiveGroupId(null);
@@ -582,6 +597,7 @@ export default function App() {
       if (!current) return current;
       const nextBounds = mutator(current);
       if (nextBounds !== current) {
+        boundsRevisionRef.current += 1;
         setDirty(true);
         setStatus(nextStatus);
       }
@@ -945,6 +961,8 @@ export default function App() {
       return null;
     }
 
+    const savedImageId = activeImage.id;
+    const savedRevision = boundsRevisionRef.current;
     const nextBounds = normalizeAndClampBounds(boundsToSave, activeImage);
     const payload = await readJsonResponse(
       await fetch(`/api/images/${activeImage.id}/bounds`, {
@@ -954,6 +972,12 @@ export default function App() {
       }),
     );
     const savedBounds = normalizeAndClampBounds(payload.bounds ?? nextBounds, activeImage);
+
+    if (activeImageIdRef.current !== savedImageId || boundsRevisionRef.current !== savedRevision) {
+      return savedBounds;
+    }
+
+    boundsRevisionRef.current += 1;
     setBounds(savedBounds);
     setHasBounds(true);
     setDirty(false);
@@ -961,11 +985,11 @@ export default function App() {
   }
 
   async function handleDownloadZip() {
-    if (exportInFlightRef.current || !rootPath) return;
+    if (exportInFlightRef.current || !activeRootPath) return;
 
     exportInFlightRef.current = true;
     setExporting(true);
-    setStatus("");
+    setStatus("Preparing ZIP...");
 
     try {
       let autoSavedImageId = null;
@@ -1011,6 +1035,7 @@ export default function App() {
         }),
       );
       const nextBounds = normalizeAndClampBounds(payload.bounds, activeImage);
+      boundsRevisionRef.current += 1;
       setBounds(nextBounds);
       setActiveGroupId(nextBounds.groups[0]?.id ?? null);
       setDirty(true);
@@ -1191,7 +1216,7 @@ export default function App() {
         <button
           type="button"
           className="export-button"
-          disabled={!rootPath || exporting}
+          disabled={!activeRootPath || exporting}
           onClick={handleDownloadZip}
         >
           {exporting ? "Preparing ZIP..." : "Download as ZIP"}
@@ -1583,7 +1608,7 @@ export default function App() {
           </span>
           <span className="status-chip">{hasBounds ? "Saved bound" : "No saved file"}</span>
           {imageLayer !== "heatmap" ? <span className="status-chip">{roiPreviewStatus}</span> : null}
-          <span className="status-line">{status}</span>
+          <span className="status-line" role="status">{status}</span>
         </div>
 
         <div className="image-stage-frame" data-testid="image-stage-frame" ref={stageFrameRef}>

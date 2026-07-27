@@ -303,6 +303,8 @@ function deferred() {
 function mockApi({
   boundsQueue = [savedBounds],
   rootImages = images,
+  rootPath = "/data/root",
+  appliedRootPath = "/typed/root",
   saveResponse = null,
   exportResponse = null,
   delayedExport = false,
@@ -321,10 +323,10 @@ function mockApi({
     calls.push({ url, method, options });
 
     if (url === "/api/root" && method === "GET") {
-      return jsonResponse({ rootPath: "/data/root", images: rootImages });
+      return jsonResponse({ rootPath, images: rootImages });
     }
     if (url === "/api/root" && method === "POST") {
-      return jsonResponse({ rootPath: "/typed/root", images: rootImages });
+      return jsonResponse({ rootPath: appliedRootPath, images: rootImages });
     }
     if (url === "/api/root/select" && method === "POST") {
       return jsonResponse({ rootPath: "/selected/root", images: rootImages });
@@ -514,6 +516,23 @@ describe("App", () => {
     );
   });
 
+  test("keeps ZIP export disabled until a typed root is successfully applied", async () => {
+    mockApi({ rootImages: [], rootPath: "" });
+    render(<App />);
+
+    const download = await screen.findByRole("button", { name: "Download as ZIP" });
+    const rootPathInput = screen.getByLabelText(/root path/i);
+    expect(download).toBeDisabled();
+
+    fireEvent.change(rootPathInput, { target: { value: "/not-yet-applied" } });
+    expect(download).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /set root/i }));
+
+    await waitFor(() => expect(rootPathInput).toHaveValue("/typed/root"));
+    expect(download).toBeEnabled();
+  });
+
   test("loads saved bounds when opening an image", async () => {
     mockApi();
 
@@ -551,6 +570,7 @@ describe("App", () => {
 
     await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
     expect(downloadedFilename).toBe("study_export_20260727-090000.zip");
+    expect(screen.getByRole("status")).toHaveTextContent("ZIP downloaded");
     const exportCall = fetchMock.mock.calls.find(([url]) => url === "/api/export");
     expect(JSON.parse(exportCall[1].body)).toEqual({
       calibration: {
@@ -560,6 +580,72 @@ describe("App", () => {
       autoSavedImageId: null,
     });
     await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:export"));
+  });
+
+  test("uses an RFC 5987 ZIP filename when the export response provides one", async () => {
+    mockApi({
+      exportResponse: Promise.resolve(
+        new Response(new Blob(["zip"], { type: "application/zip" }), {
+          status: 200,
+          headers: {
+            "content-disposition": "attachment; filename*=UTF-8''study%20export.zip",
+          },
+        }),
+      ),
+    });
+    let downloadedFilename = "";
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function recordDownload() {
+      downloadedFilename = this.download;
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Download as ZIP" }));
+
+    await waitFor(() => expect(downloadedFilename).toBe("study export.zip"));
+  });
+
+  test("falls back to a safe ZIP filename for traversal content disposition", async () => {
+    mockApi({
+      exportResponse: Promise.resolve(
+        new Response(new Blob(["zip"], { type: "application/zip" }), {
+          status: 200,
+          headers: {
+            "content-disposition": 'attachment; filename="../outside.zip"',
+          },
+        }),
+      ),
+    });
+    let downloadedFilename = "";
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function recordDownload() {
+      downloadedFilename = this.download;
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Download as ZIP" }));
+
+    await waitFor(() => expect(downloadedFilename).toBe("dataset_export.zip"));
+  });
+
+  test("falls back to a safe ZIP filename for malformed extended content disposition", async () => {
+    mockApi({
+      exportResponse: Promise.resolve(
+        new Response(new Blob(["zip"], { type: "application/zip" }), {
+          status: 200,
+          headers: {
+            "content-disposition": "attachment; filename*=UTF-8''broken%ZZ.zip",
+          },
+        }),
+      ),
+    });
+    let downloadedFilename = "";
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function recordDownload() {
+      downloadedFilename = this.download;
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Download as ZIP" }));
+
+    await waitFor(() => expect(downloadedFilename).toBe("dataset_export.zip"));
   });
 
   test("saves dirty bounds before exporting and blocks duplicate ZIP requests", async () => {
@@ -595,6 +681,60 @@ describe("App", () => {
     );
   });
 
+  test("keeps later local geometry edits dirty when an export auto-save resolves", async () => {
+    const pendingSave = deferred();
+    let savedSnapshot = null;
+    const { fetchMock, releaseExport } = mockApi({
+      delayedExport: true,
+      saveResponse: (options) => {
+        savedSnapshot = JSON.parse(options.body);
+        return pendingSave.promise;
+      },
+    });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Inside area" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/images/scan-a/bounds",
+        expect.objectContaining({ method: "PUT" }),
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("image-stage"), { clientX: 55, clientY: 24 });
+    expect(await screen.findByLabelText("Vertex point-4")).toHaveAttribute("cx", "55");
+
+    pendingSave.resolve(await jsonResponse({ bounds: savedSnapshot }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/export", expect.any(Object)));
+
+    expect(screen.getByLabelText("Vertex point-4")).toHaveAttribute("cx", "55");
+    expect(screen.getByText("Unsaved")).toBeInTheDocument();
+    releaseExport(
+      new Response(new Blob(["zip"], { type: "application/zip" }), {
+        status: 200,
+        headers: { "content-disposition": 'attachment; filename="dataset_export.zip"' },
+      }),
+    );
+  });
+
+  test("announces ZIP export progress through a live status", async () => {
+    const { releaseExport } = mockApi({ delayedExport: true });
+    render(<App />);
+
+    const button = await screen.findByRole("button", { name: "Download as ZIP" });
+    fireEvent.click(button);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Preparing ZIP...");
+    releaseExport(
+      new Response(new Blob(["zip"], { type: "application/zip" }), {
+        status: 200,
+        headers: { "content-disposition": 'attachment; filename="dataset_export.zip"' },
+      }),
+    );
+  });
+
   test("restores the ZIP button with safe feedback after an export error", async () => {
     mockApi({
       exportResponse: Promise.resolve(new Response("not a ZIP", { status: 500 })),
@@ -604,7 +744,7 @@ describe("App", () => {
     const button = await screen.findByRole("button", { name: "Download as ZIP" });
     fireEvent.click(button);
 
-    expect(await screen.findByText("Export failed.")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("Export failed.");
     expect(button).toBeEnabled();
   });
 
