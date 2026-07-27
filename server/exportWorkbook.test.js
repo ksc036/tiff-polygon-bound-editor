@@ -74,9 +74,9 @@ test("writes five linked sheets with numeric ROI values and group colors", async
 
   const roi = workbook.getWorksheet("ROI Statistics");
   expect(roi.getRow(1).values.slice(1)).toEqual([
-    "ROI ID", "Group ID", "Group Name", "Group Color", "Analysis Mode", "Band", "Distance From (px)",
-    "Distance To (px)", "ROI Area (px)", "Mask Pixels", "Pixel Density", "Estimated Collagen Density (mg/ml)",
-    "ROI Alignment", "Radial Alignment", "Circumferential Alignment", "Migration Axis Alignment", "Empty", "ROI Overview",
+    "ROI ID", "Group ID", "Group Name", "Group Color", "Analysis Mode", "ROI Label", "From px",
+    "To px", "Area px", "Mask Pixels", "Pixel Density", "Estimated Collagen Density (mg/ml)",
+    "ROI Alignment", "Radial Alignment", "Circumferential Alignment", "Migration Axis Alignment", "Empty", "ROI Image",
   ]);
   expect(roi.views[0]).toMatchObject({ state: "frozen", ySplit: 1 });
   expect(roi.autoFilter).toBe("A1:R2");
@@ -122,12 +122,17 @@ test("keeps unavailable measurements blank and reports safe artifact details", a
 });
 
 test("returns safe recovery text without leaking error details", () => {
-  const text = workbookFailureText({ imageFolder: "T01", error: new Error("/private/path/token") }).toString("utf8");
+  const text = workbookFailureText({
+    imageFolder: "/private/export-root/T01",
+    error: new Error("/private/path/token"),
+  }).toString("utf8");
 
   expect(text).toContain("T01");
   expect(text).toContain("workbook generation failed");
   expect(text).toContain("Review the export report");
+  expect(text).not.toContain("/private/export-root");
   expect(text).not.toContain("/private/path/token");
+  expect(workbookFailureText({ imageFolder: "../", error: null }).toString("utf8")).toContain("Image folder: unknown");
 });
 
 test("keeps missing timestamps blank and refuses artifact links outside their directory", async () => {

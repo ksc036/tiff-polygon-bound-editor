@@ -11,10 +11,10 @@ const ROI_COLUMNS = [
   ["Group Name", "groupName", 22],
   ["Group Color", "groupColor", 14],
   ["Analysis Mode", "modeLabel", 16],
-  ["Band", "bandLabel", 14],
-  ["Distance From (px)", "fromPx", 18],
-  ["Distance To (px)", "toPx", 16],
-  ["ROI Area (px)", "roiAreaPx", 16],
+  ["ROI Label", "bandLabel", 14],
+  ["From px", "fromPx", 18],
+  ["To px", "toPx", 16],
+  ["Area px", "roiAreaPx", 16],
   ["Mask Pixels", "maskPixelCount", 14],
   ["Pixel Density", "density", 15],
   ["Estimated Collagen Density (mg/ml)", "estimatedCollagenDensity", 38],
@@ -23,7 +23,7 @@ const ROI_COLUMNS = [
   ["Circumferential Alignment", "tangentialAlignment", 25],
   ["Migration Axis Alignment", "migrationAlignment", 24],
   ["Empty", "empty", 12],
-  ["ROI Overview", "roiOverview", 20],
+  ["ROI Image", "roiOverview", 20],
 ];
 
 const METRIC_DEFINITIONS = [
@@ -53,7 +53,7 @@ export async function createImageWorkbook(input) {
 export function workbookFailureText({ imageFolder, error }) {
   const category = safeErrorCategory(error);
   return Buffer.from(
-    `Image folder: ${String(imageFolder ?? "unknown")}\nStatus: ${category}\nRecovery: Review the export report and retry the export.\n`,
+    `Image folder: ${safeImageFolder(imageFolder)}\nStatus: ${category}\nRecovery: Review the export report and retry the export.\n`,
     "utf8",
   );
 }
@@ -282,6 +282,11 @@ function contrastFontColor(color) {
 function safeFileName(value) {
   if (value == null) return null;
   return String(value).split(/[\\/]/).filter(Boolean).at(-1) ?? null;
+}
+
+function safeImageFolder(value) {
+  const name = safeFileName(value);
+  return name && name !== "." && name !== ".." ? name : "unknown";
 }
 
 function safeStatus(value) {
