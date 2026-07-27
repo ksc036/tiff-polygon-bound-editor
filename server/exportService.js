@@ -581,6 +581,7 @@ function validateSavedAnalysis(value, image) {
     value.schemaVersion !== 5 ||
     value.imageFolder !== image.imageFolder ||
     value.imageFile !== image.imageFile ||
+    !isPlainObject(value.maskSource) ||
     !Array.isArray(value.groups) ||
     value.groups.length === 0
   ) {
@@ -591,15 +592,13 @@ function validateSavedAnalysis(value, image) {
     schemaVersion: 5,
     imageFolder: value.imageFolder,
     imageFile: value.imageFile,
+    maskSource: sanitizeSavedMaskSource(value.maskSource),
     roiBands: sanitizeSavedRoiBands(value.roiBands ?? []),
     groups: [],
   };
   if (value.boundsFile !== undefined) {
     if (typeof value.boundsFile !== "string") throw new TypeError("Invalid saved analysis.");
     sanitized.boundsFile = value.boundsFile;
-  }
-  if (value.maskSource !== undefined) {
-    sanitized.maskSource = sanitizeSavedMaskSource(value.maskSource);
   }
   if (value.updatedAt !== undefined) {
     if (typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt))) {

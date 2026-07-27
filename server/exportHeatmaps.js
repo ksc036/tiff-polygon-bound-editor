@@ -28,6 +28,9 @@ const MAX_GRID_DISPLAY_SIZE = 4096;
 const COLOR_BAR_WIDTH = 28;
 const COLOR_BAR_GAP = 56;
 const COLOR_BAR_HEIGHT = 300;
+const MAX_PATH_COMMANDS = 1_024;
+const TITLE_MAX_WIDTH = 800;
+const SUBTITLE_MAX_WIDTH = 860;
 
 export async function collectSavedHeatmaps({ storage, images }) {
   const sources = new Map();
@@ -303,7 +306,7 @@ export async function hydrateHeatmapFigure(
   };
 }
 
-export function buildHeatmapFigureSvg(figure) {
+export function buildHeatmapFigureSvg(figure, { gridImageHref = null } = {}) {
   const columns = positiveInteger(figure.columns);
   const rows = positiveInteger(figure.rows);
   const requestedCellSize = Number.isFinite(Number(figure.cellDisplaySize))
@@ -320,15 +323,25 @@ export function buildHeatmapFigureSvg(figure) {
   const isComparison = figure.kind === "comparison";
   const title = figureTitle(figure, { includeRange: isComparison });
   const titleLines = [
-    ...wrapSvgText(`Current: ${figure.currentImage}`, 80),
-    ...(figure.previousImage ? wrapSvgText(`Previous: ${figure.previousImage}`, 80) : []),
+    ...wrapSvgText(`Current: ${figure.currentImage}`, TITLE_MAX_WIDTH, 18, true),
+    ...(figure.previousImage
+      ? wrapSvgText(`Previous: ${figure.previousImage}`, TITLE_MAX_WIDTH, 18, true)
+      : []),
     ...wrapSvgText(
       `${figure.metricLabel} | Cell ${figure.cellWidth}x${figure.cellHeight} px | Grid ${columns}x${rows}`,
-      80,
+      TITLE_MAX_WIDTH,
+      18,
+      true,
     ),
-    ...(isComparison ? wrapSvgText(`Range ${formatRange(min, max, true)}`, 80) : []),
+    ...(isComparison
+      ? wrapSvgText(`Range ${formatRange(min, max, true)}`, TITLE_MAX_WIDTH, 18, true)
+      : []),
   ];
-  const calibrationLines = wrapSvgText(calibrationText(figure.calibration), 96);
+  const calibrationLines = wrapSvgText(
+    calibrationText(figure.calibration),
+    SUBTITLE_MAX_WIDTH,
+    14,
+  );
   const titleStartY = 42;
   const calibrationStartY = titleStartY + titleLines.length * 24 + 4;
   const rangeY = calibrationStartY + calibrationLines.length * 20 + 8;
@@ -343,20 +356,19 @@ export function buildHeatmapFigureSvg(figure) {
   const emptyCellFill = isComparison
     ? differenceColor(null, Math.max(Math.abs(min), Math.abs(max)))
     : infernoColor(null, min, max);
-  const pathsByFill = new Map();
-  for (let index = 0; index < rows * columns; index += 1) {
-    const value = figure.values?.[index] ?? null;
-    if (value === null) continue;
-    const column = index % columns;
-    const row = Math.floor(index / columns);
-    const fill = isComparison ? differenceColor(value, Math.max(Math.abs(min), Math.abs(max))) : infernoColor(value, min, max);
-    const commands = pathsByFill.get(fill) ?? [];
-    commands.push(`M${gridX + column * cellSize} ${gridY + row * cellSize}h${cellSize}v${cellSize}h-${cellSize}z`);
-    pathsByFill.set(fill, commands);
-  }
-  const cellElements = [...pathsByFill]
-    .map(([fill, commands]) => `<path fill="${fill}" d="${commands.join("")}"/>`)
-    .join("");
+  const cellElements = gridImageHref
+    ? `<image href="${gridImageHref}" x="${gridX}" y="${gridY}" width="${gridWidth}" height="${gridHeight}" preserveAspectRatio="none" image-rendering="pixelated"/>`
+    : buildGridCellPaths({
+        figure,
+        columns,
+        rows,
+        gridX,
+        gridY,
+        cellSize,
+        isComparison,
+        min,
+        max,
+      });
 
   const titleElements = titleLines
     .map((line, index) => `<text class="title" data-role="title-line" x="${CANVAS_MARGIN}" y="${titleStartY + index * 24}">${escapeXml(line)}</text>`)
@@ -387,7 +399,8 @@ export function buildHeatmapFigureSvg(figure) {
 }
 
 export async function renderHeatmapFigure(figure, { signal } = {}) {
-  const pipeline = sharp(Buffer.from(buildHeatmapFigureSvg(figure)))
+  const gridImageHref = await heatmapGridDataUrl(figure, { signal });
+  const pipeline = sharp(Buffer.from(buildHeatmapFigureSvg(figure, { gridImageHref })))
     .png({ compressionLevel: 9, adaptiveFiltering: true });
   return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
@@ -591,17 +604,135 @@ function figureTitle(figure, { includeRange }) {
   return includeRange ? `${title} | Range ${formatRange(figure.colorRange.min, figure.colorRange.max, true)}` : title;
 }
 
-function wrapSvgText(value, maxLength) {
+function wrapSvgText(value, maxWidth, fontSize, bold = false) {
   const lines = [];
   let remaining = String(value);
-  while (remaining.length > maxLength) {
-    const whitespace = remaining.lastIndexOf(" ", maxLength);
-    const splitAt = whitespace > 0 ? whitespace : maxLength;
+  while (estimatedSvgTextWidth(remaining, fontSize, bold) > maxWidth) {
+    let fitLength = 0;
+    let lastWhitespace = -1;
+    for (const character of remaining) {
+      const nextLength = fitLength + character.length;
+      if (estimatedSvgTextWidth(remaining.slice(0, nextLength), fontSize, bold) > maxWidth) {
+        break;
+      }
+      fitLength = nextLength;
+      if (/\s/u.test(character)) lastWhitespace = fitLength - character.length;
+    }
+    const splitAt = lastWhitespace > 0 ? lastWhitespace : Math.max(fitLength, 1);
     lines.push(remaining.slice(0, splitAt));
     remaining = remaining.slice(splitAt).trimStart();
   }
   if (remaining.length > 0) lines.push(remaining);
   return lines;
+}
+
+function estimatedSvgTextWidth(value, fontSize, bold) {
+  let emWidth = 0;
+  for (const character of String(value)) {
+    if (/\s/u.test(character)) {
+      emWidth += 0.34;
+    } else if (/[WM@#%&]/u.test(character)) {
+      emWidth += 0.96;
+    } else if (/[A-Z]/u.test(character)) {
+      emWidth += 0.72;
+    } else if (/[ilI1.,:;'|!]/u.test(character)) {
+      emWidth += 0.32;
+    } else if (character.codePointAt(0) > 0x7f) {
+      emWidth += 1;
+    } else {
+      emWidth += 0.58;
+    }
+  }
+  return emWidth * fontSize * (bold ? 1.06 : 1);
+}
+
+function buildGridCellPaths({
+  figure,
+  columns,
+  rows,
+  gridX,
+  gridY,
+  cellSize,
+  isComparison,
+  min,
+  max,
+}) {
+  const pathsByFill = new Map();
+
+  for (let row = 0; row < rows; row += 1) {
+    let runFill = null;
+    let runStart = 0;
+    for (let column = 0; column <= columns; column += 1) {
+      const index = row * columns + column;
+      const value = column < columns ? figure.values?.[index] ?? null : null;
+      const fill = value === null
+        ? null
+        : heatmapValueColor({ value, isComparison, min, max });
+      if (fill === runFill) continue;
+      if (runFill !== null) {
+        const commands = pathsByFill.get(runFill) ?? [];
+        const runWidth = (column - runStart) * cellSize;
+        commands.push(
+          `M${gridX + runStart * cellSize} ${gridY + row * cellSize}h${runWidth}v${cellSize}h-${runWidth}z`,
+        );
+        pathsByFill.set(runFill, commands);
+      }
+      runFill = fill;
+      runStart = column;
+    }
+  }
+
+  return [...pathsByFill]
+    .flatMap(([fill, commands]) => chunked(commands, MAX_PATH_COMMANDS)
+      .map((chunk) => `<path fill="${fill}" d="${chunk.join("")}"/>`))
+    .join("");
+}
+
+async function heatmapGridDataUrl(figure, { signal } = {}) {
+  const columns = positiveInteger(figure.columns);
+  const rows = positiveInteger(figure.rows);
+  const { min, max } = figure.colorRange;
+  const isComparison = figure.kind === "comparison";
+  const emptyFill = isComparison
+    ? differenceColor(null, Math.max(Math.abs(min), Math.abs(max)))
+    : infernoColor(null, min, max);
+  const pixels = Buffer.alloc(columns * rows * 3);
+
+  for (let index = 0; index < columns * rows; index += 1) {
+    const value = figure.values?.[index] ?? null;
+    const fill = value === null
+      ? emptyFill
+      : heatmapValueColor({ value, isComparison, min, max });
+    const [red, green, blue] = hexColorChannels(fill);
+    const offset = index * 3;
+    pixels[offset] = red;
+    pixels[offset + 1] = green;
+    pixels[offset + 2] = blue;
+  }
+
+  const pipeline = sharp(pixels, {
+    raw: { width: columns, height: rows, channels: 3 },
+  }).png({ compressionLevel: 9, adaptiveFiltering: true });
+  const png = await runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
+  return `data:image/png;base64,${png.toString("base64")}`;
+}
+
+function heatmapValueColor({ value, isComparison, min, max }) {
+  return isComparison
+    ? differenceColor(value, Math.max(Math.abs(min), Math.abs(max)))
+    : infernoColor(value, min, max);
+}
+
+function hexColorChannels(value) {
+  return [1, 3, 5].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16));
+}
+
+function chunked(values, size) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function comparisonColorBarLabel(metric) {

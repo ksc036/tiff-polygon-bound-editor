@@ -91,6 +91,7 @@ async function writeExportBundle(rootDir, imageFolder, maskPixelCount, { width =
   await writeFile(path.join(imageDir, imageFile), imageBytes);
   const maskPath = path.join(maskDir, maskFile);
   await sharp(mask, { raw: { width, height, channels: 1 } }).png().toFile(maskPath);
+  const maskMetadata = await stat(maskPath);
 
   const bounds = {
     schemaVersion: 1,
@@ -115,6 +116,13 @@ async function writeExportBundle(rootDir, imageFolder, maskPixelCount, { width =
     schemaVersion: 5,
     imageFolder,
     imageFile,
+    maskSource: {
+      file: maskFile,
+      format: "png",
+      width,
+      height,
+      mtimeMs: maskMetadata.mtimeMs,
+    },
     roiBands: [],
     groups: [{
       groupId: "whole",
@@ -569,6 +577,25 @@ test("skips saved analysis when current bounds changed the group from inside to 
   expect(reportMessages).not.toContain("Saved analysis loaded for export.");
 });
 
+test("rejects schema-5 analysis without mask provenance", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  delete analysis.maskSource;
+  await writeFile(analysisPath, JSON.stringify(analysis));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
+    "Saved analysis is missing or invalid.",
+  );
+});
+
 test("skips saved analysis when its recorded mask snapshot no longer matches the selected mask", async () => {
   const fixture = await createExportFixture({
     imageFolders: ["T01"],
@@ -661,6 +688,13 @@ test("skips outside analysis whose saved per-group ROI bands differ from current
     schemaVersion: 5,
     imageFolder: "T01",
     imageFile: "T01.tif",
+    maskSource: {
+      file: "T01.png",
+      format: "png",
+      width: 40,
+      height: 40,
+      mtimeMs: (await stat(path.join(fixture.rootDir, "T01", "mask", "T01.png"))).mtimeMs,
+    },
     roiBands: [
       { id: "near", label: "Near", fromPx: 0, toPx: 5 },
       { id: "mid", label: "Mid", fromPx: 5, toPx: 10 },

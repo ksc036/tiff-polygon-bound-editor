@@ -169,7 +169,7 @@ describe("heatmap export", () => {
       cellHeight: 20,
       columns: 680,
       rows: 680,
-      values: [],
+      values: Array(680 * 680).fill(0.5),
       colorRange: { min: 0, max: 1 },
       calibration,
     };
@@ -184,8 +184,8 @@ describe("heatmap export", () => {
   }, 30_000);
 
   test("wraps long current and previous names without dropping their full values", () => {
-    const currentImage = `current-${"a".repeat(180)}`;
-    const previousImage = `previous-${"b".repeat(180)}`;
+    const currentImage = `current-${"W".repeat(180)}`;
+    const previousImage = `previous-${"W".repeat(180)}`;
     const figure = {
       kind: "comparison",
       metric: "pixel-density",
@@ -209,6 +209,7 @@ describe("heatmap export", () => {
       .map((match) => match[1]);
     expect(titleLines.length).toBeGreaterThan(4);
     expect(titleLines.every((line) => line.length <= 80)).toBe(true);
+    expect(titleLines.every((line) => line.length <= 52)).toBe(true);
   });
 
   test("cancels the active Sharp pipeline and detaches its abort listener", async () => {
