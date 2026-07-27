@@ -89,6 +89,11 @@ input[type="range"] {
   background: #171d24;
 }
 
+.export-button {
+  min-width: 128px;
+  white-space: nowrap;
+}
+
 .path-field {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

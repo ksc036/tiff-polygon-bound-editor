@@ -304,6 +304,8 @@ function mockApi({
   boundsQueue = [savedBounds],
   rootImages = images,
   saveResponse = null,
+  exportResponse = null,
+  delayedExport = false,
   analysisResponse = { analysis: null, hasAnalysis: false },
   recalculateAnalysis = savedAnalysis,
   heatmapResponse,
@@ -312,6 +314,7 @@ function mockApi({
   rawDimensionsById = {},
 } = {}) {
   const calls = [];
+  const exportDeferred = delayedExport ? deferred() : null;
   const fetchMock = vi.fn((input, options = {}) => {
     const url = String(input);
     const method = options.method ?? "GET";
@@ -340,6 +343,19 @@ function mockApi({
         generatedFiles: 6,
         failures: [],
       });
+    }
+    if (url === "/api/export" && method === "POST") {
+      if (exportResponse) return exportResponse;
+      if (exportDeferred) return exportDeferred.promise;
+      return Promise.resolve(
+        new Response(new Blob(["zip"], { type: "application/zip" }), {
+          status: 200,
+          headers: {
+            "content-type": "application/zip",
+            "content-disposition": 'attachment; filename="dataset_export.zip"',
+          },
+        }),
+      );
     }
     const heatmapMatch = url.match(/^\/api\/images\/(scan-a|scan-b|scan-c)\/heatmap\?cellSize=(\d+)$/);
     if (heatmapMatch && method === "GET") {
@@ -431,7 +447,11 @@ function mockApi({
   });
 
   vi.stubGlobal("fetch", fetchMock);
-  return { fetchMock, calls };
+  return {
+    fetchMock,
+    calls,
+    releaseExport: (response) => exportDeferred?.resolve(response),
+  };
 }
 
 describe("App", () => {
@@ -458,6 +478,7 @@ describe("App", () => {
       createObjectURL: vi.fn(() => "blob:roi-overlay"),
       revokeObjectURL: vi.fn(),
     });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -501,6 +522,90 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: "Saved Tissue" })).toBeInTheDocument();
     expect(screen.getByText(/saved bound loaded/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Vertex point-1")).toHaveAttribute("cx", "10");
+  });
+
+  test("replaces Load saved bound and downloads the named ZIP", async () => {
+    const { fetchMock } = mockApi({
+      exportResponse: Promise.resolve(
+        new Response(new Blob(["zip"], { type: "application/zip" }), {
+          status: 200,
+          headers: {
+            "content-type": "application/zip",
+            "content-disposition": 'attachment; filename="study_export_20260727-090000.zip"',
+          },
+        }),
+      ),
+    });
+    let downloadedFilename = "";
+    const click = vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function recordDownload() {
+      downloadedFilename = this.download;
+    });
+    URL.createObjectURL.mockReturnValueOnce("blob:export");
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Download as ZIP" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Load saved bound" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+    expect(downloadedFilename).toBe("study_export_20260727-090000.zip");
+    const exportCall = fetchMock.mock.calls.find(([url]) => url === "/api/export");
+    expect(JSON.parse(exportCall[1].body)).toEqual({
+      calibration: {
+        slope: 0.069676956982087,
+        intercept: 0.067893820336777,
+      },
+      autoSavedImageId: null,
+    });
+    await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:export"));
+  });
+
+  test("saves dirty bounds before exporting and blocks duplicate ZIP requests", async () => {
+    const { fetchMock, releaseExport } = mockApi({ delayedExport: true });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Inside area" }));
+    const button = screen.getByRole("button", { name: "Download as ZIP" });
+
+    fireEvent.click(button);
+
+    await waitFor(() => expect(button).toHaveTextContent("Preparing ZIP..."));
+    expect(button).toBeDisabled();
+    const saveIndex = fetchMock.mock.calls.findIndex(
+      ([url, options]) => url === "/api/images/scan-a/bounds" && options?.method === "PUT",
+    );
+    const exportIndex = fetchMock.mock.calls.findIndex(([url]) => url === "/api/export");
+    expect(saveIndex).toBeGreaterThanOrEqual(0);
+    expect(exportIndex).toBeGreaterThan(saveIndex);
+    expect(JSON.parse(fetchMock.mock.calls[exportIndex][1].body).autoSavedImageId).toBe("scan-a");
+
+    fireEvent.click(button);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/export")).toHaveLength(1);
+    releaseExport(
+      new Response(new Blob(["zip"], { type: "application/zip" }), {
+        status: 200,
+        headers: {
+          "content-type": "application/zip",
+          "content-disposition": 'attachment; filename="study_export.zip"',
+        },
+      }),
+    );
+  });
+
+  test("restores the ZIP button with safe feedback after an export error", async () => {
+    mockApi({
+      exportResponse: Promise.resolve(new Response("not a ZIP", { status: 500 })),
+    });
+    render(<App />);
+
+    const button = await screen.findByRole("button", { name: "Download as ZIP" });
+    fireEvent.click(button);
+
+    expect(await screen.findByText("Export failed.")).toBeInTheDocument();
+    expect(button).toBeEnabled();
   });
 
   test("defaults loaded groups to outside mode and saves selected inside mode", async () => {
@@ -1249,6 +1354,7 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "Load saved bound" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Import previous bound" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download as ZIP" })).toBeEnabled();
   });
 
   test("hides group selection and display controls in Heat Map while preserving group state", async () => {
@@ -1723,18 +1829,6 @@ describe("App", () => {
       "points",
       "10,12 25,13 40,14 20,36",
     );
-  });
-
-  test("reloads saved bounds with Load saved bound", async () => {
-    mockApi({ boundsQueue: [savedBounds, reloadedBounds] });
-
-    render(<App />);
-    expect(await screen.findByRole("button", { name: "Saved Tissue" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /load saved bound/i }));
-
-    expect(await screen.findByRole("button", { name: "Reloaded Bound" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Saved Tissue" })).not.toBeInTheDocument();
   });
 
   test("uses KeyboardEvent.code for KeyP KeyD and KeyM shortcuts", async () => {

@@ -115,6 +115,7 @@ export default function App() {
   const previousHeatmapRequestRef = useRef(0);
   const heatmapBatchRequestRef = useRef(0);
   const heatmapGenerationInFlightRef = useRef(false);
+  const exportInFlightRef = useRef(false);
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [images, setImages] = useState([]);
@@ -180,6 +181,7 @@ export default function App() {
   const [heatmapBatchLoading, setHeatmapBatchLoading] = useState(false);
   const [heatmapBatchError, setHeatmapBatchError] = useState("");
   const [heatmapBatchResult, setHeatmapBatchResult] = useState(null);
+  const [exporting, setExporting] = useState(false);
 
   const activeImage = activeIndex >= 0 ? resolveImageDimensions(images[activeIndex], rawPixels, bounds) : null;
   const previousImage = activeIndex > 0 ? images[activeIndex - 1] : null;
@@ -923,20 +925,19 @@ export default function App() {
     addPointAtPointer(clickPoint);
   }
 
-  async function handleLoadSaved() {
-    if (!activeImage || !confirmReplaceDirty()) return;
-    await loadImage(activeIndex, images);
-  }
-
   async function handleSave() {
-    if (!activeImage || !bounds) return;
-
     try {
-      await saveBounds(bounds);
+      const savedBounds = await saveCurrentBounds();
+      if (!savedBounds) return;
       setStatus("Saved");
     } catch (error) {
       setStatus(`Save failed: ${error.message}`);
     }
+  }
+
+  async function saveCurrentBounds() {
+    if (!activeImage || !bounds) return null;
+    return saveBounds(bounds);
   }
 
   async function saveBounds(boundsToSave) {
@@ -957,6 +958,48 @@ export default function App() {
     setHasBounds(true);
     setDirty(false);
     return savedBounds;
+  }
+
+  async function handleDownloadZip() {
+    if (exportInFlightRef.current || !rootPath) return;
+
+    exportInFlightRef.current = true;
+    setExporting(true);
+    setStatus("");
+
+    try {
+      let autoSavedImageId = null;
+      if (dirty && activeImage) {
+        await saveCurrentBounds();
+        autoSavedImageId = activeImage.id;
+      }
+
+      const response = await fetch("/api/export", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          calibration: {
+            slope: Number(densityCalibration.slope),
+            intercept: Number(densityCalibration.intercept),
+          },
+          autoSavedImageId,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await responseError(response, "Export failed."));
+      }
+
+      downloadBlob(
+        await response.blob(),
+        responseFilename(response.headers.get("content-disposition")),
+      );
+      setStatus("ZIP downloaded");
+    } catch (error) {
+      setStatus(error instanceof Error && error.message ? error.message : "Export failed.");
+    } finally {
+      exportInFlightRef.current = false;
+      setExporting(false);
+    }
   }
 
   async function handleImportPrevious() {
@@ -1137,9 +1180,6 @@ export default function App() {
         </button>
         {imageLayer !== "heatmap" ? (
           <>
-            <button type="button" disabled={!activeImage} onClick={handleLoadSaved}>
-              Load saved bound
-            </button>
             <button type="button" disabled={!activeImage || !bounds} onClick={handleSave}>
               Save
             </button>
@@ -1148,6 +1188,14 @@ export default function App() {
             </button>
           </>
         ) : null}
+        <button
+          type="button"
+          className="export-button"
+          disabled={!rootPath || exporting}
+          onClick={handleDownloadZip}
+        >
+          {exporting ? "Preparing ZIP..." : "Download as ZIP"}
+        </button>
       </form>
 
       <aside className="side-panel" aria-label="Groups">
@@ -2036,6 +2084,55 @@ async function readJsonResponse(response) {
   }
 
   return payload;
+}
+
+async function responseError(response, fallback) {
+  try {
+    const payload = await response.json();
+    return typeof payload?.error === "string" ? payload.error : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function responseFilename(contentDisposition) {
+  const extended = contentDisposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const quoted = contentDisposition?.match(/filename="([^"]+)"/i)?.[1];
+  let candidate = quoted;
+
+  if (extended) {
+    try {
+      candidate = decodeURIComponent(extended);
+    } catch {
+      return "dataset_export.zip";
+    }
+  }
+
+  if (
+    !candidate ||
+    pathBasename(candidate) !== candidate ||
+    !candidate.toLowerCase().endsWith(".zip")
+  ) {
+    return "dataset_export.zip";
+  }
+
+  return candidate;
+}
+
+function pathBasename(value) {
+  return value.split(/[\\/]/).at(-1);
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function loadHeatmapPresets() {

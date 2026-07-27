@@ -67,4 +67,13 @@ describe("application layout CSS", () => {
 
     expect(hiddenLayerRule).toContain("opacity: 0");
   });
+
+  test("keeps the ZIP export action compact in the toolbar", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const exportButtonRule = css.match(/\.export-button\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(exportButtonRule).toContain("min-width: 128px");
+    expect(exportButtonRule).toContain("white-space: nowrap");
+  });
 });
