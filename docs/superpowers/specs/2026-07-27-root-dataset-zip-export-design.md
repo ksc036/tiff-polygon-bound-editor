@@ -4,7 +4,8 @@
 
 Export every image folder under the active root as a readable ZIP dataset that
 contains the original TIFF, source mask, an annotated ROI overview, rendered
-heatmaps for every saved cell size, and an image-specific Excel workbook.
+heatmaps for the fixed `20x20`, `50x50`, and `100x100` pixel cell sizes, and
+an image-specific Excel workbook.
 
 The exported ROI IDs, colors, and statistics must agree with the identifiers
 shown in the application.
@@ -18,7 +19,8 @@ shown in the application.
 - Copy the selected source mask in its original file format.
 - Generate one combined origin-plus-ROI overview PNG per image.
 - Render both Pixel Density and Estimated Collagen Density heatmaps.
-- Discover and export every valid saved heatmap size, not only UI presets.
+- Export only the fixed saved heatmap cell sizes `20x20`, `50x50`, and
+  `100x100`.
 - Add previous-image comparison heatmaps for every image except the first.
 - Compare each image with the immediately preceding image in storage sort order.
 - Use a shared symmetric comparison range for the same metric and cell size
@@ -128,10 +130,11 @@ export must not mutate analysis, skeleton, mask, or heatmap files.
 
 ### Heatmaps
 
-Discover valid saved heatmap directories under each image's `heatmap` folder.
-Validate each JSON payload through the existing heatmap validation rules,
-including current mask metadata. Missing, invalid, or stale heatmaps are
-skipped and reported.
+Look up the `20x20`, `50x50`, and `100x100` directories under each image's
+`heatmap` folder. Validate each JSON payload through the existing heatmap
+validation rules, including current mask metadata. A required size that is
+missing, invalid, or stale is skipped and reported; export does not generate it
+automatically.
 
 ### Calibration
 
@@ -149,10 +152,10 @@ used for all collagen-density heatmaps and Excel values in one export.
 
 Render standalone report PNGs rather than screenshots of the application.
 
-Saved sizes such as `5x5`, `10x10`, and `20x20` describe the width and
-height, in source-image pixels, covered by one heatmap cell. They do not
-describe the number of rows and columns. The output title records both the
-cell size and the resulting grid dimensions.
+The fixed sizes `20x20`, `50x50`, and `100x100` describe the width and height,
+in source-image pixels, covered by one heatmap cell. They do not describe the
+number of rows and columns. The output title records both the cell size and
+the resulting grid dimensions.
 
 Every image includes:
 
@@ -362,7 +365,8 @@ in that image's `statistics` directory so the failure is not silent.
 
 - ZIP contains the expected root and per-image structure;
 - original TIFF and mask bytes are copied unchanged;
-- every saved valid cell size produces both metrics;
+- every valid required size (`20x20`, `50x50`, and `100x100`) produces both
+  metrics;
 - the first image has no comparison files;
 - later images receive compatible previous-image comparisons;
 - missing, stale, and incompatible data do not abort the ZIP;
@@ -388,6 +392,7 @@ Use a real root with multiple images to verify:
 - TIFF and mask files open;
 - ROI overview IDs match the application and workbook;
 - heatmap titles and color bars are unobstructed;
-- all available sizes appear;
+- all three fixed sizes appear when their saved data is valid, and missing
+  sizes are listed in `Export Report`;
 - comparisons are absent only for the first or incompatible images;
 - Excel sheets, numeric cells, filters, colors, and links open correctly.
