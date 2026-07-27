@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
+import unzipper from "unzipper";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
 
@@ -141,6 +142,74 @@ afterEach(async () => {
 });
 
 describe("createApp", () => {
+  test("streams a named ZIP for the active root", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    await writeMask(imageRoot, "T01", "frame001.png");
+    await writeBounds(imageRoot, "T01", validBounds("T01", "frame001.tif"));
+
+    const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+      method: "POST",
+      body: {
+        calibration: { slope: 0.069676956982087, intercept: 0.067893820336777 },
+        autoSavedImageId: "T01",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/zip");
+    expect(response.headers.get("content-disposition")).toMatch(
+      /^attachment; filename=".+_export_\d{8}-\d{6}\.zip"$/,
+    );
+    const archive = await unzipper.Open.buffer(Buffer.from(await response.arrayBuffer()));
+    expect(archive.files.some((file) => file.path.endsWith("/statistics/T01_statistics.xlsx"))).toBe(true);
+  });
+
+  test.each([
+    { slope: 0, intercept: 1 },
+    { slope: null, intercept: 1 },
+  ])("rejects invalid export calibration before streaming", async (calibration) => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+      method: "POST",
+      body: { calibration },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toEqual({ error: "Invalid export calibration." });
+  });
+
+  test("rejects export before streaming when no root is active", async () => {
+    const appRoot = await createTempRoot();
+    const response = await jsonRequest(createApp({ rootDir: appRoot }), "/api/export", {
+      method: "POST",
+      body: { calibration: { slope: 0.1, intercept: 0 } },
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Storage root has not been set." });
+  });
+
+  test("rejects an export auto-save image id that is not an existing image", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+      method: "POST",
+      body: {
+        calibration: { slope: 0.1, intercept: 0 },
+        autoSavedImageId: "",
+      },
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Export image id is invalid." });
+  });
+
   test("serves health status", async () => {
     const rootDir = await createTempRoot();
     const response = await request(createApp({ rootDir }), "/api/health");

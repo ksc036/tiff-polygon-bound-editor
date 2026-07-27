@@ -7,6 +7,12 @@ import { AnalysisError, loadAnalysis, recalculateAnalysis } from "./analysisServ
 import { HeatmapError, generateHeatmapBatch, loadImageHeatmap } from "./heatmapService.js";
 import { validateCellSize } from "./maskHeatmap.js";
 import { createMaskPreview, createRoiOverlay, createSkeletonPreview } from "./previewLayers.js";
+import {
+  ExportError,
+  datasetExportFilename,
+  validateExportCalibration,
+  writeDatasetZip,
+} from "./exportService.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 
@@ -41,6 +47,18 @@ function isInvalidSavedAnalysisJsonError(error) {
 function safeErrorResponse(error) {
   if (isUnknownImageError(error)) {
     return { status: 404, body: { error: "Image not found." } };
+  }
+
+  if (error instanceof ExportError) {
+    const messages = {
+      ROOT_UNSET: "Storage root has not been set.",
+      INVALID_CALIBRATION: "Invalid export calibration.",
+      INVALID_IMAGE: "Export image id is invalid.",
+      EXPORT_ABORTED: "Dataset export was cancelled.",
+      EXPORT_FAILED: "Dataset export failed.",
+    };
+
+    return { status: error.status, body: { error: messages[error.code] ?? "Dataset export failed." } };
   }
 
   if (error instanceof AnalysisError) {
@@ -405,6 +423,58 @@ export function createApp({
       );
     }),
   );
+
+  app.post("/api/export", async (request, response, next) => {
+    try {
+      const calibration = validateExportCalibration(request.body?.calibration);
+      const rootPath = imageStorage.getRoot();
+      if (!rootPath) {
+        throw new ExportError("ROOT_UNSET", "Storage root has not been set.", 400);
+      }
+
+      const requestedImageId = request.body?.autoSavedImageId;
+      if (requestedImageId !== undefined && requestedImageId !== null && typeof requestedImageId !== "string") {
+        throw new ExportError("INVALID_IMAGE", "Export image id is invalid.", 400);
+      }
+      const autoSavedImageId = requestedImageId ?? null;
+      if (autoSavedImageId !== null) {
+        try {
+          imageStorage.getImage(autoSavedImageId);
+        } catch {
+          throw new ExportError("INVALID_IMAGE", "Export image id is invalid.", 400);
+        }
+      }
+
+      const now = new Date();
+      const filename = datasetExportFilename(rootPath, now);
+      const abortController = new AbortController();
+      request.once("aborted", () => abortController.abort());
+      response.once("close", () => {
+        if (!response.writableFinished) abortController.abort();
+      });
+
+      response.status(200);
+      response.setHeader("Content-Type", "application/zip");
+      response.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+      await writeDatasetZip({
+        storage: imageStorage,
+        output: response,
+        calibration,
+        autoSavedImageId,
+        maxImagePixels,
+        now: () => now,
+        signal: abortController.signal,
+      });
+    } catch (error) {
+      if (response.headersSent) {
+        response.destroy(error);
+        return;
+      }
+
+      next(error);
+    }
+  });
 
   if (existsSync(indexPath)) {
     app.use(express.static(distDir));
