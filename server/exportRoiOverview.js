@@ -36,13 +36,14 @@ export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, out
   const svgWidth = legendX + LEGEND_WIDTH + IMAGE_MARGIN;
   const svgHeight = Math.max(imageY + height + labelPadding, imageY + legendHeight);
 
-  const groupLayers = normalizedGroups
-    .map((group) => renderGroupLayer({ group, imageX, imageY, includeOutsideBands: !outsideOverlayDataUrl }))
-    .join("\n");
+  const groupLayers = normalizedGroups.map((group) => renderGroupLayer({ group, imageX, imageY })).join("\n");
   const legend = renderLegend({ groups: normalizedGroups, x: legendX, y: IMAGE_TOP });
   const outsideOverlay = outsideOverlayDataUrl
     ? `<image data-role="outside-overlay" data-alpha="${OUTSIDE_OVERLAY_ALPHA}" x="${imageX}" y="${imageY}" width="${width}" height="${height}" href="${escapeXml(outsideOverlayDataUrl)}" preserveAspectRatio="none"/>`
     : "";
+  const outsideAssignmentRuns = outsideOverlayDataUrl
+    ? ""
+    : renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY });
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
   <rect width="100%" height="100%" fill="#ffffff"/>
@@ -57,6 +58,7 @@ export function buildRoiOverviewSvg({ width, height, normalizedImageDataUrl, out
   <text class="report-title" x="${imageX}" y="28">ROI overview</text>
   <image x="${imageX}" y="${imageY}" width="${width}" height="${height}" href="${escapeXml(normalizedImageDataUrl)}" preserveAspectRatio="none"/>
   ${outsideOverlay}
+  ${outsideAssignmentRuns}
   <rect x="${imageX}" y="${imageY}" width="${width}" height="${height}" fill="none" stroke="#334155" stroke-width="1"/>
   ${groupLayers}
   ${legend}
@@ -86,9 +88,7 @@ export async function renderRoiOverview({ imagePath, bounds, maxImagePixels }) {
 
 export async function buildOutsideRoiOverlay({ width, height, bounds }) {
   validateRoiBounds(bounds, width, height);
-  const groups = bounds.groups
-    .filter((group) => group.analysisMode !== "inside")
-    .map((group) => ({ ...group, roiBands: deriveRoiBands(group.roiLimits) }));
+  const groups = outsideGroupsForAssignment(bounds);
   const assignments = assignOutwardRoiPixels({ width, height, groups });
   const data = new Uint8Array(width * height * 4);
 
@@ -107,9 +107,56 @@ export async function buildOutsideRoiOverlay({ width, height, bounds }) {
   return sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer();
 }
 
-function renderGroupLayer({ group, imageX, imageY, includeOutsideBands }) {
+function renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY }) {
+  const assignments = assignOutwardRoiPixels({ width, height, groups: outsideGroupsForAssignment(bounds) });
+  const runsByOwner = new Map();
+
+  function appendRun(assignment, startX, endX, y) {
+    if (!assignment || startX === endX) return;
+    const color = OUTSIDE_BAND_COLORS[assignment.bandId];
+    if (!color) return;
+
+    const key = `${assignment.groupId}\u0000${assignment.bandId}`;
+    const owner = runsByOwner.get(key) ?? { groupId: assignment.groupId, bandId: assignment.bandId, color, runs: [] };
+    owner.runs.push(
+      `<rect data-role="outside-assignment-run" data-group-id="${escapeXml(assignment.groupId)}" data-band-id="${assignment.bandId}" x="${imageX + startX}" y="${imageY + y}" width="${endX - startX}" height="1"/>`,
+    );
+    runsByOwner.set(key, owner);
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    let startX = 0;
+    let activeAssignment = assignments.get(`0,${y}`) ?? null;
+
+    for (let x = 1; x <= width; x += 1) {
+      const nextAssignment = x < width ? assignments.get(`${x},${y}`) ?? null : null;
+      const sameOwner =
+        activeAssignment?.groupId === nextAssignment?.groupId && activeAssignment?.bandId === nextAssignment?.bandId;
+      if (sameOwner) continue;
+
+      appendRun(activeAssignment, startX, x, y);
+      startX = x;
+      activeAssignment = nextAssignment;
+    }
+  }
+
+  const opacity = OUTSIDE_OVERLAY_ALPHA / 255;
+  const owners = [...runsByOwner.values()]
+    .map(
+      (owner) => `<g data-role="outside-assignment-owner" data-group-id="${escapeXml(owner.groupId)}" data-band-id="${owner.bandId}" fill="rgb(${owner.color.join(",")})">${owner.runs.join("")}</g>`,
+    )
+    .join("");
+  return `<g data-role="outside-assignment-runs" fill-opacity="${opacity}">${owners}</g>`;
+}
+
+function outsideGroupsForAssignment(bounds) {
+  return bounds.groups
+    .filter((group) => group.analysisMode !== "inside")
+    .map((group) => ({ ...group, roiBands: deriveRoiBands(group.roiLimits) }));
+}
+
+function renderGroupLayer({ group, imageX, imageY }) {
   const translatedPath = polygonPath(group.points, imageX, imageY);
-  const maskId = `roi-overview-mask-${group.index}`;
   const centroid = polygonCentroid(group.points);
   const translatedCentroid = { x: centroid.x + imageX, y: centroid.y + imageY };
 
@@ -124,19 +171,8 @@ function renderGroupLayer({ group, imageX, imageY, includeOutsideBands }) {
   const bandLabels = group.bands
     .map((band) => renderOutsideBandLabel({ band, group, centroid: translatedCentroid }))
     .join("");
-  const bandPaths = includeOutsideBands
-    ? `<mask id="${maskId}" maskUnits="userSpaceOnUse" x="${imageX}" y="${imageY}" width="${group.imageWidth}" height="${group.imageHeight}">
-      <rect x="${imageX}" y="${imageY}" width="${group.imageWidth}" height="${group.imageHeight}" fill="#ffffff"/>
-      <path d="${translatedPath}" fill="#000000"/>
-    </mask>
-    <g mask="url(#${maskId})">${[...group.bands]
-      .reverse()
-      .map((band) => `<path d="${translatedPath}" fill="none" stroke="${band.color}" stroke-opacity="${OUTSIDE_OVERLAY_ALPHA / 255}" stroke-width="${band.toPx * 2}"/>`)
-      .join("")}</g>`
-    : "";
 
   return `<g data-role="outside-roi" data-group-id="${escapeXml(group.id)}">
-    ${bandPaths}
     <path d="${translatedPath}" fill="none" stroke="${escapeXml(group.color)}" stroke-width="2"/>
     ${bandLabels}
   </g>`;

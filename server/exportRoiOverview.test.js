@@ -136,9 +136,29 @@ test("labels ROI identities and keeps editable handles out of the report", () =>
   expect(svg).toContain("0-30 px union");
   expect(svg).toContain('data-roi-id="G01-N"');
   expect(svg).not.toContain('<g clip-path=');
-  expect(svg).toContain("stroke-opacity");
+  expect(svg).not.toContain("roi-overview-mask");
   expect(svg).not.toContain('data-role="point-handle"');
   expect(svg).not.toContain("<circle");
+});
+
+test("builds exclusive assignment runs when no raster outside overlay is supplied", () => {
+  const svg = buildRoiOverviewSvg({
+    width: nearbyOutsideBounds.width,
+    height: nearbyOutsideBounds.height,
+    normalizedImageDataUrl: "data:image/png;base64,AA==",
+    bounds: nearbyOutsideBounds,
+  });
+  const [, imageX, imageY] = svg.match(/<image x="([^"]+)" y="([^"]+)"/) ?? [];
+  const farRuns = [...svg.matchAll(/<rect data-role="outside-assignment-run" data-group-id="a-left" data-band-id="far" x="([^"]+)" y="([^"]+)" width="([^"]+)" height="1"/g)];
+  const targetX = Number(imageX) + 10;
+  const targetY = Number(imageY) + 6;
+
+  expect(svg).toContain('data-role="outside-assignment-runs"');
+  expect(svg).not.toContain("roi-overview-mask");
+  expect(svg).not.toContain("stroke-opacity");
+  expect(
+    farRuns.some(([, x, y, width]) => Number(y) === targetY && Number(x) <= targetX && targetX < Number(x) + Number(width)),
+  ).toBe(true);
 });
 
 test("renders one semi-transparent outside overlay from canonical nearest-group assignments", async () => {
