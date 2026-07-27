@@ -40,6 +40,7 @@ const ROI_BAND_LABELS = { near: "가까움", mid: "중간", far: "멀리" };
 const ROI_BAND_COLORS = { near: "#ef4444", mid: "#f59e0b", far: "#3b82f6" };
 const ROI_MIN_LIMIT = 1;
 const ROI_LIMIT_STEP = 1;
+const ROI_LABEL_PADDING = 4;
 const POINT_ORDER_COLLAPSED_STAGE_GAIN = 24;
 const ROI_SETTINGS_COLLAPSED_STAGE_GAIN = 56;
 const ANALYSIS_PANEL_HEIGHT_KEY = "raw16-editor-analysis-panel-height";
@@ -1163,7 +1164,7 @@ export default function App() {
   const roiOverlayLabels = useMemo(
     () =>
       imageLayer !== "heatmap" && showRoiOverlay
-        ? buildRoiOverlayLabels(visiblePolygons)
+        ? buildRoiOverlayLabels(visiblePolygons, activeImage)
         : [],
     [imageLayer, showRoiOverlay, visiblePolygons],
   );
@@ -1283,8 +1284,8 @@ export default function App() {
                     <span className="roi-id" data-group-color={group.color}>
                       {groupDisplayId(groupIndex)}
                     </span>
-                    <span>{group.name}</span>
-                    <small>{group.points.length} / {ANALYSIS_MODE_LABELS[group.analysisMode] ?? ANALYSIS_MODE_LABELS.outside}</small>
+                    <span className="group-name">{group.name}</span>
+                    <small className="group-summary">{group.points.length} / {ANALYSIS_MODE_LABELS[group.analysisMode] ?? ANALYSIS_MODE_LABELS.outside}</small>
                     <span className={groupVisible(groupDrawVisibility, group.id) ? "group-state on" : "group-state off"}>
                       {groupVisible(groupDrawVisibility, group.id) ? "Draw on" : "Draw off"}
                     </span>
@@ -2121,7 +2122,7 @@ function buildRoiPreviewGroups(polygons, image) {
     });
 }
 
-function buildRoiOverlayLabels(polygons) {
+function buildRoiOverlayLabels(polygons, image) {
   return polygons
     .filter((group) => group.ordered.length >= 3)
     .flatMap((group) => {
@@ -2136,18 +2137,106 @@ function buildRoiOverlayLabels(polygons) {
         }];
       }
 
-      const firstPoint = group.ordered[0];
-      const direction = normalizedVector({ x: firstPoint.x - centroid.x, y: firstPoint.y - centroid.y }) ?? { x: 1, y: 0 };
-      return deriveRoiBands(groupRoiLimits(group)).map((band) => {
-        const distance = (band.fromPx + band.toPx) / 2;
-        return {
-          roiId: roiDisplayId({ groupIndex: group.groupIndex, analysisMode, bandId: band.id }),
-          color: ROI_BAND_COLORS[band.id] ?? group.color,
-          x: firstPoint.x + direction.x * distance,
-          y: firstPoint.y + direction.y * distance,
-        };
-      });
+      return buildOutsideRoiLabels(group, centroid, image);
     });
+}
+
+function buildOutsideRoiLabels(group, centroid, image) {
+  const bands = deriveRoiBands(groupRoiLimits(group));
+  const firstPoint = group.ordered[0];
+  const preferredDirection = normalizedVector({ x: firstPoint.x - centroid.x, y: firstPoint.y - centroid.y });
+  const rays = [
+    ...(preferredDirection ? [{ origin: firstPoint, direction: preferredDirection }] : []),
+    ...outwardEdgeRays(group.ordered),
+  ];
+  const labelsByRay = rays.map((ray) => bands.map((band) => exteriorLabelOnRay(ray, band, group.ordered, image)));
+  const completeLabels = labelsByRay.find((labels) => labels.every(Boolean));
+  const labels = completeLabels ?? bands.map((band, index) => labelsByRay.map((candidate) => candidate[index]).find(Boolean));
+
+  return labels.flatMap((label, index) => {
+    if (!label) return [];
+    const band = bands[index];
+    return [{
+      roiId: roiDisplayId({ groupIndex: group.groupIndex, analysisMode: "outside", bandId: band.id }),
+      color: ROI_BAND_COLORS[band.id] ?? group.color,
+      ...label,
+    }];
+  });
+}
+
+function exteriorLabelOnRay(ray, band, polygon, image) {
+  const interval = rayIntervalInsidePaddedImage(ray, image, ROI_LABEL_PADDING);
+  if (!interval) return null;
+
+  const minDistance = Math.max(interval.min, band.fromPx + 0.5);
+  const maxDistance = Math.min(interval.max, band.toPx - 0.5);
+  if (maxDistance < minDistance) return null;
+
+  const midpoint = (band.fromPx + band.toPx) / 2;
+  const distance = clamp(midpoint, minDistance, maxDistance);
+  const point = pointAlongRay(ray, distance);
+  return pointIsExteriorAlongRay(ray, point, distance, polygon) ? point : null;
+}
+
+function outwardEdgeRays(points) {
+  const winding = Math.sign(polygonSignedArea(points)) || 1;
+  return points.map((start, index) => {
+    const end = points[(index + 1) % points.length];
+    const edge = { x: end.x - start.x, y: end.y - start.y };
+    const tangent = normalizedVector(edge);
+    if (!tangent) return null;
+    const direction = winding > 0
+      ? { x: tangent.y, y: -tangent.x }
+      : { x: -tangent.y, y: tangent.x };
+    return {
+      origin: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 },
+      direction,
+    };
+  }).filter(Boolean);
+}
+
+function rayIntervalInsidePaddedImage(ray, image, padding) {
+  if (!Number.isFinite(image?.width) || !Number.isFinite(image?.height)) return null;
+  const minX = padding;
+  const maxX = image.width - 1 - padding;
+  const minY = padding;
+  const maxY = image.height - 1 - padding;
+  if (maxX < minX || maxY < minY) return null;
+
+  const xInterval = axisRayInterval(ray.origin.x, ray.direction.x, minX, maxX);
+  const yInterval = axisRayInterval(ray.origin.y, ray.direction.y, minY, maxY);
+  if (!xInterval || !yInterval) return null;
+
+  const min = Math.max(0, xInterval.min, yInterval.min);
+  const max = Math.min(xInterval.max, yInterval.max);
+  return max >= min ? { min, max } : null;
+}
+
+function axisRayInterval(origin, direction, min, max) {
+  if (Math.abs(direction) <= Number.EPSILON) {
+    return origin >= min && origin <= max ? { min: -Infinity, max: Infinity } : null;
+  }
+
+  const first = (min - origin) / direction;
+  const second = (max - origin) / direction;
+  return { min: Math.min(first, second), max: Math.max(first, second) };
+}
+
+function pointIsExteriorAlongRay(ray, point, distance, polygon) {
+  if (pointInPolygon(point, polygon)) return false;
+
+  for (let step = 1; step <= 6; step += 1) {
+    const probe = pointAlongRay(ray, (distance * step) / 6);
+    if (pointInPolygon(probe, polygon)) return false;
+  }
+  return true;
+}
+
+function pointAlongRay(ray, distance) {
+  return {
+    x: ray.origin.x + ray.direction.x * distance,
+    y: ray.origin.y + ray.direction.y * distance,
+  };
 }
 
 function polygonCentroid(points) {
@@ -2170,6 +2259,42 @@ function polygonCentroid(points) {
 
   const totals = points.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }), { x: 0, y: 0 });
   return { x: totals.x / points.length, y: totals.y / points.length };
+}
+
+function polygonSignedArea(points) {
+  return points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return sum + point.x * next.y - next.x * point.y;
+  }, 0) / 2;
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+
+  for (let index = 0, previousIndex = polygon.length - 1; index < polygon.length; previousIndex = index, index += 1) {
+    const current = polygon[index];
+    const previous = polygon[previousIndex];
+    if (pointOnSegment(point, previous, current)) return true;
+
+    const intersects =
+      current.y > point.y !== previous.y > point.y &&
+      point.x < ((previous.x - current.x) * (point.y - current.y)) / (previous.y - current.y) + current.x;
+    if (intersects) inside = !inside;
+  }
+
+  return inside;
+}
+
+function pointOnSegment(point, start, end) {
+  const cross = (point.y - start.y) * (end.x - start.x) - (point.x - start.x) * (end.y - start.y);
+  if (Math.abs(cross) > 1e-6) return false;
+
+  return (
+    point.x >= Math.min(start.x, end.x) - 1e-6 &&
+    point.x <= Math.max(start.x, end.x) + 1e-6 &&
+    point.y >= Math.min(start.y, end.y) - 1e-6 &&
+    point.y <= Math.max(start.y, end.y) + 1e-6
+  );
 }
 
 function normalizedVector(vector) {

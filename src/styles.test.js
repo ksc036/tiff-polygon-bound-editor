@@ -76,4 +76,16 @@ describe("application layout CSS", () => {
     expect(exportButtonRule).toContain("min-width: 128px");
     expect(exportButtonRule).toContain("white-space: nowrap");
   });
+
+  test("lays out group identity with named roles instead of child-order selectors", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const groupSelectRule = css.match(/\.group-select-button\s*\{[^}]+\}/)?.[0] ?? "";
+    const groupNameRule = css.match(/\.group-name\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(css).not.toContain(".group-select-button span:nth-child");
+    expect(groupSelectRule).toContain("grid-template-columns: 10px auto minmax(0, 1fr) auto");
+    expect(groupNameRule).toContain("min-width: 0");
+    expect(groupNameRule).toContain("text-overflow: ellipsis");
+  });
 });

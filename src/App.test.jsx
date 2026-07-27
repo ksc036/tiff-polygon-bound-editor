@@ -963,12 +963,78 @@ describe("App", () => {
     expect(screen.queryByLabelText("ROI ID G01-A")).not.toBeInTheDocument();
   });
 
+  test("keeps outside ROI labels in-bounds and exterior when the polygon touches an image edge", async () => {
+    const points = [
+      { id: "p1", x: 0, y: 15 },
+      { id: "p2", x: 25, y: 15 },
+      { id: "p3", x: 25, y: 55 },
+      { id: "p4", x: 0, y: 55 },
+    ];
+    mockApi({
+      boundsQueue: [{
+        ...savedBounds,
+        groups: [{ ...savedBounds.groups[0], points, roiLimits: { near: 10, mid: 20, far: 30 } }],
+      }],
+    });
+    render(<App />);
+
+    for (const roiId of ["G01-N", "G01-M", "G01-F"]) {
+      const label = await screen.findByLabelText(`ROI ID ${roiId}`);
+      const point = svgPoint(label);
+      expect(point.x).toBeGreaterThanOrEqual(4);
+      expect(point.x).toBeLessThanOrEqual(95);
+      expect(point.y).toBeGreaterThanOrEqual(4);
+      expect(point.y).toBeLessThanOrEqual(75);
+      expect(pointInPolygon(point, points)).toBe(false);
+    }
+  });
+
+  test("keeps concave outside ROI labels exterior instead of placing them in the concavity", async () => {
+    const points = [
+      { id: "p1", x: 10, y: 10 },
+      { id: "p2", x: 70, y: 10 },
+      { id: "p3", x: 70, y: 70 },
+      { id: "p4", x: 45, y: 70 },
+      { id: "p5", x: 45, y: 30 },
+      { id: "p6", x: 30, y: 30 },
+      { id: "p7", x: 30, y: 70 },
+      { id: "p8", x: 10, y: 70 },
+    ];
+    mockApi({
+      boundsQueue: [{
+        ...savedBounds,
+        groups: [{ ...savedBounds.groups[0], points, roiLimits: { near: 8, mid: 16, far: 24 } }],
+      }],
+    });
+    render(<App />);
+
+    for (const roiId of ["G01-N", "G01-M", "G01-F"]) {
+      const point = svgPoint(await screen.findByLabelText(`ROI ID ${roiId}`));
+      expect(Number.isFinite(point.x)).toBe(true);
+      expect(Number.isFinite(point.y)).toBe(true);
+      expect(point.x).toBeGreaterThanOrEqual(4);
+      expect(point.x).toBeLessThanOrEqual(95);
+      expect(point.y).toBeGreaterThanOrEqual(4);
+      expect(point.y).toBeLessThanOrEqual(75);
+      expect(pointInPolygon(point, points)).toBe(false);
+    }
+  });
+
   test("hides ROI labels in Heat Map mode", async () => {
     mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
     render(<App />);
 
     expect(await screen.findByLabelText("ROI ID G01-N")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Heat Map" }));
+    expect(screen.queryByLabelText("ROI ID G01-N")).not.toBeInTheDocument();
+  });
+
+  test("removes ROI labels immediately when Draw active group is turned off", async () => {
+    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
+    render(<App />);
+
+    expect(await screen.findByLabelText("ROI ID G01-N")).toBeVisible();
+    fireEvent.click(screen.getByLabelText("Draw active group"));
     expect(screen.queryByLabelText("ROI ID G01-N")).not.toBeInTheDocument();
   });
 
@@ -2292,3 +2358,26 @@ describe("App", () => {
     expect(screen.queryByLabelText("Vertex point-4")).not.toBeInTheDocument();
   });
 });
+
+function svgPoint(element) {
+  return {
+    x: Number(element.getAttribute("x")),
+    y: Number(element.getAttribute("y")),
+  };
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+
+  for (let index = 0, previousIndex = polygon.length - 1; index < polygon.length; previousIndex = index, index += 1) {
+    const current = polygon[index];
+    const previous = polygon[previousIndex];
+    const intersects =
+      current.y > point.y !== previous.y > point.y &&
+      point.x < ((previous.x - current.x) * (point.y - current.y)) / (previous.y - current.y) + current.x;
+
+    if (intersects) inside = !inside;
+  }
+
+  return inside;
+}

@@ -240,7 +240,7 @@ input[type="range"] {
 
 .group-select-button {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  grid-template-columns: 10px auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -252,12 +252,14 @@ input[type="range"] {
   background: #263443;
 }
 
-.group-select-button span:nth-child(2) {
+.group-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.group-select-button small {
+.group-summary {
   color: #9faeba;
 }
 
@@ -276,7 +278,7 @@ input[type="range"] {
 }
 
 .group-state {
-  grid-column: 2 / -1;
+  grid-column: 3 / -1;
   justify-self: start;
   border: 1px solid #33404c;
   border-radius: 999px;
