@@ -116,7 +116,14 @@ async function request(app, pathname, options = {}) {
   try {
     await new Promise((resolve) => server.once("listening", resolve));
     const { port } = server.address();
-    return await fetch(`http://127.0.0.1:${port}${pathname}`, options);
+    const response = await fetch(`http://127.0.0.1:${port}${pathname}`, options);
+    const body = await response.arrayBuffer();
+
+    return new Response(body.byteLength > 0 ? body : null, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => {
