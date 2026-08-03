@@ -864,6 +864,13 @@ export default function App() {
     }
   }
 
+  function handleHeatmapBatchRootChange(event) {
+    heatmapBatchRequestRef.current += 1;
+    setHeatmapBatchRoot(event.target.value);
+    setHeatmapBatchError("");
+    setHeatmapBatchResult(null);
+  }
+
   async function handleGenerateHeatmaps() {
     if (!heatmapBatchRoot || heatmapGenerationInFlightRef.current) return;
     heatmapGenerationInFlightRef.current = true;
@@ -1387,9 +1394,18 @@ export default function App() {
               Choose Folder
             </button>
           </div>
-          <span className="heatmap-batch-path" title={heatmapBatchRoot || undefined}>
-            {heatmapBatchRoot || "No folder selected"}
-          </span>
+          <label className="heatmap-batch-path" htmlFor="heatmap-batch-path">
+            <span>Batch path</span>
+            <input
+              id="heatmap-batch-path"
+              type="text"
+              aria-label="Heatmap batch path"
+              value={heatmapBatchRoot}
+              placeholder="No folder selected"
+              disabled={heatmapBatchLoading}
+              onChange={handleHeatmapBatchRootChange}
+            />
+          </label>
           <div className="heatmap-preset-fields">
             {Object.entries(FIXED_HEATMAP_PRESETS).map(([preset, value]) => (
               <label key={preset}>

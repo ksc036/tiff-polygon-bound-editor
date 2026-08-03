@@ -198,9 +198,19 @@ input[type="range"] {
 }
 
 .heatmap-batch-path {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  color: #9faeba;
+  font-size: 0.76rem;
+}
+
+.heatmap-batch-path input {
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 7px;
   overflow: hidden;
-  color: #7f8c99;
-  font-size: 0.78rem;
+  color: #d8e0e7;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -1885,7 +1885,7 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
-    await screen.findByText("/selected/heatmap-root");
+    expect(await screen.findByLabelText("Heatmap batch path")).toHaveValue("/selected/heatmap-root");
     expect(screen.getByText("20 x 20")).toBeInTheDocument();
     expect(screen.getByText("50 x 50")).toBeInTheDocument();
     expect(screen.getByText("100 x 100")).toBeInTheDocument();
@@ -1901,6 +1901,41 @@ describe("App", () => {
       });
     });
     expect(screen.getByText(/2 discovered/)).toHaveTextContent("6 files");
+  });
+
+  test("generates Heatmaps from a manually entered absolute path", async () => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+
+    const pathInput = await screen.findByLabelText("Heatmap batch path");
+    fireEvent.change(pathInput, { target: { value: "/manual/heatmap-root" } });
+    fireEvent.click(screen.getByRole("button", { name: "Generate Heatmaps" }));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, options]) => url === "/api/heatmaps/generate" && options?.method === "POST",
+      );
+      expect(JSON.parse(call[1].body)).toEqual({
+        rootPath: "/manual/heatmap-root",
+        cellSizes: [20, 50, 100],
+      });
+    });
+  });
+
+  test("keeps a manually edited Heatmap path when an older picker request resolves", async () => {
+    const pendingSelection = deferred();
+    mockApi({ selectHeatmapFolderResponse: () => pendingSelection.promise });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
+    const pathInput = screen.getByLabelText("Heatmap batch path");
+    fireEvent.change(pathInput, { target: { value: "/manual/newer-root" } });
+
+    await act(async () => {
+      pendingSelection.resolve(await jsonResponse({ rootPath: "/picker/stale-root" }));
+    });
+
+    expect(pathInput).toHaveValue("/manual/newer-root");
   });
 
   test("ignores a pending folder response after generation starts and disables folder selection", async () => {
@@ -1920,7 +1955,8 @@ describe("App", () => {
 
     const chooseButton = await screen.findByRole("button", { name: "Choose heatmap folder" });
     fireEvent.click(chooseButton);
-    await screen.findByText("/selected/heatmap-root");
+    const pathInput = await screen.findByLabelText("Heatmap batch path");
+    await waitFor(() => expect(pathInput).toHaveValue("/selected/heatmap-root"));
     fireEvent.click(chooseButton);
     fireEvent.click(screen.getByRole("button", { name: "Generate Heatmaps" }));
 
@@ -1928,8 +1964,7 @@ describe("App", () => {
     await act(async () => {
       pendingSelection.resolve(await jsonResponse({ rootPath: "/stale/heatmap-root" }));
     });
-    expect(screen.getByText("/selected/heatmap-root")).toBeInTheDocument();
-    expect(screen.queryByText("/stale/heatmap-root")).not.toBeInTheDocument();
+    expect(pathInput).toHaveValue("/selected/heatmap-root");
 
     await act(async () => {
       pendingGeneration.resolve(await jsonResponse({
@@ -1952,7 +1987,8 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
-    await screen.findByText("/selected/heatmap-root");
+    const pathInput = await screen.findByLabelText("Heatmap batch path");
+    await waitFor(() => expect(pathInput).toHaveValue("/selected/heatmap-root"));
     const generateButton = screen.getByRole("button", { name: "Generate Heatmaps" });
     const chooseButton = screen.getByRole("button", { name: "Choose heatmap folder" });
     act(() => {
