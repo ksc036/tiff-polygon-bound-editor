@@ -5,6 +5,7 @@ import sharp from "sharp";
 import unzipper from "unzipper";
 import { afterEach, describe, expect, test } from "vitest";
 import { createApp } from "./app.js";
+import { FOLDER_PICKER_CODES, FolderPickerError } from "./folderPicker.js";
 import { createStorage } from "./storage.js";
 
 const tempRoots = [];
@@ -304,7 +305,7 @@ describe("createApp", () => {
     });
   });
 
-  test("selects root with an injected picker and returns safe cancelled errors", async () => {
+  test("selects root with an injected picker", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
     await writeImage(imageRoot, "selected-stack-sequence_T01", "frame001.tif");
@@ -320,22 +321,45 @@ describe("createApp", () => {
       rootPath: imageRoot,
       images: [{ id: "selected-stack-sequence_T01", imageFolder: "selected-stack-sequence_T01", imageFile: "frame001.tif" }],
     });
+  });
 
-    const cancelledResponse = await jsonRequest(
-      createApp({
-        rootDir: appRoot,
-        selectRoot: async () => {
-          throw new Error(`User cancelled selecting ${imageRoot}`);
-        },
-      }),
-      "/api/root/select",
-      { method: "POST" },
-    );
+  test.each([
+    [FOLDER_PICKER_CODES.CANCELLED, 400, "Root selection was cancelled."],
+    [
+      FOLDER_PICKER_CODES.UNAVAILABLE,
+      503,
+      "Folder picker is unavailable. Enter an absolute path in Root path and press Set root.",
+    ],
+    [
+      FOLDER_PICKER_CODES.FAILED,
+      500,
+      "Folder picker failed. Enter an absolute path in Root path and press Set root.",
+    ],
+  ])("maps root picker %s to a safe response", async (code, status, message) => {
+    const secretPath = "/private/secret/image-root";
+    const app = createApp({
+      rootDir: await createTempRoot(),
+      selectRoot: async () => {
+        throw new FolderPickerError(code, `native failure at ${secretPath}`);
+      },
+    });
 
-    expect(cancelledResponse.status).toBe(400);
-    const body = await cancelledResponse.json();
-    expect(body.error).toBe("Root selection was cancelled or failed.");
-    expect(JSON.stringify(body)).not.toContain(imageRoot);
+    const response = await jsonRequest(app, "/api/root/select", { method: "POST" });
+    expect(response.status).toBe(status);
+    const body = await response.json();
+    expect(body).toEqual({ error: message });
+    expect(JSON.stringify(body)).not.toContain(secretPath);
+  });
+
+  test("reports an invalid selected image root separately from picker failures", async () => {
+    const invalidRoot = await createTempRoot();
+    const response = await jsonRequest(createApp({
+      rootDir: await createTempRoot(),
+      selectRoot: async () => invalidRoot,
+    }), "/api/root/select", { method: "POST" });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Selected folder is not a valid image root." });
   });
 
   test("POST /api/root invalid path error does not include the submitted absolute path", async () => {
@@ -371,22 +395,54 @@ describe("createApp", () => {
     await expect((await request(app, "/api/root")).json()).resolves.toMatchObject({ rootPath: imageRoot });
   });
 
-  test("heatmap folder selection returns a safe cancellation error", async () => {
-    const appRoot = await createTempRoot();
-    const imageRoot = await createTempRoot();
+  test.each([
+    [FOLDER_PICKER_CODES.CANCELLED, 400, "Heatmap folder selection was cancelled."],
+    [
+      FOLDER_PICKER_CODES.UNAVAILABLE,
+      503,
+      "Heatmap folder picker is unavailable. Enter an absolute path in the Heatmap batch path field.",
+    ],
+    [
+      FOLDER_PICKER_CODES.FAILED,
+      500,
+      "Heatmap folder picker failed. Enter an absolute path in the Heatmap batch path field.",
+    ],
+  ])("maps Heatmap picker %s to a safe response", async (code, status, message) => {
+    const secretPath = "/private/secret/heatmap-root";
     const app = createApp({
-      rootDir: appRoot,
+      rootDir: await createTempRoot(),
       selectHeatmapRoot: async () => {
-        throw new Error(`User cancelled selecting ${imageRoot}`);
+        throw new FolderPickerError(code, `native failure at ${secretPath}`);
       },
     });
 
     const response = await jsonRequest(app, "/api/heatmaps/select-folder", { method: "POST" });
-
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(status);
     const body = await response.json();
-    expect(body).toEqual({ error: "Heatmap folder selection was cancelled or failed." });
-    expect(JSON.stringify(body)).not.toContain(imageRoot);
+    expect(body).toEqual({ error: message });
+    expect(JSON.stringify(body)).not.toContain(secretPath);
+  });
+
+  test.each([
+    [
+      "/api/root/select",
+      { selectRoot: async () => { throw new Error("unexpected native failure"); } },
+      "Folder picker failed. Enter an absolute path in Root path and press Set root.",
+    ],
+    [
+      "/api/heatmaps/select-folder",
+      { selectHeatmapRoot: async () => { throw new Error("unexpected native failure"); } },
+      "Heatmap folder picker failed. Enter an absolute path in the Heatmap batch path field.",
+    ],
+  ])("maps an unknown selection error from %s to a safe 500", async (endpoint, picker, message) => {
+    const response = await jsonRequest(
+      createApp({ rootDir: await createTempRoot(), ...picker }),
+      endpoint,
+      { method: "POST" },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: message });
   });
 
   test("generates requested preset sizes and returns a safe summary", async () => {

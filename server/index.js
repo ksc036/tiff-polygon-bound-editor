@@ -1,36 +1,15 @@
-import { execFile } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 import path from "node:path";
 import { createApp } from "./app.js";
-
-const execFileAsync = promisify(execFile);
-
-export async function chooseFolderWithAppleScript(prompt = "Choose image sequence root folder") {
-  try {
-    const { stdout } = await execFileAsync("osascript", [
-      "-e",
-      `POSIX path of (choose folder with prompt ${JSON.stringify(prompt)})`,
-    ]);
-    const selectedPath = stdout.trim();
-
-    if (!selectedPath) {
-      throw new Error("No folder selected.");
-    }
-
-    return selectedPath;
-  } catch (error) {
-    throw new Error("Root selection was cancelled or failed.", { cause: error });
-  }
-}
+import { chooseFolder } from "./folderPicker.js";
 
 export function startServer({ rootDir = process.cwd(), port = process.env.PORT || 3000 } = {}) {
   const app = createApp({
     rootDir,
     dataDir: path.join(rootDir, "data"),
     initialRoot: process.env.BOUND_EDITOR_ROOT || null,
-    selectRoot: () => chooseFolderWithAppleScript("Choose image sequence root folder"),
-    selectHeatmapRoot: () => chooseFolderWithAppleScript("Choose heatmap batch folder"),
+    selectRoot: () => chooseFolder({ prompt: "Choose image sequence root folder" }),
+    selectHeatmapRoot: () => chooseFolder({ prompt: "Choose heatmap batch folder" }),
   });
 
   return app.listen(port, () => {

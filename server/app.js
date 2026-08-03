@@ -13,6 +13,7 @@ import {
   validateExportCalibration,
   writeDatasetZip,
 } from "./exportService.js";
+import { FOLDER_PICKER_CODES, FolderPickerError } from "./folderPicker.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 
@@ -27,7 +28,7 @@ function isUnknownImageError(error) {
 }
 
 function isInvalidStorageRootError(error) {
-  return /storage root must be an absolute path|storage root does not exist|storage root has no image sequence folders/i.test(
+  return /storage root must be an absolute path|storage root does not exist|storage root has no image(?: sequence)? folders/i.test(
     error.message,
   );
 }
@@ -112,6 +113,35 @@ function safeErrorResponse(error) {
   }
 
   return { status: 500, body: { error: "Server error." } };
+}
+
+function folderPickerResponse(error, { heatmap = false } = {}) {
+  const messages = heatmap
+    ? {
+        [FOLDER_PICKER_CODES.CANCELLED]: "Heatmap folder selection was cancelled.",
+        [FOLDER_PICKER_CODES.UNAVAILABLE]:
+          "Heatmap folder picker is unavailable. Enter an absolute path in the Heatmap batch path field.",
+        [FOLDER_PICKER_CODES.FAILED]:
+          "Heatmap folder picker failed. Enter an absolute path in the Heatmap batch path field.",
+      }
+    : {
+        [FOLDER_PICKER_CODES.CANCELLED]: "Root selection was cancelled.",
+        [FOLDER_PICKER_CODES.UNAVAILABLE]:
+          "Folder picker is unavailable. Enter an absolute path in Root path and press Set root.",
+        [FOLDER_PICKER_CODES.FAILED]:
+          "Folder picker failed. Enter an absolute path in Root path and press Set root.",
+      };
+
+  const code = error instanceof FolderPickerError
+    ? error.code
+    : FOLDER_PICKER_CODES.FAILED;
+  const status = code === FOLDER_PICKER_CODES.CANCELLED
+    ? 400
+    : code === FOLDER_PICKER_CODES.UNAVAILABLE
+      ? 503
+      : 500;
+
+  return { status, body: { error: messages[code] ?? messages[FOLDER_PICKER_CODES.FAILED] } };
 }
 
 function validOptionalString(value) {
@@ -224,7 +254,13 @@ export function createApp({
       try {
         await imageStorage.selectRootWithFinder();
       } catch (error) {
-        response.status(400).json({ error: "Root selection was cancelled or failed." });
+        if (isInvalidStorageRootError(error)) {
+          response.status(400).json({ error: "Selected folder is not a valid image root." });
+          return;
+        }
+
+        const safeError = folderPickerResponse(error);
+        response.status(safeError.status).json(safeError.body);
         return;
       }
 
@@ -237,8 +273,9 @@ export function createApp({
     asyncRoute(async (_request, response) => {
       try {
         response.json({ rootPath: await selectHeatmapRoot() });
-      } catch {
-        response.status(400).json({ error: "Heatmap folder selection was cancelled or failed." });
+      } catch (error) {
+        const safeError = folderPickerResponse(error, { heatmap: true });
+        response.status(safeError.status).json(safeError.body);
       }
     }),
   );
