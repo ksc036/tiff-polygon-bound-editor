@@ -25,7 +25,7 @@ describe("chooseFolder", () => {
     );
   });
 
-  test("uses an STA PowerShell FolderBrowserDialog and passes the prompt through env", async () => {
+  test("uses a modern Windows IFileOpenDialog and passes the prompt through env", async () => {
     const runCommand = vi.fn().mockResolvedValue({ stdout: "C:\\\\Fiber data 한글\r\n", stderr: "" });
 
     await expect(chooseFolder({
@@ -37,13 +37,36 @@ describe("chooseFolder", () => {
 
     expect(runCommand).toHaveBeenCalledWith(
       "powershell.exe",
-      ["-NoProfile", "-STA", "-Command", expect.stringContaining("FolderBrowserDialog")],
+      ["-NoProfile", "-STA", "-Command", expect.any(String)],
       expect.objectContaining({
         encoding: "utf8",
         windowsHide: true,
         env: expect.objectContaining({ FOLDER_PICKER_PROMPT: "Choose heatmap batch folder" }),
       }),
     );
+
+    const script = runCommand.mock.calls[0][1][3];
+    expect(script).toContain("interface IFileOpenDialog");
+    expect(script).toContain("FOS_PICKFOLDERS");
+    expect(script).toContain("FOS_FORCEFILESYSTEM");
+    expect(script).toContain("FOS_PATHMUSTEXIST");
+    expect(script).toContain("FOS_NOCHANGEDIR");
+    expect(script).toContain("SIGDN_FILESYSPATH");
+    expect(script).not.toContain("FolderBrowserDialog");
+  });
+
+  test("owns the Windows picker with a hidden topmost form and always disposes it", async () => {
+    const runCommand = vi.fn().mockResolvedValue({ stdout: "C:\\\\data", stderr: "" });
+
+    await chooseFolder({ platform: "win32", runCommand, env: {} });
+
+    const script = runCommand.mock.calls[0][1][3];
+    expect(script).toContain("$owner.TopMost = $true");
+    expect(script).toContain("$owner.ShowInTaskbar = $false");
+    expect(script).toContain("$owner.Opacity = 0");
+    expect(script).toContain("$owner.Show()");
+    expect(script).toContain("PickFolder($owner.Handle");
+    expect(script).toMatch(/finally\s*\{[\s\S]*\$owner\.Close\(\)[\s\S]*\$owner\.Dispose\(\)/);
   });
 
   test("configures PowerShell stdout as UTF-8 before returning the selected path", async () => {
