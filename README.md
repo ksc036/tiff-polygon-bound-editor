@@ -31,7 +31,7 @@ absolute path directly.
 Native folder selection uses:
 
 - macOS: AppleScript through `osascript`;
-- Windows: PowerShell `System.Windows.Forms.FolderBrowserDialog`;
+- Windows: PowerShell with the modern Windows Common Item Dialog (`IFileOpenDialog`);
 - Linux: `zenity`, with `kdialog` as a fallback.
 
 On Linux without `zenity`/`kdialog`, or on a headless server, enter an absolute
