@@ -46,11 +46,76 @@ describe("chooseFolder", () => {
     );
 
     const script = runCommand.mock.calls[0][1][3];
-    expect(script).toContain("interface IFileOpenDialog");
-    expect(script).toContain("FOS_PICKFOLDERS");
-    expect(script).toContain("FOS_FORCEFILESYSTEM");
-    expect(script).toContain("FOS_PATHMUSTEXIST");
-    expect(script).toContain("FOS_NOCHANGEDIR");
+    expect(script).toMatch(
+      /\[Guid\("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7"\)\]\s*internal class FileOpenDialogComObject/,
+    );
+    expect(script).toMatch(
+      /\[Guid\("D57C7288-D4AD-4768-BE02-9D969532D960"\)\]\s*\[InterfaceType\(ComInterfaceType\.InterfaceIsIUnknown\)\]\s*internal interface IFileOpenDialog/,
+    );
+    expect(script).toMatch(
+      /\[Guid\("43826D1E-E718-42EE-BC55-A1E261C37BFE"\)\]\s*\[InterfaceType\(ComInterfaceType\.InterfaceIsIUnknown\)\]\s*internal interface IShellItem/,
+    );
+
+    const fileOpenDialogBody = script.match(
+      /internal interface IFileOpenDialog\s*\{([\s\S]*?)\n\}/,
+    )?.[1];
+    expect(fileOpenDialogBody).toBeDefined();
+    expect(fileOpenDialogBody.split("\n").map((line) => line.trim()).filter(Boolean)).toEqual([
+      "[PreserveSig]",
+      "int Show(IntPtr owner);",
+      "void SetFileTypes(uint count, IntPtr filterSpec);",
+      "void SetFileTypeIndex(uint index);",
+      "void GetFileTypeIndex(out uint index);",
+      "void Advise(IntPtr events, out uint cookie);",
+      "void Unadvise(uint cookie);",
+      "void SetOptions(FileOpenOptions options);",
+      "void GetOptions(out FileOpenOptions options);",
+      "void SetDefaultFolder(IShellItem shellItem);",
+      "void SetFolder(IShellItem shellItem);",
+      "void GetFolder(out IShellItem shellItem);",
+      "void GetCurrentSelection(out IShellItem shellItem);",
+      "void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);",
+      "void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string name);",
+      "void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);",
+      "void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string text);",
+      "void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);",
+      "void GetResult(out IShellItem shellItem);",
+      "void AddPlace(IShellItem shellItem, int alignment);",
+      "void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string extension);",
+      "void Close(int result);",
+      "void SetClientGuid(ref Guid guid);",
+      "void ClearClientData();",
+      "void SetFilter(IntPtr filter);",
+      "void GetResults(out IntPtr shellItems);",
+      "void GetSelectedItems(out IntPtr shellItems);",
+    ]);
+
+    const optionsCall = script.match(/dialog\.SetOptions\(\s*([\s\S]*?)\s*\);/)?.[1];
+    expect(optionsCall?.replace(/\s+/g, "")).toBe(
+      "options|FileOpenOptions.FOS_PICKFOLDERS|FileOpenOptions.FOS_FORCEFILESYSTEM"
+      + "|FileOpenOptions.FOS_PATHMUSTEXIST|FileOpenOptions.FOS_NOCHANGEDIR",
+    );
+
+    const resultHandling = script.slice(
+      script.indexOf("int result = dialog.Show(ownerHandle);"),
+      script.indexOf("dialog.GetResult(out selectedItem);"),
+    );
+    expect(resultHandling).toMatch(
+      /int result = dialog\.Show\(ownerHandle\);[\s\S]*if \(result == ErrorCancelledHResult\)[\s\S]*return null;[\s\S]*Marshal\.ThrowExceptionForHR\(result\);/,
+    );
+
+    const nativeFinallyStart = script.indexOf(
+      "        finally\n        {",
+      script.indexOf("public static string PickFolder"),
+    );
+    const nativeFinallyEnd = script.indexOf("\n        }\n    }\n}\n'@", nativeFinallyStart);
+    expect(nativeFinallyStart).toBeGreaterThan(-1);
+    expect(nativeFinallyEnd).toBeGreaterThan(nativeFinallyStart);
+
+    const nativeFinally = script.slice(nativeFinallyStart, nativeFinallyEnd);
+    expect(nativeFinally).toMatch(
+      /if \(pathPointer != IntPtr\.Zero\)[\s\S]*Marshal\.FreeCoTaskMem\(pathPointer\);[\s\S]*if \(selectedItem != null\)[\s\S]*Marshal\.FinalReleaseComObject\(selectedItem\);[\s\S]*if \(dialog != null\)[\s\S]*Marshal\.FinalReleaseComObject\(dialog\);/,
+    );
     expect(script).toContain("SIGDN_FILESYSPATH");
     expect(script).not.toContain("FolderBrowserDialog");
   });
@@ -66,7 +131,22 @@ describe("chooseFolder", () => {
     expect(script).toContain("$owner.Opacity = 0");
     expect(script).toContain("$owner.Show()");
     expect(script).toContain("PickFolder($owner.Handle");
-    expect(script).toMatch(/finally\s*\{[\s\S]*\$owner\.Close\(\)[\s\S]*\$owner\.Dispose\(\)/);
+
+    const ownerScript = script.slice(script.indexOf("$owner = $null"));
+    const ownerFinallyStart = ownerScript.indexOf("} finally {");
+    const closeIndex = ownerScript.indexOf("$owner.Close()", ownerFinallyStart);
+    const disposeIndex = ownerScript.indexOf("$owner.Dispose()", ownerFinallyStart);
+    const failureCheckIndex = ownerScript.indexOf("if ($null -ne $pickerFailure)");
+
+    expect(ownerFinallyStart).toBeGreaterThan(-1);
+    expect(closeIndex).toBeGreaterThan(ownerFinallyStart);
+    expect(disposeIndex).toBeGreaterThan(closeIndex);
+    expect(failureCheckIndex).toBeGreaterThan(disposeIndex);
+
+    const ownerCleanup = ownerScript.slice(ownerFinallyStart, failureCheckIndex);
+    expect(ownerCleanup).toMatch(
+      /^\} finally \{[\s\S]*if \(\$null -ne \$owner\) \{[\s\S]*\$owner\.Close\(\)[\s\S]*\$owner\.Dispose\(\)[\s\S]*\}\s*\}\s*$/,
+    );
   });
 
   test("configures PowerShell stdout as UTF-8 before returning the selected path", async () => {
