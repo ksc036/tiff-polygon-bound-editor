@@ -19,6 +19,7 @@ export class FolderPickerError extends Error {
 
 const WINDOWS_SCRIPT = String.raw`
 Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 $dialog.Description = $env:FOLDER_PICKER_PROMPT
 $dialog.ShowNewFolderButton = $true
@@ -109,8 +110,8 @@ async function runLinuxDialog({ command, args, runCommand, env }) {
     return requireSelectedPath(stdout);
   } catch (error) {
     if (error instanceof FolderPickerError || isMissingCommand(error)) throw error;
-    if (error?.code === 1 && !String(error?.stderr ?? "").trim()) throw cancelled(error);
     if (isDisplayFailure(error)) throw unavailable(error);
+    if (error?.code === 1 && !String(error?.stderr ?? "").trim()) throw cancelled(error);
     throw failed(error);
   }
 }

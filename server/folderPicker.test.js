@@ -46,6 +46,25 @@ describe("chooseFolder", () => {
     );
   });
 
+  test("configures PowerShell stdout as UTF-8 before returning the selected path", async () => {
+    const runCommand = vi.fn().mockResolvedValue({ stdout: "C:\\\\Fiber data 한글", stderr: "" });
+
+    await chooseFolder({ platform: "win32", runCommand, env: {} });
+
+    expect(runCommand).toHaveBeenCalledWith(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-STA",
+        "-Command",
+        expect.stringContaining(
+          "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+        ),
+      ],
+      expect.any(Object),
+    );
+  });
+
   test("uses zenity in a Linux graphical session", async () => {
     const runCommand = vi.fn().mockResolvedValue({ stdout: "/data/root\n", stderr: "" });
 
@@ -126,6 +145,19 @@ describe("chooseFolder", () => {
     const displayFailure = Object.assign(new Error("Command failed"), {
       code: 1,
       stderr: "Gtk-WARNING **: cannot open display: :0",
+    });
+
+    await expect(chooseFolder({
+      platform: "linux",
+      runCommand: vi.fn().mockRejectedValue(displayFailure),
+      env: { DISPLAY: ":0" },
+    })).rejects.toMatchObject({ code: FOLDER_PICKER_CODES.UNAVAILABLE });
+  });
+
+  test("maps message-only Linux display failures to unavailable", async () => {
+    const displayFailure = Object.assign(new Error("Failed to open display :0"), {
+      code: 1,
+      stderr: "",
     });
 
     await expect(chooseFolder({
