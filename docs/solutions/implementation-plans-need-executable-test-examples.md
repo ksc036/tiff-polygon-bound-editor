@@ -1,3 +1,20 @@
+---
+title: Implementation plans need executable test examples
+date: 2026-08-03
+last_updated: 2026-08-03
+category: workflow-issues
+module: Implementation planning
+problem_type: workflow_issue
+component: brief_system
+severity: medium
+applies_when:
+  - A plan provides exact test and implementation snippets for test-driven work
+tags:
+  - implementation-plans
+  - test-driven-development
+  - executable-examples
+---
+
 # Implementation plans need executable test examples
 
 ## Context
@@ -19,3 +36,9 @@ await waitFor(() => {
 ```
 
 Scan implementation plans for placeholder comments and ellipses before dispatching an implementer.
+
+## Cross-Check Literal Assertions
+
+Executable examples can still contradict each other. A source-contract test may require a contiguous substring while the supplied implementation inserts a newline or equivalent formatting between those tokens. Both snippets look valid independently, but a literal transcription cannot reach GREEN.
+
+Before dispatch, apply each exact implementation snippet to a scratch copy and run the plan's exact test command. At minimum, compare every source-text assertion against the supplied source verbatim, including whitespace-sensitive strings and regular expressions. Resolve mismatches in the plan rather than leaving the implementer to choose which "exact" value wins.
