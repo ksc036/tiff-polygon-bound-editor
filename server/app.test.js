@@ -68,6 +68,17 @@ async function writeImage(rootDir, folderName, imageName = "frame.tif", pixels =
   await writeFile(path.join(imageDir, imageName), uint16Tiff({ width: 2, height: 2, pixels }));
 }
 
+async function writeSizedImage(rootDir, folderName, { width, height, imageName = "frame.tif" }) {
+  const imageDir = path.join(rootDir, folderName, "image");
+  const maskDir = path.join(rootDir, folderName, "mask");
+  await mkdir(imageDir, { recursive: true });
+  await mkdir(maskDir, { recursive: true });
+  await writeFile(
+    path.join(imageDir, imageName),
+    uint16Tiff({ width, height, pixels: Array.from({ length: width * height }, (_value, index) => index) }),
+  );
+}
+
 async function writeMask(rootDir, folderName, fileName = "frame001.png") {
   const maskDir = path.join(rootDir, folderName, "mask");
   await mkdir(maskDir, { recursive: true });
@@ -1104,5 +1115,155 @@ describe("createApp", () => {
 
     expect(malformedResponse.status).toBe(422);
     await expect(malformedResponse.json()).resolves.toEqual({ error: "Saved analysis JSON is invalid." });
+  });
+
+  test("loads missing subimage state and saves the active image crop", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif", [100, 200, 300, 400]);
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const missing = await jsonRequest(app, "/api/images/T01/subimage");
+    expect(missing.status).toBe(200);
+    await expect(missing.json()).resolves.toEqual({ hasSubimage: false, crop: null });
+
+    const saved = await jsonRequest(app, "/api/images/T01/subimage", {
+      method: "PUT",
+      body: { crop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+    expect(saved.status).toBe(200);
+    await expect(saved.json()).resolves.toMatchObject({ crop: { imageFolder: "T01", width: 2, height: 2 } });
+  });
+
+  test("returns a safe coded response for invalid or missing subimage crops", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif", [100, 200, 300, 400]);
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const invalid = await jsonRequest(app, "/api/images/T01/subimage", {
+      method: "PUT",
+      body: { crop: { sourceWidth: 2, sourceHeight: 2, x: 2, y: 0, width: 2, height: 2 } },
+    });
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toEqual({ error: "Invalid subimage crop.", code: "INVALID_CROP" });
+
+    const missing = await jsonRequest(app, "/api/images/T01/subimage", { method: "PUT", body: {} });
+    expect(missing.status).toBe(400);
+    await expect(missing.json()).resolves.toEqual({ error: "Invalid subimage crop.", code: "INVALID_CROP" });
+  });
+
+  test("creates missing subimages in sorted folder order", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T03");
+    await writeImage(imageRoot, "T01");
+    await writeImage(imageRoot, "T02");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const response = await jsonRequest(app, "/api/subimages/create-missing", {
+      method: "POST",
+      body: { templateCrop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      operation: "create-missing",
+      status: "complete",
+      code: null,
+      created: ["T01", "T02", "T03"],
+      preserved: [],
+      replaced: [],
+      failed: [],
+    });
+  });
+
+  test("replaces all subimages in sorted folder order", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T03");
+    await writeImage(imageRoot, "T01");
+    await writeImage(imageRoot, "T02");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const response = await jsonRequest(app, "/api/subimages/replace-all", {
+      method: "POST",
+      body: { templateCrop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      operation: "replace-all",
+      status: "complete",
+      code: null,
+      created: [],
+      preserved: [],
+      replaced: ["T01", "T02", "T03"],
+      failed: [],
+    });
+  });
+
+  test("returns safe preflight failures without local paths", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeSizedImage(imageRoot, "T01", { width: 2, height: 2 });
+    await writeSizedImage(imageRoot, "T02", { width: 3, height: 3 });
+
+    const response = await jsonRequest(
+      createApp({ rootDir: appRoot, initialRoot: imageRoot }),
+      "/api/subimages/create-missing",
+      {
+        method: "POST",
+        body: { templateCrop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+      },
+    );
+
+    expect(response.status).toBe(422);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: "Subimage batch preflight failed.",
+      code: "BATCH_PREFLIGHT_FAILED",
+      failures: [{ imageFolder: "T02", code: "DIMENSION_MISMATCH", message: "Source image dimensions do not match the batch." }],
+    });
+    expect(JSON.stringify(body)).not.toContain(imageRoot);
+  });
+
+  test("preserves root scan preflight failures with a null image folder", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+    await rm(imageRoot, { recursive: true, force: true });
+
+    const response = await jsonRequest(app, "/api/subimages/create-missing", {
+      method: "POST",
+      body: { templateCrop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({
+      error: "Subimage batch preflight failed.",
+      code: "BATCH_PREFLIGHT_FAILED",
+      failures: [{ imageFolder: null, code: "BATCH_SCAN_FAILED", message: "Unable to scan source images." }],
+    });
+  });
+
+  test("subimage routes preserve the existing unknown-image and malformed-JSON responses", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+
+    const unknown = await jsonRequest(app, "/api/images/missing/subimage");
+    expect(unknown.status).toBe(404);
+    await expect(unknown.json()).resolves.toEqual({ error: "Image not found." });
+
+    const malformed = await request(app, "/api/subimages/replace-all", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    });
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toEqual({ error: "Invalid JSON payload." });
   });
 });

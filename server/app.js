@@ -14,6 +14,13 @@ import {
   writeDatasetZip,
 } from "./exportService.js";
 import { FOLDER_PICKER_CODES, FolderPickerError } from "./folderPicker.js";
+import {
+  SubimageError,
+  createMissingSubimages,
+  loadSubimage,
+  replaceAllSubimages,
+  saveSubimage,
+} from "./subimageService.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 
@@ -48,6 +55,33 @@ function isInvalidSavedAnalysisJsonError(error) {
 function safeErrorResponse(error) {
   if (isUnknownImageError(error)) {
     return { status: 404, body: { error: "Image not found." } };
+  }
+
+  if (error instanceof SubimageError) {
+    const messages = {
+      MISSING_SOURCE: "Source TIFF is missing.",
+      UNSUPPORTED_SOURCE: "Source TIFF must be single-channel 16-bit grayscale.",
+      DIMENSION_MISMATCH: "Source image dimensions do not match.",
+      INVALID_CROP: "Invalid subimage crop.",
+      ASPECT_RATIO_MISMATCH: "Subimage crop must match the source aspect ratio.",
+      INVALID_SAVED_CROP: "Saved subimage metadata is invalid.",
+      MISSING_SAVED_TIFF: "Saved subimage TIFF is missing.",
+      CROP_RENDER_FAILED: "Unable to render subimage TIFF.",
+      WRITE_FAILED: "Unable to save subimage.",
+      BATCH_PREFLIGHT_FAILED: "Subimage batch preflight failed.",
+      SOURCE_READ_FAILED: "Unable to read source TIFF.",
+      CROP_SAVE_FAILED: "Unable to save subimage.",
+      CROP_ROLLBACK_FAILED: "Unable to save subimage.",
+    };
+
+    return {
+      status: error.status,
+      body: {
+        error: messages[error.code] ?? "Unable to process subimage.",
+        code: error.code,
+        ...(Array.isArray(error.details?.failures) ? { failures: error.details.failures } : {}),
+      },
+    };
   }
 
   if (error instanceof ExportError) {
@@ -468,6 +502,34 @@ export function createApp({
           maxImagePixels,
         }),
       );
+    }),
+  );
+
+  app.get(
+    "/api/images/:id/subimage",
+    asyncRoute(async (request, response) => {
+      response.json(await loadSubimage(imageStorage, request.params.id, { maxImagePixels }));
+    }),
+  );
+
+  app.put(
+    "/api/images/:id/subimage",
+    asyncRoute(async (request, response) => {
+      response.json(await saveSubimage(imageStorage, request.params.id, request.body?.crop, { maxImagePixels }));
+    }),
+  );
+
+  app.post(
+    "/api/subimages/create-missing",
+    asyncRoute(async (request, response) => {
+      response.json(await createMissingSubimages(imageStorage, request.body?.templateCrop, { maxImagePixels }));
+    }),
+  );
+
+  app.post(
+    "/api/subimages/replace-all",
+    asyncRoute(async (request, response) => {
+      response.json(await replaceAllSubimages(imageStorage, request.body?.templateCrop, { maxImagePixels }));
     }),
   );
 
