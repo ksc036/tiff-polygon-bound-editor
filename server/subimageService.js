@@ -205,9 +205,25 @@ function finalizeBatch(result) {
 }
 
 async function preflightBatch(storage, templateCrop, operation, options) {
-  const images = await storage.scanImages();
+  let images;
+  try {
+    images = await storage.scanImages();
+  } catch (error) {
+    throw new SubimageError("BATCH_PREFLIGHT_FAILED", "Subimage batch preflight failed.", {
+      status: 422,
+      details: {
+        failures: [{
+          imageFolder: null,
+          code: "BATCH_SCAN_FAILED",
+          message: "Unable to scan source images.",
+        }],
+      },
+      cause: error,
+    });
+  }
   const failures = [];
   const plannedImages = [];
+  let baselineSource = null;
 
   for (const image of images) {
     const paths = storage.imagePaths(image.id);
@@ -222,15 +238,31 @@ async function preflightBatch(storage, templateCrop, operation, options) {
       continue;
     }
 
+    const dimensionsMatchBaseline = !baselineSource || (
+      source.width === baselineSource.width && source.height === baselineSource.height
+    );
+    baselineSource ??= source;
+    if (!dimensionsMatchBaseline) {
+      failures.push({
+        imageFolder: image.imageFolder,
+        code: "DIMENSION_MISMATCH",
+        message: "Source image dimensions do not match the batch.",
+      });
+    }
+
     try {
       validateCrop(templateCrop, source);
     } catch (error) {
-      failures.push(batchFailure(image, error, {
-        code: "INVALID_CROP",
-        message: "Crop fields must be integers.",
-      }));
+      if (dimensionsMatchBaseline || error.code !== "DIMENSION_MISMATCH") {
+        failures.push(batchFailure(image, error, {
+          code: "INVALID_CROP",
+          message: "Crop fields must be integers.",
+        }));
+      }
       continue;
     }
+
+    if (!dimensionsMatchBaseline) continue;
 
     if (operation === "create-missing") {
       try {

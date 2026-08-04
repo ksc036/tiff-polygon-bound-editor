@@ -369,6 +369,41 @@ test("dimension mismatch fails preflight before any subimage directory is writte
   }
 });
 
+test("mixed source dimensions fail preflight when the template omits source dimensions", async () => {
+  const rootDir = await createThreeImageRoot({
+    width: 8,
+    height: 8,
+    thirdSize: { width: 10, height: 10 },
+  });
+  const storage = createStorage({ initialRoot: rootDir });
+
+  await expect(createMissingSubimages(storage, { x: 2, y: 2, width: 4, height: 4 })).rejects.toMatchObject({
+    code: "BATCH_PREFLIGHT_FAILED",
+    details: { failures: [expect.objectContaining({ imageFolder: "T03", code: "DIMENSION_MISMATCH" })] },
+  });
+  for (const image of await storage.scanImages()) {
+    await expect(access(storage.imagePaths(image.id).subimageDir)).rejects.toMatchObject({ code: "ENOENT" });
+  }
+});
+
+test("normalizes scan failures without exposing the storage root", async () => {
+  const rootDir = await createThreeImageRoot({ width: 8, height: 8 });
+  const storage = createStorage({ initialRoot: rootDir });
+  await rm(rootDir, { recursive: true, force: true });
+
+  const error = await createMissingSubimages(storage, squareCrop({ x: 2, y: 2 })).catch((caught) => caught);
+
+  expect(error).toMatchObject({
+    name: "SubimageError",
+    code: "BATCH_PREFLIGHT_FAILED",
+    status: 422,
+    details: {
+      failures: [{ imageFolder: null, code: "BATCH_SCAN_FAILED", message: "Unable to scan source images." }],
+    },
+  });
+  expect(`${error.message}${JSON.stringify(error.details)}`).not.toContain(rootDir);
+});
+
 test("create-missing rejects incomplete and malformed saved pairs during preflight", async () => {
   const rootDir = await createThreeImageRoot({ width: 8, height: 8 });
   const storage = createStorage({ initialRoot: rootDir });
