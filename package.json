@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "npm ci && npm run build && npm run server",
     "dev": "vite",
     "build": "vite build",
     "server": "node server/index.js",
