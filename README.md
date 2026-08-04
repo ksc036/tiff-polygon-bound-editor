@@ -94,3 +94,23 @@ npm run build
 
 Saved bounds use `input-order-cycle`: points connect in the saved array order,
 and the final point is connected back to the first point.
+
+## Subimage Crops
+
+Each image folder can also contain a saved, fixed-aspect crop:
+
+```text
+image-folder/
+  image/original.tif
+  subimage/original.tif
+  subimage/crop.json
+```
+
+The first filename-ordered image defines the common source-aspect crop size and
+initial position. `Create all subimages` creates missing crops while preserving
+valid prior crops. A later image can be repositioned by mouse drag locally;
+`Save subimage` writes only that image. `Replace all subimages` replaces every
+crop only after confirmation.
+
+Subimages are unresized, single-channel 16-bit grayscale TIFFs. They are
+intentionally excluded from Download as ZIP.
