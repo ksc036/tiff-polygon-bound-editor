@@ -164,6 +164,44 @@ describe("saveSubimage", () => {
     await expect(access(paths.subimageCropPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("keeps a successful save committed when temporary cleanup fails", async () => {
+    const rootDir = await createTempRoot();
+    await writeGrey16Tiff(rootDir, "T01", 8, 8, Array.from({ length: 64 }, (_, index) => index));
+    const storage = createStorage({ initialRoot: rootDir });
+
+    await expect(saveSubimage(storage, "T01", {
+      sourceWidth: 8, sourceHeight: 8, x: 2, y: 2, width: 4, height: 4,
+    }, {
+      __testDependencies: {
+        async rm() {
+          throw Object.assign(new Error("simulated cleanup failure"), { code: "EACCES" });
+        },
+      },
+    })).resolves.toMatchObject({ crop: { x: 2, y: 2, width: 4, height: 4 } });
+
+    await expect(storage.loadSubimageCrop("T01")).resolves.toMatchObject({ x: 2, y: 2, width: 4, height: 4 });
+    await expect(access(storage.imagePaths("T01").subimagePath)).resolves.toBeUndefined();
+  });
+
+  test("keeps the render failure when temporary cleanup fails", async () => {
+    const rootDir = await createTempRoot();
+    await writeGrey16Tiff(rootDir, "T01", 8, 8, Array.from({ length: 64 }, (_, index) => index));
+    const storage = createStorage({ initialRoot: rootDir });
+
+    await expect(saveSubimage(storage, "T01", {
+      sourceWidth: 8, sourceHeight: 8, x: 2, y: 2, width: 4, height: 4,
+    }, {
+      __testDependencies: {
+        async renderCropTiff() {
+          throw new Error("simulated render failure");
+        },
+        async rm() {
+          throw Object.assign(new Error("simulated cleanup failure"), { code: "EACCES" });
+        },
+      },
+    })).rejects.toMatchObject({ code: "CROP_RENDER_FAILED" });
+  });
+
   test("restores the prior TIFF and JSON when JSON persistence fails", async () => {
     const rootDir = await createTempRoot();
     await writeGrey16Tiff(rootDir, "T01", 8, 8, Array.from({ length: 64 }, (_, index) => index * 997));
@@ -234,6 +272,31 @@ test("loadSubimage reports an absent saved pair", async () => {
   const storage = createStorage({ initialRoot: rootDir });
 
   await expect(loadSubimage(storage, "T01")).resolves.toEqual({ hasSubimage: false, crop: null });
+});
+
+test("loadSubimage maps a saved TIFF access failure without exposing filesystem details", async () => {
+  const rootDir = await createTempRoot();
+  await writeGrey16Tiff(rootDir, "T01", 8, 8, Array.from({ length: 64 }, (_, index) => index));
+  const storage = createStorage({ initialRoot: rootDir });
+  await saveSubimage(storage, "T01", {
+    sourceWidth: 8, sourceHeight: 8, x: 0, y: 0, width: 4, height: 4,
+  });
+
+  const error = await loadSubimage(storage, "T01", {
+    __testDependencies: {
+      async access() {
+        throw Object.assign(new Error("/private/secret/saved-subimage.tif"), { code: "EACCES" });
+      },
+    },
+  }).catch((caught) => caught);
+
+  expect(error).toMatchObject({
+    name: "SubimageError",
+    code: "INVALID_SAVED_CROP",
+    status: 422,
+    details: null,
+  });
+  expect(error.message).not.toContain("/private/secret");
 });
 
 test("SubimageError carries the public error contract", () => {

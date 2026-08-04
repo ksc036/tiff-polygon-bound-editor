@@ -48,14 +48,24 @@ function isMissingFile(error) {
   return error?.code === "ENOENT";
 }
 
-async function fileExists(filePath, deps) {
+async function fileExists(filePath, deps, { errorCode = "INVALID_SAVED_CROP", errorMessage = "Unable to inspect saved subimage TIFF." } = {}) {
   try {
     await deps.access(filePath);
     return true;
   } catch (error) {
     if (isMissingFile(error)) return false;
-    throw error;
+    throw new SubimageError(errorCode, errorMessage, { cause: error });
   }
+}
+
+async function cleanupTemporaryFiles(deps, ...filePaths) {
+  await Promise.all(filePaths.map(async (filePath) => {
+    try {
+      await deps.rm(filePath, { force: true });
+    } catch {
+      // Cleanup must not replace the result of the crop operation.
+    }
+  }));
 }
 
 export function validateCrop(crop, source) {
@@ -118,7 +128,7 @@ async function readSupportedSource(imagePath, options = {}) {
 
 async function validateOutputMetadata(outputPath, crop, options = {}, errorCode = "INVALID_SAVED_CROP") {
   const deps = dependencies(options);
-  if (!(await fileExists(outputPath, deps))) {
+  if (!(await fileExists(outputPath, deps, { errorCode }))) {
     throw new SubimageError("MISSING_SAVED_TIFF", "Saved subimage TIFF is unavailable.", { status: 404 });
   }
 
@@ -222,7 +232,7 @@ export async function saveSubimage(storage, id, crop, options = {}) {
     }
 
     try {
-      hadPriorTiff = await fileExists(paths.subimagePath, deps);
+      hadPriorTiff = await fileExists(paths.subimagePath, deps, { errorCode: "CROP_SAVE_FAILED" });
       if (hadPriorTiff) {
         await deps.copyFile(paths.subimagePath, backupPath);
         backupCreated = true;
@@ -251,9 +261,6 @@ export async function saveSubimage(storage, id, crop, options = {}) {
       throw new SubimageError("CROP_SAVE_FAILED", "Unable to save subimage crop metadata.", { cause: error });
     }
   } finally {
-    await Promise.all([
-      deps.rm(tempTiffPath, { force: true }),
-      deps.rm(backupPath, { force: true }),
-    ]);
+    await cleanupTemporaryFiles(deps, tempTiffPath, backupPath);
   }
 }
