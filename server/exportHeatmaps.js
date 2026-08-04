@@ -8,6 +8,14 @@ import {
   heatmapMetricValue,
   infernoColor,
 } from "../src/lib/heatmap.js";
+import {
+  formatHeatmapFigureNumber,
+  formatHeatmapFigureRange,
+  heatmapAxisTickValues,
+  heatmapCalibrationText,
+  heatmapFigureText,
+  heatmapScaleTickValues,
+} from "../shared/heatmapFigure.js";
 import { runSharpWithSignal } from "./sharpRender.js";
 
 export const EXPORT_CELL_SIZES = Object.freeze([20, 50, 100]);
@@ -321,24 +329,31 @@ export function buildHeatmapFigureSvg(figure, { gridImageHref = null } = {}) {
   const gridX = CANVAS_MARGIN + 58;
   const { min, max } = figure.colorRange;
   const isComparison = figure.kind === "comparison";
+  const figureText = heatmapFigureText({
+    currentImage: figure.currentImage,
+    previousImage: figure.previousImage,
+    metric: figure.metric,
+    metricLabel: figure.metricLabel,
+    metricUnit: figure.unit,
+    cellWidth: figure.cellWidth,
+    cellHeight: figure.cellHeight,
+    columns,
+    rows,
+    min,
+    max,
+    comparison: isComparison,
+    calibration: figure.calibration,
+  });
   const title = figureTitle(figure, { includeRange: isComparison });
   const titleLines = [
-    ...wrapSvgText(`Current: ${figure.currentImage}`, TITLE_MAX_WIDTH, 18, true),
-    ...(figure.previousImage
-      ? wrapSvgText(`Previous: ${figure.previousImage}`, TITLE_MAX_WIDTH, 18, true)
-      : []),
-    ...wrapSvgText(
-      `${figure.metricLabel} | Cell ${figure.cellWidth}x${figure.cellHeight} px | Grid ${columns}x${rows}`,
-      TITLE_MAX_WIDTH,
-      18,
-      true,
-    ),
+    ...figureText.titleLines.flatMap((line) => wrapSvgText(line, TITLE_MAX_WIDTH, 18, true)),
+    ...wrapSvgText(figureText.detailLine, TITLE_MAX_WIDTH, 18, true),
     ...(isComparison
-      ? wrapSvgText(`Range ${formatRange(min, max, true)}`, TITLE_MAX_WIDTH, 18, true)
+      ? wrapSvgText(`Range ${formatHeatmapFigureRange(min, max, { signed: true })}`, TITLE_MAX_WIDTH, 18, true)
       : []),
   ];
   const calibrationLines = wrapSvgText(
-    calibrationText(figure.calibration),
+    heatmapCalibrationText(figure.calibration),
     SUBTITLE_MAX_WIDTH,
     14,
   );
@@ -350,9 +365,7 @@ export function buildHeatmapFigureSvg(figure, { gridImageHref = null } = {}) {
   const colorBarY = Math.max(gridY, gridY + Math.floor((gridHeight - COLOR_BAR_HEIGHT) / 2));
   const width = Math.max(960, colorBarX + COLOR_BAR_WIDTH + 152);
   const height = Math.max(520, Math.max(gridY + gridHeight + 104, colorBarY + COLOR_BAR_HEIGHT + 62));
-  const colorBarLabel = isComparison
-    ? comparisonColorBarLabel(figure.metric)
-    : `${figure.metricLabel} (${figure.unit || "ratio"})`;
+  const colorBarLabel = figureText.colorBarLabel;
   const emptyCellFill = isComparison
     ? differenceColor(null, Math.max(Math.abs(min), Math.abs(max)))
     : infernoColor(null, min, max);
@@ -383,7 +396,7 @@ export function buildHeatmapFigureSvg(figure, { gridImageHref = null } = {}) {
   <style>text { font-family: Arial, sans-serif; fill: #111827; } .title { font-size: 18px; font-weight: 700; } .subtitle { font-size: 14px; } .axis { font-size: 13px; font-weight: 700; } .tick { font-size: 12px; } .range { font-size: 12px; }</style>
   ${titleElements}
   ${calibrationElements}
-  <text class="range" x="${CANVAS_MARGIN}" y="${rangeY}">${escapeXml(`Color range: ${formatRange(min, max, isComparison)}${figure.unit ? ` ${figure.unit}` : ""}`)}</text>
+  <text class="range" x="${CANVAS_MARGIN}" y="${rangeY}">${escapeXml(figureText.rangeLine)}</text>
   <rect x="${gridX}" y="${gridY}" width="${gridWidth}" height="${gridHeight}" fill="${emptyCellFill}" shape-rendering="crispEdges"/>
   <g shape-rendering="crispEdges">${cellElements}</g>
   <rect x="${gridX}" y="${gridY}" width="${gridWidth}" height="${gridHeight}" fill="none" stroke="#111827" stroke-width="1" shape-rendering="crispEdges"/>
@@ -601,7 +614,9 @@ function finiteMaxAbs(values) {
 function figureTitle(figure, { includeRange }) {
   const comparison = figure.previousImage ? `${figure.currentImage} vs ${figure.previousImage}` : figure.currentImage;
   const title = `${comparison} | ${figure.metricLabel} | Cell ${figure.cellWidth}x${figure.cellHeight} px | Grid ${figure.columns}x${figure.rows}`;
-  return includeRange ? `${title} | Range ${formatRange(figure.colorRange.min, figure.colorRange.max, true)}` : title;
+  return includeRange
+    ? `${title} | Range ${formatHeatmapFigureRange(figure.colorRange.min, figure.colorRange.max, { signed: true })}`
+    : title;
 }
 
 function wrapSvgText(value, maxWidth, fontSize, bold = false) {
@@ -735,22 +750,16 @@ function chunked(values, size) {
   return chunks;
 }
 
-function comparisonColorBarLabel(metric) {
-  return metric === "pixel-density" ? "Delta Pixel Density" : "Delta Collagen Density (mg/ml)";
-}
-
-function calibrationText(calibration) {
-  return `Calibration: Pixel Density = ${formatNumber(calibration?.slope)} * Collagen Density + ${formatNumber(calibration?.intercept)}`;
-}
-
 function axisTicks({ gridX, gridY, gridWidth, gridHeight, columns, rows, cellSize }) {
   const ticks = [];
-  for (let index = 0; index < 5; index += 1) {
-    const ratio = index / 4;
+  const columnTicks = heatmapAxisTickValues(columns);
+  const rowTicks = heatmapAxisTickValues(rows);
+  for (let index = 0; index < columnTicks.length; index += 1) {
+    const ratio = index / (columnTicks.length - 1);
     const x = gridX + gridWidth * ratio;
     const y = gridY + gridHeight * ratio;
-    const column = Math.round((columns - 1) * ratio);
-    const row = Math.round((rows - 1) * ratio);
+    const column = columnTicks[index];
+    const row = rowTicks[index];
     ticks.push(`<line x1="${x}" y1="${gridY + gridHeight}" x2="${x}" y2="${gridY + gridHeight + 6}" stroke="#111827"/>`);
     ticks.push(`<text class="tick" x="${x}" y="${gridY + gridHeight + 23}" text-anchor="middle">${column}</text>`);
     ticks.push(`<line x1="${gridX - 6}" y1="${y}" x2="${gridX}" y2="${y}" stroke="#111827"/>`);
@@ -769,28 +778,15 @@ function colorBar({ isComparison, min, max, x, y }) {
     parts.push(`<rect x="${x}" y="${y + ratio * COLOR_BAR_HEIGHT}" width="${COLOR_BAR_WIDTH}" height="${COLOR_BAR_HEIGHT / steps + 1}" fill="${fill}"/>`);
   }
   parts.push(`<rect x="${x}" y="${y}" width="${COLOR_BAR_WIDTH}" height="${COLOR_BAR_HEIGHT}" fill="none" stroke="#111827"/>`);
-  for (let index = 0; index < 5; index += 1) {
-    const ratio = index / 4;
-    const value = max - (max - min) * ratio;
+  const scaleTicks = heatmapScaleTickValues(min, max);
+  for (let index = 0; index < scaleTicks.length; index += 1) {
+    const ratio = index / (scaleTicks.length - 1);
+    const value = scaleTicks[index];
     const tickY = y + ratio * COLOR_BAR_HEIGHT;
     parts.push(`<line x1="${x + COLOR_BAR_WIDTH}" y1="${tickY}" x2="${x + COLOR_BAR_WIDTH + 6}" y2="${tickY}" stroke="#111827"/>`);
-    parts.push(`<text class="tick" x="${x + COLOR_BAR_WIDTH + 11}" y="${tickY + 4}">${escapeXml(formatNumber(value))}</text>`);
+    parts.push(`<text class="tick" x="${x + COLOR_BAR_WIDTH + 11}" y="${tickY + 4}">${escapeXml(formatHeatmapFigureNumber(value))}</text>`);
   }
   return parts.join("");
-}
-
-function formatRange(min, max, signed) {
-  return `${signed ? formatSigned(min) : formatNumber(min)} to ${signed ? formatSigned(max) : formatNumber(max)}`;
-}
-
-function formatSigned(value) {
-  const formatted = formatNumber(value);
-  return Number(value) > 0 ? `+${formatted}` : formatted;
-}
-
-function formatNumber(value) {
-  if (!Number.isFinite(Number(value))) return "N/A";
-  return String(Number(Number(value).toFixed(6)));
 }
 
 function positiveInteger(value) {

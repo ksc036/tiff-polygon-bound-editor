@@ -80,6 +80,36 @@ describe("heatmap export", () => {
     expect(svg).not.toContain("Color range: -1 to +1");
   });
 
+  test("retains five axis and scale labels with calibration and comparison range", () => {
+    const figure = {
+      kind: "comparison",
+      metric: "pixel-density",
+      metricLabel: "Pixel Density",
+      unit: "ratio",
+      currentImage: "T2",
+      previousImage: "T1",
+      cellWidth: 20,
+      cellHeight: 20,
+      columns: 9,
+      rows: 9,
+      values: Array(81).fill(0),
+      colorRange: { min: -0.5, max: 0.5 },
+      calibration: { slope: 0.069676956982087, intercept: 0.067893820336777 },
+    };
+
+    const svg = buildHeatmapFigureSvg(figure);
+    const tickLabels = [...svg.matchAll(/<text class="tick"[^>]*>([^<]+)<\/text>/g)]
+      .map((match) => match[1]);
+
+    expect(tickLabels).toEqual([
+      "0", "0", "2", "2", "4", "4", "6", "6", "8", "8",
+      "0.5", "0.25", "0", "-0.25", "-0.5",
+    ]);
+    expect(svg).toContain("Calibration: Pixel Density = 0.069677 * Collagen Density + 0.067894");
+    expect(svg).toContain("Range -0.5 to +0.5");
+    expect(svg).toContain("Color range: -0.5 to +0.5 ratio");
+  });
+
   test("plans shared ranges with lightweight descriptors and reloads only the rendered figure", async () => {
     const images = [
       { id: "T01", imageFolder: "T01" },
