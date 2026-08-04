@@ -696,7 +696,10 @@ export default function App() {
       allowOutside: Boolean(dragPoint),
       contentRect: imageContentRect(canvasRef.current, event.currentTarget),
     });
-    if (!nextPointer) return;
+    if (!nextPointer) {
+      if (imageLayer === "heatmap") clearPointer();
+      return;
+    }
 
     setCurrentPointer(nextPointer);
     if (dragPoint && imageLayer !== "heatmap") {

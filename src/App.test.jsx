@@ -1625,6 +1625,38 @@ describe("App", () => {
     expect(screen.getByLabelText("Image editor")).not.toHaveClass("heatmap-mode");
   });
 
+  test("clears the heatmap tooltip when the pointer moves from the plot to the report header", async () => {
+    mockApi({
+      heatmapResponse: (_url, cellSize) =>
+        jsonResponse({ heatmap: gridHeatmapFixture("plate-a", cellSize) }),
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+
+    const report = await screen.findByLabelText("heatmap report");
+    const plot = within(report).getByLabelText("heatmap report plot");
+    const header = report.querySelector(".heatmap-report-header");
+    const rawCanvas = within(plot).getByLabelText("heatmap original image");
+    vi.spyOn(rawCanvas, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 600,
+      bottom: 600,
+      width: 500,
+      height: 400,
+      x: 100,
+      y: 200,
+      toJSON: () => {},
+    });
+
+    fireEvent.mouseMove(plot, { clientX: 325, clientY: 325 });
+    expect(await within(plot).findByRole("status")).toHaveTextContent("Row 2, Column 3");
+
+    fireEvent.mouseMove(header, { clientX: 120, clientY: 120 });
+    expect(within(plot).queryByRole("status")).not.toBeInTheDocument();
+  });
+
   test("shows current and estimated metrics using the report scale and current calibration", async () => {
     mockApi();
     render(<App />);
