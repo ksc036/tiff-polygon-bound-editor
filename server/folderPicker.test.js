@@ -97,11 +97,11 @@ describe("chooseFolder", () => {
     );
 
     const resultHandling = script.slice(
-      script.indexOf("int result = dialog.Show(ownerHandle);"),
+      script.indexOf("int result;"),
       script.indexOf("dialog.GetResult(out selectedItem);"),
     );
     expect(resultHandling).toMatch(
-      /int result = dialog\.Show\(ownerHandle\);[\s\S]*if \(result == ErrorCancelledHResult\)[\s\S]*return null;[\s\S]*Marshal\.ThrowExceptionForHR\(result\);/,
+      /int result;[\s\S]*using \(TopmostDialogGuard topmostGuard = new TopmostDialogGuard\(ownerHandle\)\)[\s\S]*result = dialog\.Show\(ownerHandle\);[\s\S]*if \(result == ErrorCancelledHResult\)[\s\S]*return null;[\s\S]*Marshal\.ThrowExceptionForHR\(result\);/,
     );
 
     const nativeFinallyStart = script.indexOf(
@@ -147,6 +147,52 @@ describe("chooseFolder", () => {
     expect(ownerCleanup).toMatch(
       /^\} finally \{[\s\S]*if \(\$null -ne \$owner\) \{[\s\S]*\$owner\.Close\(\)[\s\S]*\$owner\.Dispose\(\)[\s\S]*\}\s*\}\s*$/,
     );
+  });
+
+  test("promotes the actual Windows picker above other applications", async () => {
+    const runCommand = vi.fn().mockResolvedValue({ stdout: "C:\\\\data", stderr: "" });
+
+    await chooseFolder({ platform: "win32", runCommand, env: {} });
+
+    const script = runCommand.mock.calls[0][1][3];
+    expect(script).toContain(
+      "Add-Type -ReferencedAssemblies System.Windows.Forms.dll -TypeDefinition @'",
+    );
+    expect(script).toContain("internal sealed class TopmostDialogGuard");
+    expect(script).toContain("private const uint GaRootOwner = 3;");
+    expect(script).toContain("private const uint SwpNoSize = 0x0001;");
+    expect(script).toContain("private const uint SwpNoMove = 0x0002;");
+    expect(script).toContain("private const uint SwpNoActivate = 0x0010;");
+    expect(script).toContain("private const uint SwpShowWindow = 0x0040;");
+    expect(script).toContain("private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);");
+    expect(script).toMatch(
+      /\[DllImport\("user32\.dll"\)\][\s\S]*bool EnumWindows\(EnumWindowsProc callback, IntPtr parameter\);/,
+    );
+    expect(script).toMatch(
+      /\[DllImport\("user32\.dll"\)\][\s\S]*IntPtr GetAncestor\(IntPtr windowHandle, uint flags\);/,
+    );
+    expect(script).toMatch(
+      /EnumWindows\(findOwnedDialog, IntPtr\.Zero\);/,
+    );
+    expect(script).toMatch(
+      /candidate != ownerHandle[\s\S]*IsWindowVisible\(candidate\)[\s\S]*GetAncestor\(candidate, GaRootOwner\) == ownerHandle/,
+    );
+    expect(script).toMatch(
+      /private readonly System\.Windows\.Forms\.Timer timer;[\s\S]*timer = new System\.Windows\.Forms\.Timer\(\);[\s\S]*timer\.Tick \+= PromoteOwnedDialog;[\s\S]*timer\.Start\(\);/,
+    );
+    expect(script).toMatch(
+      /SetWindowPos\(dialogHandle, HWND_TOPMOST,[\s\S]*SwpShowWindow\);[\s\S]*SetForegroundWindow\(dialogHandle\);/,
+    );
+    expect(script).toMatch(
+      /public void Dispose\(\)[\s\S]*timer\.Stop\(\);[\s\S]*timer\.Tick -= PromoteOwnedDialog;[\s\S]*timer\.Dispose\(\);/,
+    );
+    expect(script).not.toContain("System.Threading.Timer");
+    expect(script).not.toContain("SwpAsyncWindowPos");
+
+    const showStart = script.indexOf("using (TopmostDialogGuard topmostGuard");
+    const showCall = script.indexOf("dialog.Show(ownerHandle)", showStart);
+    expect(showStart).toBeGreaterThan(-1);
+    expect(showCall).toBeGreaterThan(showStart);
   });
 
   test("configures PowerShell stdout as UTF-8 before returning the selected path", async () => {

@@ -23,7 +23,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
-Add-Type -TypeDefinition @'
+Add-Type -ReferencedAssemblies System.Windows.Forms.dll -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
@@ -94,6 +94,108 @@ internal interface IShellItem
     void Compare(IShellItem other, uint hint, out int order);
 }
 
+internal sealed class TopmostDialogGuard : IDisposable
+{
+    private const uint GaRootOwner = 3;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpShowWindow = 0x0040;
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+
+    private readonly IntPtr ownerHandle;
+    private readonly System.Windows.Forms.Timer timer;
+    private bool promoted;
+
+    private delegate bool EnumWindowsProc(IntPtr windowHandle, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr windowHandle, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr windowHandle);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(
+        IntPtr windowHandle,
+        IntPtr insertAfter,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint flags
+    );
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+    public TopmostDialogGuard(IntPtr ownerHandle)
+    {
+        this.ownerHandle = ownerHandle;
+        SetWindowPos(ownerHandle, HWND_TOPMOST, 0, 0, 0, 0,
+            SwpNoSize | SwpNoMove | SwpNoActivate | SwpShowWindow);
+        timer = new System.Windows.Forms.Timer();
+        timer.Interval = 50;
+        timer.Tick += PromoteOwnedDialog;
+        timer.Start();
+    }
+
+    private void PromoteOwnedDialog(object sender, EventArgs eventArgs)
+    {
+        if (promoted)
+        {
+            return;
+        }
+
+        try
+        {
+            IntPtr dialogHandle = IntPtr.Zero;
+            EnumWindowsProc findOwnedDialog = delegate(IntPtr candidate, IntPtr parameter)
+            {
+                if (candidate != ownerHandle
+                    && IsWindowVisible(candidate)
+                    && GetAncestor(candidate, GaRootOwner) == ownerHandle)
+                {
+                    dialogHandle = candidate;
+                    return false;
+                }
+
+                return true;
+            };
+
+            EnumWindows(findOwnedDialog, IntPtr.Zero);
+            if (dialogHandle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            bool elevated = SetWindowPos(dialogHandle, HWND_TOPMOST, 0, 0, 0, 0,
+                SwpNoSize | SwpNoMove | SwpNoActivate | SwpShowWindow);
+            SetForegroundWindow(dialogHandle);
+
+            if (elevated)
+            {
+                promoted = true;
+                timer.Stop();
+            }
+        }
+        catch
+        {
+            // Folder selection must remain usable even if Windows denies foreground promotion.
+        }
+    }
+
+    public void Dispose()
+    {
+        timer.Stop();
+        timer.Tick -= PromoteOwnedDialog;
+        timer.Dispose();
+    }
+}
+
 public static class ModernFolderPicker
 {
     private const int ErrorCancelledHResult = unchecked((int)0x800704C7);
@@ -123,7 +225,11 @@ public static class ModernFolderPicker
                 dialog.SetTitle(title);
             }
 
-            int result = dialog.Show(ownerHandle);
+            int result;
+            using (TopmostDialogGuard topmostGuard = new TopmostDialogGuard(ownerHandle))
+            {
+                result = dialog.Show(ownerHandle);
+            }
             if (result == ErrorCancelledHResult)
             {
                 return null;
