@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import HeatmapOverlay from "./components/HeatmapOverlay.jsx";
+import HeatmapReport from "./components/HeatmapReport.jsx";
 import {
   addGroup,
   addPoint,
@@ -23,10 +23,9 @@ import {
   buildHeatmapDifference,
   estimateHeatmapCollagenDensity,
   heatmapCompatibilityError,
-  heatmapDisplayRange,
 } from "./lib/heatmap.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
-import { fitAspectToBox } from "./lib/stageFit.js";
+import { fitAspectToBox, heatmapReportAspect } from "./lib/stageFit.js";
 import { buildAnalysisRows, groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
 
 const OPACITY_KEY = "raw16-editor-point-opacity";
@@ -199,7 +198,13 @@ export default function App() {
     (roiSettingsOpen ? 0 : ROI_SETTINGS_COLLAPSED_STAGE_GAIN);
   const analysisPanelStageAdjustPx = DEFAULT_ANALYSIS_PANEL_HEIGHT - analysisPanelHeight;
   const selectedHeatmapCellSize = FIXED_HEATMAP_PRESETS[heatmapPreset];
-  const heatmapRange = heatmapDisplayRange(heatmapMetric);
+  const activeStageAspect = imageLayer === "heatmap" && heatmap
+    ? heatmapReportAspect({
+        columns: heatmap.columns,
+        rows: heatmap.rows,
+        imageAspect: activeImageAspect,
+      }) ?? activeImageAspect
+    : activeImageAspect;
   const invalidHeatmapCalibration =
     heatmapMetric === "estimated-collagen-density" &&
     !Number.isFinite(estimateHeatmapCollagenDensity(0, densityCalibration));
@@ -493,7 +498,7 @@ export default function App() {
       const nextSize = fitAspectToBox({
         boxWidth: contentRect.width,
         boxHeight: contentRect.height,
-        aspectRatio: activeImageAspect,
+        aspectRatio: activeStageAspect,
       });
       setStageDisplaySize((current) => (sameStageDisplaySize(current, nextSize) ? current : nextSize));
     }
@@ -509,7 +514,7 @@ export default function App() {
     updateStageDisplaySize(frame.getBoundingClientRect());
 
     return () => observer.disconnect();
-  }, [activeImageAspect]);
+  }, [activeStageAspect]);
 
   useEffect(() => {
     if (!canvasRef.current || !rawPixels) return;
@@ -520,7 +525,7 @@ export default function App() {
       min: Number(displayMin),
       max: Number(displayMax),
     });
-  }, [displayMax, displayMin, rawPixels]);
+  }, [displayMax, displayMin, heatmap, imageLayer, rawPixels]);
 
   const replaceRoot = async (endpoint, body) => {
     if (exportInFlightRef.current) return;
@@ -1356,27 +1361,6 @@ export default function App() {
                 />
               </label>
             </div>
-            <div
-              className={heatmapComparison.value ? "heatmap-legend difference" : "heatmap-legend"}
-              aria-label="heatmap color legend"
-            >
-              <span aria-label={heatmapComparison.value ? "comparison minimum" : undefined}>
-                {heatmapComparison.value
-                  ? formatLegendValue(-heatmapComparison.value.maxAbs, heatmapRange.unit)
-                  : formatLegendValue(heatmapRange.min, heatmapRange.unit)}
-              </span>
-              <div className="heatmap-legend-scale">
-                <i aria-hidden="true" />
-                {heatmapComparison.value ? (
-                  <span className="heatmap-legend-zero" aria-label="comparison zero">0</span>
-                ) : null}
-              </div>
-              <span aria-label={heatmapComparison.value ? "comparison maximum" : undefined}>
-                {heatmapComparison.value
-                  ? formatLegendValue(heatmapComparison.value.maxAbs, heatmapRange.unit)
-                  : formatLegendValue(heatmapRange.max, heatmapRange.unit)}
-              </span>
-            </div>
             <span className="heatmap-view-state" aria-live="polite">
               {heatmapViewStatus}
             </span>
@@ -1530,7 +1514,7 @@ export default function App() {
       </aside>
 
       <section
-        className="stage-shell"
+        className={imageLayer === "heatmap" ? "stage-shell heatmap-mode" : "stage-shell"}
         aria-label="Image editor"
         data-point-order-open={pointOrderOpen ? "true" : "false"}
         data-roi-settings-open={roiSettingsOpen ? "true" : "false"}
@@ -1624,7 +1608,7 @@ export default function App() {
 
         <div className="image-stage-frame" data-testid="image-stage-frame" ref={stageFrameRef}>
           <div
-            className="image-stage"
+            className={imageLayer === "heatmap" ? "image-stage heatmap-report-stage" : "image-stage"}
             data-testid="image-stage"
             onPointerMove={handleStagePointerMove}
             onMouseMove={handleStagePointerMove}
@@ -1636,21 +1620,24 @@ export default function App() {
             onPointerCancel={() => setDragPoint(null)}
             onClick={handleStageClick}
             style={{
-              aspectRatio: hasActiveImageDimensions ? `${activeImage.width} / ${activeImage.height}` : "4 / 3",
-              "--image-aspect": String(activeImageAspect),
+              aspectRatio: imageLayer === "heatmap"
+                ? String(activeStageAspect)
+                : hasActiveImageDimensions
+                  ? `${activeImage.width} / ${activeImage.height}`
+                  : "4 / 3",
+              "--image-aspect": String(activeStageAspect),
               ...(stageDisplaySize
                 ? { width: `${stageDisplaySize.width}px`, height: `${stageDisplaySize.height}px` }
                 : {}),
             }}
           >
-            <canvas
-              ref={canvasRef}
-              className={`raw-canvas${imageLayer === "heatmap" ? " heatmap-original-overlay" : ""}${
-                imageLayer === "original" || imageLayer === "heatmap" ? "" : " hidden-layer"
-              }`}
-              aria-label="raw16 image"
-              style={imageLayer === "heatmap" ? { opacity: heatmapOriginalOpacity } : undefined}
-            />
+            {imageLayer !== "heatmap" ? (
+              <canvas
+                ref={canvasRef}
+                className={`raw-canvas${imageLayer === "original" ? "" : " hidden-layer"}`}
+                aria-label="raw16 image"
+              />
+            ) : null}
             {activeImage && (imageLayer === "mask" || imageLayer === "fiber-qc") ? (
               <img
                 className="layer-image mask-preview"
@@ -1666,12 +1653,16 @@ export default function App() {
               />
             ) : null}
             {imageLayer === "heatmap" && heatmap ? (
-              <HeatmapOverlay
+              <HeatmapReport
                 heatmap={heatmap}
                 metric={heatmapMetric}
                 calibration={densityCalibration}
                 comparison={heatmapComparison.value}
                 pointer={pointer}
+                currentImageName={imageDisplayName(activeImage)}
+                previousImageName={imageDisplayName(previousImage)}
+                originalCanvasRef={canvasRef}
+                originalOpacity={heatmapOriginalOpacity}
               />
             ) : null}
             {activeImage && hasActiveImageDimensions && bounds && imageLayer !== "heatmap" ? (
@@ -2391,9 +2382,8 @@ function readStoredOpacity(key, fallback) {
   return value >= 0 && value <= 1 ? value : fallback;
 }
 
-function formatLegendValue(value, unit) {
-  const formatted = Number.isInteger(value) ? String(value) : Number(value).toFixed(4);
-  return unit ? `${formatted} ${unit}` : formatted;
+function imageDisplayName(image) {
+  return String(image?.folder ?? image?.imageFolder ?? image?.id ?? "image");
 }
 
 function heatmapDimensionError(heatmap, image) {

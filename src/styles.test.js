@@ -21,15 +21,6 @@ describe("application layout CSS", () => {
     expect(roiPreviewRule).not.toContain("vector-effect");
   });
 
-  test("uses a horizontal panel scale for the heatmap legend", async () => {
-    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-
-    const legendRule = css.match(/\.heatmap-legend\s*\{[^}]+\}/)?.[0] ?? "";
-
-    expect(legendRule).not.toContain("position: absolute");
-    expect(legendRule).toContain("grid-template-columns");
-  });
-
   test("stacks comparison and opacity controls in the narrow side panel", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
@@ -39,25 +30,45 @@ describe("application layout CSS", () => {
     expect(actionsRule).toContain("grid-template-columns: minmax(0, 1fr)");
   });
 
-  test("reserves layout space below the comparison legend for its zero label", async () => {
-    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-
-    const differenceLegendRule = css.match(/\.heatmap-legend\.difference\s*\{[^}]+\}/)?.[0] ?? "";
-    const scaleRule = css.match(/\.heatmap-legend-scale\s*\{[^}]+\}/)?.[0] ?? "";
-
-    expect(differenceLegendRule).toContain("padding-bottom: 14px");
-    expect(scaleRule).toContain("height: 12px");
-  });
-
-  test("stacks the Heat Map original TIFF above the opaque heatmap overlay", async () => {
+  test("stacks the Heat Map plot layers in presentation order", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
     const originalOverlayRule = css.match(/\.raw-canvas\.heatmap-original-overlay\s*\{[^}]+\}/)?.[0] ?? "";
     const heatmapOverlayRule = css.match(/\.heatmap-overlay\s*\{[^}]+\}/)?.[0] ?? "";
+    const cellGridRule = css.match(/\.heatmap-cell-grid\s*\{[^}]+\}/)?.[0] ?? "";
+    const tooltipRule = css.match(/\.heatmap-tooltip\s*\{[^}]+\}/)?.[0] ?? "";
 
-    expect(originalOverlayRule).toContain("z-index: 2");
-    expect(originalOverlayRule).toContain("pointer-events: none");
     expect(heatmapOverlayRule).toContain("z-index: 1");
+    expect(originalOverlayRule).toContain("z-index: 2");
+    expect(cellGridRule).toContain("z-index: 3");
+    expect(cellGridRule).toContain("pointer-events: none");
+    expect(tooltipRule).toContain("z-index: 5");
+
+    expect(css.indexOf(".heatmap-overlay {")).toBeLessThan(css.indexOf(".raw-canvas.heatmap-original-overlay {"));
+    expect(css.indexOf(".raw-canvas.heatmap-original-overlay {")).toBeLessThan(css.indexOf(".heatmap-cell-grid {"));
+    expect(css.indexOf(".heatmap-cell-grid {")).toBeLessThan(css.indexOf(".heatmap-tooltip {"));
+  });
+
+  test("bounds the report, clips the plot, and permits header text to wrap", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const reportRule = css.match(/\.heatmap-report\s*\{[^}]+\}/)?.[0] ?? "";
+    const plotRule = css.match(/\.heatmap-report-plot\s*\{[^}]+\}/)?.[0] ?? "";
+    const headerRule = css.match(/\.heatmap-report-header\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(reportRule).toContain("max-width:");
+    expect(reportRule).toContain("max-height:");
+    expect(plotRule).toContain("overflow: hidden");
+    expect(headerRule).toContain("white-space: normal");
+    expect(headerRule).toContain("overflow-wrap: anywhere");
+  });
+
+  test("reserves the mobile Heat Map stage for the report", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    expect(css).toContain(".stage-shell.heatmap-mode");
+    expect(css).toContain(".stage-shell.heatmap-mode .analysis-resize-handle");
+    expect(css).toContain(".stage-shell.heatmap-mode .analysis-panel");
   });
 
   test("keeps hidden raw canvases at zero opacity through the CSS cascade", async () => {

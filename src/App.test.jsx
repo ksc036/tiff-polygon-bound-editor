@@ -55,6 +55,39 @@ function heatmapFixture(imageFolder, cellSize, pixelDensity = 0.04, width = 100,
   };
 }
 
+function gridHeatmapFixture(imageFolder, cellSize, pixelDensity = 0.04, width = 100, height = 80) {
+  const columns = Math.ceil(width / cellSize);
+  const rows = Math.ceil(height / cellSize);
+  const cells = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const x = column * cellSize;
+      const y = row * cellSize;
+      const cellWidth = Math.min(cellSize, width - x);
+      const cellHeight = Math.min(cellSize, height - y);
+      cells.push({
+        row,
+        column,
+        x,
+        y,
+        width: cellWidth,
+        height: cellHeight,
+        areaPx: cellWidth * cellHeight,
+        maskPixelCount: Math.round(pixelDensity * cellWidth * cellHeight),
+        pixelDensity,
+      });
+    }
+  }
+
+  return {
+    ...heatmapFixture(imageFolder, cellSize, pixelDensity, width, height),
+    columns,
+    rows,
+    cells,
+  };
+}
+
 const heatmapA5 = heatmapFixture("plate-a", 5, 0.04);
 const heatmapB5 = heatmapFixture("plate-b", 5, 0.08, 120, 90);
 
@@ -1536,15 +1569,72 @@ describe("App", () => {
     expect(screen.queryByLabelText("heatmap overlay")).not.toBeInTheDocument();
   });
 
-  test("shows current and estimated metrics using current calibration", async () => {
+  test("integrates the loaded heatmap report with presets, plot pointer mapping, and opacity", async () => {
+    mockApi({
+      heatmapResponse: (_url, cellSize) =>
+        jsonResponse({ heatmap: gridHeatmapFixture("plate-a", cellSize) }),
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+
+    const report = await screen.findByLabelText("heatmap report");
+    const plot = within(report).getByLabelText("heatmap report plot");
+    const rawCanvas = within(plot).getByLabelText("heatmap original image");
+
+    expect(screen.getByLabelText("Image editor")).toHaveClass("heatmap-mode");
+    expect(report).toHaveTextContent("Current: plate-a");
+    expect(report).toHaveTextContent("Cell 20x20 px | Grid 5x4");
+    expect(screen.queryByLabelText("heatmap color legend")).not.toBeInTheDocument();
+    expect(rawCanvas).toHaveStyle({ opacity: "0.5" });
+    expect(rawCanvas).toHaveAttribute("width", "100");
+    expect(screen.queryByLabelText("Bounds overlay")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^ROI preview /)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Medium 50x50/ }));
+    expect(await screen.findByText("Pixel Density | Cell 50x50 px | Grid 2x2")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Small 20x20/ }));
+    await screen.findByText("Pixel Density | Cell 20x20 px | Grid 5x4");
+
+    const currentPlot = screen.getByLabelText("heatmap report plot");
+    const currentHeader = screen.getByLabelText("heatmap report").querySelector(".heatmap-report-header");
+    const currentRawCanvas = within(currentPlot).getByLabelText("heatmap original image");
+    vi.spyOn(currentRawCanvas, "getBoundingClientRect").mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 600,
+      bottom: 600,
+      width: 500,
+      height: 400,
+      x: 100,
+      y: 200,
+      toJSON: () => {},
+    });
+
+    fireEvent.mouseMove(currentHeader, { clientX: 120, clientY: 120 });
+    expect(within(currentPlot).queryByRole("status")).not.toBeInTheDocument();
+
+    fireEvent.mouseMove(currentPlot, { clientX: 325, clientY: 325 });
+    expect(await within(currentPlot).findByRole("status")).toHaveTextContent("Row 2, Column 3");
+
+    fireEvent.change(screen.getByLabelText("Original opacity"), { target: { value: "0.35" } });
+    expect(currentRawCanvas).toHaveStyle({ opacity: "0.35" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    expect(screen.getByLabelText("Image editor")).not.toHaveClass("heatmap-mode");
+  });
+
+  test("shows current and estimated metrics using the report scale and current calibration", async () => {
     mockApi();
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
     fireEvent.click(screen.getByRole("button", { name: "Estimated Collagen Density" }));
 
-    expect(await screen.findByLabelText("heatmap color legend")).toHaveTextContent("0");
-    expect(screen.getByLabelText("heatmap color legend")).toHaveTextContent("3 mg/ml");
+    const report = await screen.findByLabelText("heatmap report");
+    expect(report).toHaveTextContent("Color range: 0 to 3 mg/ml");
+    expect(within(report).getByLabelText("Estimated Collagen Density (mg/ml)")).toBeInTheDocument();
   });
 
   test("restores persisted heatmap metric after remount", async () => {
@@ -1570,7 +1660,7 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
-    const rawCanvas = screen.getByLabelText("raw16 image");
+    const rawCanvas = await screen.findByLabelText("heatmap original image");
     const heatmapCanvas = await screen.findByLabelText("heatmap overlay");
     const opacitySlider = screen.getByLabelText("Original opacity");
     expect(opacitySlider).toHaveAttribute("min", "0");
@@ -1584,8 +1674,9 @@ describe("App", () => {
     expect(rawCanvas).toHaveStyle({ opacity: "0" });
     expect(heatmapCanvas).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Original" }));
-    expect(rawCanvas).not.toHaveClass("heatmap-original-overlay");
-    expect(rawCanvas.style.opacity).toBe("");
+    const originalCanvas = screen.getByLabelText("raw16 image");
+    expect(originalCanvas).not.toHaveClass("heatmap-original-overlay");
+    expect(originalCanvas.style.opacity).toBe("");
   });
 
   test("hides bounds controls in Heat Map and restores them in Original", async () => {
@@ -1721,16 +1812,14 @@ describe("App", () => {
     expect(screen.getByLabelText("Original opacity")).toHaveValue("0.35");
   });
 
-  test("places the heatmap color legend in Heatmap controls", async () => {
+  test("removes the duplicate heatmap legend from the sidebar controls", async () => {
     mockApi();
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
-    const controls = screen.getByLabelText("Heatmap controls");
-    const stage = screen.getByTestId("image-stage");
-
-    expect(within(controls).getByLabelText("heatmap color legend")).toBeInTheDocument();
-    expect(within(stage).queryByLabelText("heatmap color legend")).not.toBeInTheDocument();
+    await screen.findByLabelText("heatmap report");
+    expect(within(screen.getByLabelText("Heatmap controls")).queryByLabelText("heatmap color legend")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("heatmap color legend")).not.toBeInTheDocument();
   });
 
   test("offers previous comparison only after the first image", async () => {
@@ -1845,10 +1934,11 @@ describe("App", () => {
 
     expect(await screen.findByText("Heatmap dimensions 99x80 do not match image 100x80.")).toBeInTheDocument();
     expect(screen.queryByLabelText("heatmap overlay")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("raw16 image")).not.toHaveClass("hidden-layer");
+    expect(screen.queryByLabelText("heatmap report")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("raw16 image")).not.toBeInTheDocument();
   });
 
-  test("places comparison min, zero, and max labels in accessible scale order", async () => {
+  test("adds the previous image and delta scale to the comparison report", async () => {
     const compatibleImages = [images[0], { ...images[1], width: 100, height: 80 }];
     mockApi({
       rootImages: compatibleImages,
@@ -1867,17 +1957,11 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Next image" }));
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
     fireEvent.click(await screen.findByRole("button", { name: "Compare Previous" }));
-    const legend = await screen.findByLabelText("heatmap color legend");
-    const markers = within(legend).getAllByLabelText(/comparison (maximum|zero|minimum)/);
-
-    expect(markers.map((marker) => marker.getAttribute("aria-label"))).toEqual([
-      "comparison minimum",
-      "comparison zero",
-      "comparison maximum",
-    ]);
-    expect(markers[0]).toHaveTextContent("-0.04");
-    expect(markers[1]).toHaveClass("heatmap-legend-zero");
-    expect(markers[2]).toHaveTextContent("0.04");
+    const report = await screen.findByLabelText("heatmap report");
+    expect(report).toHaveTextContent("Current: plate-b");
+    expect(report).toHaveTextContent("Previous: plate-a");
+    expect(report).toHaveTextContent("Color range: -0.04 to +0.04");
+    expect(within(report).getByLabelText("Delta Pixel Density")).toHaveClass("difference");
   });
 
   test("selects a separate batch folder and generates the fixed preset sizes", async () => {
