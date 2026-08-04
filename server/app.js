@@ -23,6 +23,26 @@ import {
 } from "./subimageService.js";
 
 const CONNECTION_MODE = "input-order-cycle";
+const SUBIMAGE_ERROR_MESSAGES = {
+  MISSING_SOURCE: "Source TIFF is missing.",
+  UNSUPPORTED_SOURCE: "Source TIFF must be single-channel 16-bit grayscale.",
+  DIMENSION_MISMATCH: "Source image dimensions do not match.",
+  INVALID_CROP: "Invalid subimage crop.",
+  ASPECT_RATIO_MISMATCH: "Subimage crop must match the source aspect ratio.",
+  INVALID_SAVED_CROP: "Saved subimage metadata is invalid.",
+  MISSING_SAVED_TIFF: "Saved subimage TIFF is missing.",
+  CROP_RENDER_FAILED: "Unable to render subimage TIFF.",
+  WRITE_FAILED: "Unable to save subimage.",
+  BATCH_PREFLIGHT_FAILED: "Subimage batch preflight failed.",
+  SOURCE_READ_FAILED: "Unable to read source TIFF.",
+  CROP_SAVE_FAILED: "Unable to save subimage.",
+  CROP_ROLLBACK_FAILED: "Unable to save subimage.",
+};
+const SUBIMAGE_BATCH_FAILURE_MESSAGES = {
+  ...SUBIMAGE_ERROR_MESSAGES,
+  BATCH_SCAN_FAILED: "Unable to scan source images.",
+  DIMENSION_MISMATCH: "Source dimensions do not match the template.",
+};
 
 function asyncRoute(handler) {
   return (request, response, next) => {
@@ -52,34 +72,26 @@ function isInvalidSavedAnalysisJsonError(error) {
   return /invalid analysis json/i.test(error.message);
 }
 
+function safeSubimageFailures(failures) {
+  return failures.map(({ imageFolder, code }) => ({
+    imageFolder,
+    code,
+    message: SUBIMAGE_BATCH_FAILURE_MESSAGES[code] ?? "Unable to process subimage.",
+  }));
+}
+
 function safeErrorResponse(error) {
   if (isUnknownImageError(error)) {
     return { status: 404, body: { error: "Image not found." } };
   }
 
   if (error instanceof SubimageError) {
-    const messages = {
-      MISSING_SOURCE: "Source TIFF is missing.",
-      UNSUPPORTED_SOURCE: "Source TIFF must be single-channel 16-bit grayscale.",
-      DIMENSION_MISMATCH: "Source image dimensions do not match.",
-      INVALID_CROP: "Invalid subimage crop.",
-      ASPECT_RATIO_MISMATCH: "Subimage crop must match the source aspect ratio.",
-      INVALID_SAVED_CROP: "Saved subimage metadata is invalid.",
-      MISSING_SAVED_TIFF: "Saved subimage TIFF is missing.",
-      CROP_RENDER_FAILED: "Unable to render subimage TIFF.",
-      WRITE_FAILED: "Unable to save subimage.",
-      BATCH_PREFLIGHT_FAILED: "Subimage batch preflight failed.",
-      SOURCE_READ_FAILED: "Unable to read source TIFF.",
-      CROP_SAVE_FAILED: "Unable to save subimage.",
-      CROP_ROLLBACK_FAILED: "Unable to save subimage.",
-    };
-
     return {
       status: error.status,
       body: {
-        error: messages[error.code] ?? "Unable to process subimage.",
+        error: SUBIMAGE_ERROR_MESSAGES[error.code] ?? "Unable to process subimage.",
         code: error.code,
-        ...(Array.isArray(error.details?.failures) ? { failures: error.details.failures } : {}),
+        ...(Array.isArray(error.details?.failures) ? { failures: safeSubimageFailures(error.details.failures) } : {}),
       },
     };
   }

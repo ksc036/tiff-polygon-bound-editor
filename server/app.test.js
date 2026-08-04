@@ -1223,7 +1223,7 @@ describe("createApp", () => {
     expect(body).toEqual({
       error: "Subimage batch preflight failed.",
       code: "BATCH_PREFLIGHT_FAILED",
-      failures: [{ imageFolder: "T02", code: "DIMENSION_MISMATCH", message: "Source image dimensions do not match the batch." }],
+      failures: [{ imageFolder: "T02", code: "DIMENSION_MISMATCH", message: "Source dimensions do not match the template." }],
     });
     expect(JSON.stringify(body)).not.toContain(imageRoot);
   });
