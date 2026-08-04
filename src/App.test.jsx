@@ -2839,6 +2839,7 @@ describe("App", () => {
     expect(await screen.findByText("50 x 40 px")).toBeInTheDocument();
     expect(screen.getByText("x 10")).toBeInTheDocument();
     expect(screen.getByText("y 8")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Create all subimages" })).toBeEnabled();
     expect(fetchMock).not.toHaveBeenCalledWith(
       expect.stringContaining("/subimage"),
@@ -2872,6 +2873,101 @@ describe("App", () => {
       }),
     ));
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+
+  test("does not reopen size selection or save a different size for a saved template owner", async () => {
+    const { fetchMock } = mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+
+    const setCrop = screen.getByRole("button", { name: "Set crop" });
+    expect(setCrop).toBeDisabled();
+    fireEvent.click(setCrop);
+    drawSubimageCrop(mockSubimageCanvasRect(), {
+      start: { clientX: 0, clientY: 0 },
+      end: { clientX: 390, clientY: 310 },
+    });
+
+    expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save subimage" })).toBeDisabled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/images/scan-a/subimage",
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+
+  test("clears an unsaved owner template after confirmed discard", async () => {
+    mockSubimageApi({
+      subimageResponse: () => jsonResponse({ hasSubimage: false, crop: null }),
+    });
+    render(<App />);
+    await enterSubimage();
+
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    drawSubimageCrop(mockSubimageCanvasRect());
+    expect(await screen.findByText("50 x 40 px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    fireEvent.click(screen.getByRole("button", { name: "Subimage" }));
+
+    expect(await screen.findByText("- x - px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replace all subimages" })).toBeDisabled();
+  });
+
+  test("creates missing crops from the visible moved owner draft", async () => {
+    const { fetchMock } = mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+    moveSubimageCrop(mockSubimageCanvasRect());
+    expect(await screen.findByText("x 50")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create all subimages" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/subimages/create-missing",
+      expect.objectContaining({ method: "POST" }),
+    ));
+    const createCall = fetchMock.mock.calls.find(([url, options]) =>
+      url === "/api/subimages/create-missing" && options?.method === "POST");
+    expect(JSON.parse(createCall[1].body)).toEqual({
+      templateCrop: { ...savedSubimage, x: 50, y: 0 },
+    });
+  });
+
+  test("blocks pointer edits while a Subimage save is in flight", async () => {
+    const pendingSave = deferred();
+    const { fetchMock } = mockSubimageApi({
+      saveSubimageResponse: () => pendingSave.promise,
+    });
+    render(<App />);
+    await enterSubimage();
+    const stage = mockSubimageCanvasRect();
+    moveSubimageCrop(stage);
+    expect(await screen.findByText("x 50")).toBeInTheDocument();
+
+    fireSubimagePointer(stage, "pointerdown", {
+      clientX: 600,
+      clientY: 200,
+      button: 0,
+      pointerId: 8,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save subimage" }));
+    expect(await screen.findByText("Saving subimage")).toBeInTheDocument();
+    fireSubimagePointer(stage, "pointermove", { clientX: 0, clientY: 800, pointerId: 8 });
+    const stayedAtSubmittedPosition = Boolean(screen.queryByText("x 50")) && Boolean(screen.queryByText("y 0"));
+
+    const saveCall = fetchMock.mock.calls.find(([url, options]) =>
+      url === "/api/images/scan-a/subimage" && options?.method === "PUT");
+    const submittedCrop = JSON.parse(saveCall[1].body).crop;
+    pendingSave.resolve(await jsonResponse({ crop: submittedCrop }));
+    await waitFor(() => expect(screen.queryByText("Saving subimage")).not.toBeInTheDocument());
+    fireSubimagePointer(stage, "pointermove", { clientX: 0, clientY: 800, pointerId: 8 });
+    fireSubimagePointer(stage, "pointerup", { clientX: 0, clientY: 800, pointerId: 8 });
+    expect(stayedAtSubmittedPosition).toBe(true);
+    expect(screen.getByText("x 50")).toBeInTheDocument();
+    expect(screen.getByText("y 0")).toBeInTheDocument();
   });
 
   test("creates missing crops from the first image template, reports results, and reloads the active crop", async () => {
@@ -2966,6 +3062,7 @@ describe("App", () => {
     expect(await screen.findByText("x 30")).toBeInTheDocument();
     expect(screen.getByText("y 20")).toBeInTheDocument();
     expect(screen.getByText("Template: plate-a")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
   });
 

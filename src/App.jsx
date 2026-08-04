@@ -218,9 +218,15 @@ export default function App() {
   const isTemplateOwner = activeIndex === 0;
   const subimageDirty = Boolean(subimageDraft) && !sameCrop(subimageDraft, savedSubimageCrop);
   const subimageSizeLocked = Boolean(subimageTemplateCrop) && subimageMode === "idle";
-  const canCreateMissing = isTemplateOwner && Boolean(subimageTemplateCrop);
+  const subimageDraftMatchesTemplateSize = sameCropSize(subimageDraft, subimageTemplateCrop);
+  const canSetSubimageCrop = isTemplateOwner && !subimageTemplateCrop;
+  const canCreateMissing =
+    isTemplateOwner && Boolean(subimageDraft) && subimageDraftMatchesTemplateSize;
   const canSaveSubimage =
-    subimageSizeLocked && subimageDirty && (Boolean(savedSubimageCrop) || !isTemplateOwner);
+    subimageSizeLocked &&
+    subimageDirty &&
+    subimageDraftMatchesTemplateSize &&
+    (Boolean(savedSubimageCrop) || !isTemplateOwner);
   const canReplaceSubimages =
     (subimageMode === "idle" && Boolean(subimageTemplateCrop)) ||
     (subimageMode === "confirm-replacement" && Boolean(subimageDraft));
@@ -466,7 +472,7 @@ export default function App() {
 
         const ownerCrop = validSubimageCropFor(ownerPayload, ownerImage);
         const activeCrop = validSubimageCropFor(activePayload, requestedImage);
-        if (ownerCrop) setSubimageTemplateCrop(ownerCrop);
+        setSubimageTemplateCrop(ownerCrop);
 
         setSavedSubimageCrop(activeCrop);
         setSubimageDraft(
@@ -650,10 +656,11 @@ export default function App() {
 
   const discardSubimageDraft = useCallback(() => {
     setSubimageDraft(savedSubimageCrop);
+    if (isTemplateOwner) setSubimageTemplateCrop(savedSubimageCrop);
     setSubimageMode("idle");
     setSubimageInteraction(null);
     setSubimageError("");
-  }, [savedSubimageCrop]);
+  }, [isTemplateOwner, savedSubimageCrop]);
 
   const confirmNavigationDiscard = useCallback(() => {
     if (!dirty && !subimageDirty) return true;
@@ -846,6 +853,7 @@ export default function App() {
     if (
       imageLayer !== "subimage" ||
       !hasActiveImageDimensions ||
+      subimageBusy !== null ||
       (event.pointerType && event.pointerType !== "mouse") ||
       event.button !== 0
     ) return;
@@ -873,7 +881,7 @@ export default function App() {
   function handleStagePointerMove(event) {
     if (!hasActiveImageDimensions) return;
     if (imageLayer === "subimage") {
-      if (!subimageInteraction) return;
+      if (!subimageInteraction || subimageBusy !== null) return;
       const nextPointer = eventToImagePoint(event, activeImage, {
         allowOutside: true,
         contentRect: imageContentRect(canvasRef.current, event.currentTarget),
@@ -1134,7 +1142,7 @@ export default function App() {
   }
 
   function handleSetSubimageCrop() {
-    if (!isTemplateOwner || subimageBusy !== null) return;
+    if (!canSetSubimageCrop || subimageBusy !== null) return;
     setSubimageMode("select-initial");
     setSubimageInteraction(null);
     setSubimageError("");
@@ -1152,9 +1160,16 @@ export default function App() {
   }
 
   async function handleSaveSubimage() {
-    if (!canSaveSubimage || !activeImage || !subimageDraft || subimageBusy !== null) return;
+    if (
+      !canSaveSubimage ||
+      !activeImage ||
+      !subimageDraft ||
+      !sameCropSize(subimageDraft, subimageTemplateCrop) ||
+      subimageBusy !== null
+    ) return;
     const context = subimageRequestContext();
     const draft = subimageDraft;
+    setSubimageInteraction(null);
     setSubimageBusy("saving");
     setSubimageError("");
 
@@ -1196,9 +1211,16 @@ export default function App() {
   }
 
   async function handleCreateMissingSubimages() {
-    if (!canCreateMissing || !activeImage || !subimageTemplateCrop || subimageBusy !== null) return;
+    if (
+      !canCreateMissing ||
+      !activeImage ||
+      !subimageDraft ||
+      !sameCropSize(subimageDraft, subimageTemplateCrop) ||
+      subimageBusy !== null
+    ) return;
     const context = subimageRequestContext();
-    const templateCrop = subimageTemplateCrop;
+    const templateCrop = subimageDraft;
+    setSubimageInteraction(null);
     setSubimageBusy("create-missing");
     setSubimageError("");
     setSubimageBatchResult(null);
@@ -1231,6 +1253,7 @@ export default function App() {
 
     const context = subimageRequestContext();
     const templateCrop = subimageDraft;
+    setSubimageInteraction(null);
     setSubimageBusy("replace-all");
     setSubimageError("");
     setSubimageBatchResult(null);
@@ -1610,6 +1633,7 @@ export default function App() {
             error={subimageError}
             result={subimageBatchResult}
             canCreateMissing={canCreateMissing}
+            canSetCrop={canSetSubimageCrop}
             canSave={canSaveSubimage}
             canReplace={canReplaceSubimages}
             onSetCrop={handleSetSubimageCrop}
@@ -2814,6 +2838,17 @@ function validSubimageCropFor(payload, image) {
     height: firstFinite(image?.height, payload.crop.sourceHeight),
   };
   return cropFitsImage(payload.crop, imageSize) ? payload.crop : null;
+}
+
+function sameCropSize(crop, template) {
+  return (
+    crop != null &&
+    template != null &&
+    crop.sourceWidth === template.sourceWidth &&
+    crop.sourceHeight === template.sourceHeight &&
+    crop.width === template.width &&
+    crop.height === template.height
+  );
 }
 
 function heatmapDimensionError(heatmap, image) {

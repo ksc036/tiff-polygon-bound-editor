@@ -31,6 +31,7 @@ function renderPanel(overrides = {}) {
     error: "",
     result: null,
     canCreateMissing: true,
+    canSetCrop: true,
     canSave: false,
     canReplace: false,
     ...callbacks,
@@ -61,11 +62,19 @@ describe("SubimagePanel", () => {
   });
 
   test("identifies a later image and its separate template owner", () => {
-    renderPanel({ activeImageName: "T02", isTemplateOwner: false, canCreateMissing: false });
+    const { callbacks } = renderPanel({
+      activeImageName: "T02",
+      isTemplateOwner: false,
+      canCreateMissing: false,
+      canSetCrop: false,
+    });
 
     expect(screen.getByText("T02")).toBeInTheDocument();
     expect(screen.getByText("Template: T01")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    expect(callbacks.onSetCrop).not.toHaveBeenCalled();
   });
 
   test("enables saving a dirty locked crop", () => {

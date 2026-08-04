@@ -10,6 +10,7 @@ export default function SubimagePanel({
   error,
   result,
   canCreateMissing,
+  canSetCrop,
   canSave,
   canReplace,
   onSetCrop,
@@ -62,7 +63,7 @@ export default function SubimagePanel({
           </>
         ) : (
           <>
-            <button type="button" disabled={actionsLocked} onClick={onSetCrop}>Set crop</button>
+            <button type="button" disabled={actionsLocked || !canSetCrop} onClick={onSetCrop}>Set crop</button>
             <button type="button" disabled={actionsLocked || !canCreateMissing} onClick={onCreateMissing}>
               Create all subimages
             </button>
