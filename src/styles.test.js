@@ -104,6 +104,19 @@ describe("application layout CSS", () => {
     expect(hiddenLayerRule).toContain("opacity: 0");
   });
 
+  test("keeps the subimage crop overlay above editor handles without taking drag input", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const overlayRule = css.match(/\.subimage-overlay\s*\{[^}]+\}/)?.[0] ?? "";
+    const shadeRule = css.match(/\.subimage-overlay \[data-testid="subimage-outside-shade"\]\s*\{[^}]+\}/)?.[0] ?? "";
+    const actionsRule = css.match(/\.subimage-actions\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(overlayRule).toContain("z-index: 4");
+    expect(overlayRule).toContain("pointer-events: none");
+    expect(shadeRule).toContain("fill: rgba(0, 0, 0, 0.62)");
+    expect(actionsRule).toContain("grid-template-columns: minmax(0, 1fr)");
+  });
+
   test("keeps all nine toolbar actions on a compact single row", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 

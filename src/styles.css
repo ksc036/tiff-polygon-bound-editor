@@ -191,6 +191,118 @@ input[type="range"] {
   border-bottom: 1px solid #27313c;
 }
 
+.subimage-controls,
+.subimage-fields,
+.subimage-actions,
+.subimage-batch-result {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.subimage-controls {
+  padding: 10px 0;
+  border-top: 1px solid #27313c;
+  border-bottom: 1px solid #27313c;
+}
+
+.subimage-heading {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.subimage-heading h2 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.subimage-identity,
+.subimage-state,
+.subimage-dirty {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.subimage-identity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: #9faeba;
+}
+
+.subimage-identity strong {
+  color: #e8edf2;
+}
+
+.subimage-dirty {
+  color: #ffd78a;
+}
+
+.subimage-state {
+  color: #9ee6b6;
+}
+
+.subimage-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.subimage-fields div {
+  min-width: 0;
+}
+
+.subimage-fields dt {
+  color: #9faeba;
+  font-size: 0.76rem;
+}
+
+.subimage-fields dd {
+  min-width: 0;
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  color: #e8edf2;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.subimage-size-field {
+  grid-column: 1 / -1;
+}
+
+.subimage-actions {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.subimage-actions button {
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 0.82rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.subimage-error {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #f6b9c2;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.subimage-batch-result {
+  color: #b7c5d1;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.subimage-batch-result span {
+  overflow-wrap: anywhere;
+}
+
 .heatmap-batch-heading {
   display: flex;
   align-items: center;
@@ -627,6 +739,26 @@ input[type="range"] {
   image-rendering: pixelated;
   shape-rendering: crispEdges;
   pointer-events: none;
+}
+
+.subimage-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.subimage-overlay [data-testid="subimage-outside-shade"] {
+  fill: rgba(0, 0, 0, 0.62);
+}
+
+.subimage-crop-outline {
+  fill: none;
+  stroke: #22c55e;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
 }
 
 .raw-canvas.heatmap-original-overlay {
