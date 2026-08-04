@@ -6,7 +6,9 @@ import { afterEach, describe, expect, test } from "vitest";
 import { createStorage } from "./storage.js";
 import {
   SubimageError,
+  createMissingSubimages,
   loadSubimage,
+  replaceAllSubimages,
   saveSubimage,
   validateCrop,
 } from "./subimageService.js";
@@ -67,6 +69,24 @@ async function writeGrey16Tiff(rootDir, folderName, width, height, pixels) {
   await mkdir(imageDir, { recursive: true });
   await mkdir(maskDir, { recursive: true });
   await writeFile(path.join(imageDir, `${folderName}.tif`), uint16Tiff({ width, height, pixels }));
+}
+
+function squareCrop({ x, y }) {
+  return { sourceWidth: 8, sourceHeight: 8, x, y, width: 4, height: 4 };
+}
+
+async function createThreeImageRoot({ width, height, thirdSize = { width, height } }) {
+  const rootDir = await createTempRoot();
+  const sizes = [{ width, height }, { width, height }, thirdSize];
+  for (const [index, size] of sizes.entries()) {
+    const folderName = `T0${index + 1}`;
+    const pixels = Array.from(
+      { length: size.width * size.height },
+      (_, pixelIndex) => pixelIndex + index * 100,
+    );
+    await writeGrey16Tiff(rootDir, folderName, size.width, size.height, pixels);
+  }
+  return rootDir;
 }
 
 async function writeUnsupportedTiff(rootDir, folderName, input, transform = (image) => image) {
@@ -308,4 +328,120 @@ test("SubimageError carries the public error contract", () => {
     status: 400,
     details: { x: 1 },
   });
+});
+
+test("create-missing preserves valid crops and creates only absent crops", async () => {
+  const rootDir = await createThreeImageRoot({ width: 8, height: 8 });
+  const storage = createStorage({ initialRoot: rootDir });
+  await saveSubimage(storage, "T02", squareCrop({ x: 1, y: 1 }));
+  const preservedTiff = await readFile(storage.imagePaths("T02").subimagePath);
+  const preservedJson = await readFile(storage.imagePaths("T02").subimageCropPath);
+
+  const result = await createMissingSubimages(storage, squareCrop({ x: 2, y: 2 }));
+
+  expect(result).toEqual({
+    operation: "create-missing",
+    status: "complete",
+    code: null,
+    created: ["T01", "T03"],
+    preserved: ["T02"],
+    replaced: [],
+    failed: [],
+  });
+  await expect(readFile(storage.imagePaths("T02").subimagePath)).resolves.toEqual(preservedTiff);
+  await expect(readFile(storage.imagePaths("T02").subimageCropPath)).resolves.toEqual(preservedJson);
+});
+
+test("dimension mismatch fails preflight before any subimage directory is written", async () => {
+  const rootDir = await createThreeImageRoot({
+    width: 8,
+    height: 8,
+    thirdSize: { width: 10, height: 10 },
+  });
+  const storage = createStorage({ initialRoot: rootDir });
+
+  await expect(createMissingSubimages(storage, squareCrop({ x: 2, y: 2 }))).rejects.toMatchObject({
+    code: "BATCH_PREFLIGHT_FAILED",
+    details: { failures: [expect.objectContaining({ imageFolder: "T03", code: "DIMENSION_MISMATCH" })] },
+  });
+  for (const image of await storage.scanImages()) {
+    await expect(access(storage.imagePaths(image.id).subimageDir)).rejects.toMatchObject({ code: "ENOENT" });
+  }
+});
+
+test("create-missing rejects incomplete and malformed saved pairs during preflight", async () => {
+  const rootDir = await createThreeImageRoot({ width: 8, height: 8 });
+  const storage = createStorage({ initialRoot: rootDir });
+  const incompletePaths = storage.imagePaths("T02");
+  const malformedPaths = storage.imagePaths("T03");
+  await mkdir(incompletePaths.subimageDir, { recursive: true });
+  await writeFile(incompletePaths.subimagePath, "lone TIFF");
+  await mkdir(malformedPaths.subimageDir, { recursive: true });
+  await writeFile(malformedPaths.subimageCropPath, "{broken json");
+
+  const error = await createMissingSubimages(storage, squareCrop({ x: 2, y: 2 })).catch((caught) => caught);
+
+  expect(error).toMatchObject({
+    code: "BATCH_PREFLIGHT_FAILED",
+    details: {
+      failures: [
+        expect.objectContaining({ imageFolder: "T02", code: "INVALID_SAVED_CROP" }),
+        expect.objectContaining({ imageFolder: "T03", code: "INVALID_SAVED_CROP" }),
+      ],
+    },
+  });
+  expect(error.message).not.toContain(rootDir);
+  await expect(access(storage.imagePaths("T01").subimageDir)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("replace-all rewrites every valid image with the new template", async () => {
+  const rootDir = await createThreeImageRoot({ width: 8, height: 8 });
+  const storage = createStorage({ initialRoot: rootDir });
+  await createMissingSubimages(storage, squareCrop({ x: 0, y: 0 }));
+
+  const result = await replaceAllSubimages(storage, squareCrop({ x: 3, y: 2 }));
+
+  expect(result).toMatchObject({
+    operation: "replace-all",
+    status: "complete",
+    code: null,
+    replaced: ["T01", "T02", "T03"],
+    created: [],
+    preserved: [],
+    failed: [],
+  });
+  for (const image of await storage.scanImages()) {
+    await expect(storage.loadSubimageCrop(image.id)).resolves.toMatchObject({
+      x: 3,
+      y: 2,
+      width: 4,
+      height: 4,
+    });
+  }
+});
+
+test("reports a runtime partial batch and preserves the failed image pair", async () => {
+  const rootDir = await createThreeImageRoot({ width: 8, height: 8 });
+  const storage = createStorage({ initialRoot: rootDir });
+  await createMissingSubimages(storage, squareCrop({ x: 0, y: 0 }));
+  const oldTiff = await readFile(storage.imagePaths("T02").subimagePath);
+  const oldJson = await readFile(storage.imagePaths("T02").subimageCropPath);
+
+  const failingStorage = {
+    ...storage,
+    async saveSubimageCrop(id, crop) {
+      if (id === "T02") throw new Error("simulated crop JSON write failure");
+      return storage.saveSubimageCrop(id, crop);
+    },
+  };
+  const result = await replaceAllSubimages(failingStorage, squareCrop({ x: 2, y: 2 }));
+
+  expect(result).toMatchObject({
+    status: "partial",
+    code: "PARTIAL_BATCH",
+    replaced: ["T01", "T03"],
+    failed: [{ imageFolder: "T02", code: "WRITE_FAILED", message: "Unable to save subimage." }],
+  });
+  await expect(readFile(storage.imagePaths("T02").subimagePath)).resolves.toEqual(oldTiff);
+  await expect(readFile(storage.imagePaths("T02").subimageCropPath)).resolves.toEqual(oldJson);
 });

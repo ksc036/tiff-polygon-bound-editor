@@ -177,6 +177,111 @@ async function restoreTiff({ paths, hadPriorTiff, backupPath, deps }) {
   await deps.rm(paths.subimagePath, { force: true });
 }
 
+function batchFailure(image, error, fallback) {
+  if (error instanceof SubimageError) {
+    return { imageFolder: image.imageFolder, code: error.code, message: error.message };
+  }
+  return { imageFolder: image.imageFolder, ...fallback };
+}
+
+function emptyBatchResult(operation) {
+  return {
+    operation,
+    status: "complete",
+    code: null,
+    created: [],
+    preserved: [],
+    replaced: [],
+    failed: [],
+  };
+}
+
+function finalizeBatch(result) {
+  if (result.failed.length > 0) {
+    result.status = "partial";
+    result.code = "PARTIAL_BATCH";
+  }
+  return result;
+}
+
+async function preflightBatch(storage, templateCrop, operation, options) {
+  const images = await storage.scanImages();
+  const failures = [];
+  const plannedImages = [];
+
+  for (const image of images) {
+    const paths = storage.imagePaths(image.id);
+    let source;
+    try {
+      source = await readSupportedSource(paths.imagePath, options);
+    } catch (error) {
+      failures.push(batchFailure(image, error, {
+        code: "SOURCE_READ_FAILED",
+        message: "Unable to read the source image.",
+      }));
+      continue;
+    }
+
+    try {
+      validateCrop(templateCrop, source);
+    } catch (error) {
+      failures.push(batchFailure(image, error, {
+        code: "INVALID_CROP",
+        message: "Crop fields must be integers.",
+      }));
+      continue;
+    }
+
+    if (operation === "create-missing") {
+      try {
+        const saved = await loadSubimage(storage, image.id, options);
+        plannedImages.push({ image, action: saved.hasSubimage ? "preserved" : "created" });
+      } catch (error) {
+        failures.push(batchFailure(image, error, {
+          code: "INVALID_SAVED_CROP",
+          message: "Saved crop metadata is invalid.",
+        }));
+      }
+    } else {
+      plannedImages.push({ image, action: "replaced" });
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new SubimageError("BATCH_PREFLIGHT_FAILED", "Subimage batch preflight failed.", {
+      status: 422,
+      details: { failures },
+    });
+  }
+
+  return plannedImages;
+}
+
+async function runBatch(storage, templateCrop, operation, options = {}) {
+  const plannedImages = await preflightBatch(storage, templateCrop, operation, options);
+  const result = emptyBatchResult(operation);
+
+  for (const { image, action } of plannedImages) {
+    if (action === "preserved") {
+      result.preserved.push(image.imageFolder);
+      continue;
+    }
+
+    try {
+      await saveSubimage(storage, image.id, templateCrop, options);
+      result[action].push(image.imageFolder);
+    } catch {
+      result.failed.push({
+        imageFolder: image.imageFolder,
+        code: "WRITE_FAILED",
+        message: "Unable to save subimage.",
+      });
+    }
+  }
+
+  return finalizeBatch(result);
+}
+
 export async function loadSubimage(storage, id, options = {}) {
   const paths = storage.imagePaths(id);
   const deps = dependencies(options);
@@ -263,4 +368,12 @@ export async function saveSubimage(storage, id, crop, options = {}) {
   } finally {
     await cleanupTemporaryFiles(deps, tempTiffPath, backupPath);
   }
+}
+
+export function createMissingSubimages(storage, templateCrop, options = {}) {
+  return runBatch(storage, templateCrop, "create-missing", options);
+}
+
+export function replaceAllSubimages(storage, templateCrop, options = {}) {
+  return runBatch(storage, templateCrop, "replace-all", options);
 }
