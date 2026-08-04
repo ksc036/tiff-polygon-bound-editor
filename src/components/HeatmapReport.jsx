@@ -79,17 +79,6 @@ export default function HeatmapReport(props) {
               aria-label="heatmap original image"
               style={{ opacity: props.originalOpacity }}
             />
-            <svg
-              className="heatmap-cell-grid"
-              aria-label="heatmap cell grid"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-              style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
-            >
-              {gridLines(props.heatmap).map((line) => (
-                <line key={line.key} {...line.attributes} />
-              ))}
-            </svg>
           </div>
         </div>
         <div className="heatmap-color-scale">
@@ -130,44 +119,4 @@ export default function HeatmapReport(props) {
 
 function tickPosition(index, count) {
   return `${(index / (count - 1)) * 100}%`;
-}
-
-export function gridLines(heatmap) {
-  const verticalPositions = uniqueSortedPositions(
-    heatmap.cells.map((cell) => cell.x),
-    heatmap.width,
-  );
-  const horizontalPositions = uniqueSortedPositions(
-    heatmap.cells.map((cell) => cell.y),
-    heatmap.height,
-  );
-
-  return [
-    ...verticalPositions.map((position) => ({
-      key: `vertical-${position}`,
-      attributes: {
-        x1: percentage(position, heatmap.width),
-        x2: percentage(position, heatmap.width),
-        y1: "0%",
-        y2: "100%",
-      },
-    })),
-    ...horizontalPositions.map((position) => ({
-      key: `horizontal-${position}`,
-      attributes: {
-        x1: "0%",
-        x2: "100%",
-        y1: percentage(position, heatmap.height),
-        y2: percentage(position, heatmap.height),
-      },
-    })),
-  ];
-}
-
-function uniqueSortedPositions(positions, edge) {
-  return [...new Set([...positions, edge])].sort((left, right) => left - right);
-}
-
-function percentage(position, total) {
-  return `${(position / total) * 100}%`;
 }

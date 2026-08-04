@@ -44,7 +44,7 @@ const POINT_ORDER_COLLAPSED_STAGE_GAIN = 24;
 const ROI_SETTINGS_COLLAPSED_STAGE_GAIN = 56;
 const ANALYSIS_PANEL_HEIGHT_KEY = "raw16-editor-analysis-panel-height";
 const DEFAULT_ANALYSIS_PANEL_HEIGHT = 210;
-const MIN_ANALYSIS_PANEL_HEIGHT = 120;
+const MIN_ANALYSIS_PANEL_HEIGHT = 0;
 const MAX_ANALYSIS_PANEL_HEIGHT = 520;
 const DEFAULT_COLLAGEN_DENSITY_SLOPE = 0.069676956982087;
 const DEFAULT_COLLAGEN_DENSITY_INTERCEPT = 0.067893820336777;
@@ -143,6 +143,7 @@ export default function App() {
   const [activeMetricHelp, setActiveMetricHelp] = useState(null);
   const [imageLayer, setImageLayer] = useState("original");
   const [showRoiOverlay, setShowRoiOverlay] = useState(true);
+  const [sidePanelOpen, setSidePanelOpen] = useState(true);
   const [pointOrderOpen, setPointOrderOpen] = useState(true);
   const [roiSettingsOpen, setRoiSettingsOpen] = useState(true);
   const [migrationDraft, setMigrationDraft] = useState(null);
@@ -1179,7 +1180,7 @@ export default function App() {
   );
 
   return (
-    <main className="app-shell">
+    <main className={sidePanelOpen ? "app-shell" : "app-shell side-panel-collapsed"}>
       <form
         className="top-toolbar"
         onSubmit={(event) => {
@@ -1243,7 +1244,7 @@ export default function App() {
         </button>
       </form>
 
-      <aside className="side-panel" aria-label="Groups">
+      <aside id="groups-panel" className="side-panel" aria-label="Groups" hidden={!sidePanelOpen}>
         <div className="panel-heading">
           <div className="panel-title-row">
             <h1>Groups</h1>
@@ -1538,6 +1539,20 @@ export default function App() {
         }}
       >
         <div className="stage-tools">
+          <button
+            type="button"
+            className="side-panel-toggle"
+            aria-label="Toggle groups panel"
+            aria-controls="groups-panel"
+            aria-expanded={sidePanelOpen}
+            onClick={() => setSidePanelOpen((current) => !current)}
+            title={sidePanelOpen ? "Hide groups panel" : "Show groups panel"}
+          >
+            <span className="side-panel-toggle-icon" aria-hidden="true">
+              {sidePanelOpen ? "<" : ">"}
+            </span>
+            <span>Groups</span>
+          </button>
           <div className="segmented-control layer-control" aria-label="Image layer">
             <button
               type="button"

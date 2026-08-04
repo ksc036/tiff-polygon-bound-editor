@@ -1339,6 +1339,33 @@ describe("App", () => {
     expect(stageShell.style.getPropertyValue("--stage-collapsed-space")).toBe("80px");
   });
 
+  test("collapses and restores the groups side panel from the editor toolbar", async () => {
+    mockApi();
+
+    const { container } = render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const appShell = container.querySelector(".app-shell");
+    const groupsPanel = container.querySelector("#groups-panel");
+    const toggle = screen.getByRole("button", { name: "Toggle groups panel" });
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(groupsPanel).not.toHaveAttribute("hidden");
+    expect(appShell).not.toHaveClass("side-panel-collapsed");
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(groupsPanel).toHaveAttribute("hidden");
+    expect(appShell).toHaveClass("side-panel-collapsed");
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(groupsPanel).not.toHaveAttribute("hidden");
+    expect(appShell).not.toHaveClass("side-panel-collapsed");
+  });
+
   test("resizes the analysis panel by dragging the lower splitter", async () => {
     mockApi();
 
@@ -1361,6 +1388,25 @@ describe("App", () => {
     expect(stageShell.style.getPropertyValue("--analysis-panel-stage-adjust")).toBe("-80px");
     expect(analysisPanel).toHaveStyle({ height: "290px" });
     expect(localStorage.getItem("raw16-editor-analysis-panel-height")).toBe("290");
+  });
+
+  test("lets the analysis splitter move all the way down", async () => {
+    mockApi();
+
+    const { container } = render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    const stageShell = container.querySelector(".stage-shell");
+    const analysisPanel = screen.getByLabelText("Analysis");
+    const resizeHandle = screen.getByRole("button", { name: "Resize analysis panel" });
+
+    fireEvent(resizeHandle, new MouseEvent("pointerdown", { bubbles: true, clientY: 500 }));
+    fireEvent(window, new MouseEvent("pointermove", { bubbles: true, clientY: 800 }));
+    fireEvent(window, new MouseEvent("pointerup", { bubbles: true }));
+
+    expect(stageShell.style.getPropertyValue("--analysis-panel-height")).toBe("0px");
+    expect(analysisPanel).toHaveStyle({ height: "0px" });
+    expect(resizeHandle).toHaveAttribute("aria-valuemin", "0");
   });
 
   test("sizes the image stage from the available frame instead of a fixed viewport estimate", async () => {

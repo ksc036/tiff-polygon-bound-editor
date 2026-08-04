@@ -13,6 +13,14 @@ describe("application layout CSS", () => {
     expect(sidePanelRule).toContain("overflow: auto");
   });
 
+  test("returns the side panel column to the image editor when groups are collapsed", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const collapsedShellRule = css.match(/\.app-shell\.side-panel-collapsed\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(collapsedShellRule).toContain("grid-template-columns: minmax(0, 1fr)");
+  });
+
   test("keeps ROI preview stroke widths in image coordinates", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
@@ -30,23 +38,20 @@ describe("application layout CSS", () => {
     expect(actionsRule).toContain("grid-template-columns: minmax(0, 1fr)");
   });
 
-  test("stacks the Heat Map plot layers in presentation order", async () => {
+  test("stacks the Heat Map without an internal cell-grid layer", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
     const originalOverlayRule = css.match(/\.raw-canvas\.heatmap-original-overlay\s*\{[^}]+\}/)?.[0] ?? "";
     const heatmapOverlayRule = css.match(/\.heatmap-overlay\s*\{[^}]+\}/)?.[0] ?? "";
-    const cellGridRule = css.match(/\.heatmap-cell-grid\s*\{[^}]+\}/)?.[0] ?? "";
     const tooltipRule = css.match(/\.heatmap-tooltip\s*\{[^}]+\}/)?.[0] ?? "";
 
     expect(heatmapOverlayRule).toContain("z-index: 1");
     expect(originalOverlayRule).toContain("z-index: 2");
-    expect(cellGridRule).toContain("z-index: 3");
-    expect(cellGridRule).toContain("pointer-events: none");
     expect(tooltipRule).toContain("z-index: 5");
+    expect(css).not.toContain(".heatmap-cell-grid");
 
     expect(css.indexOf(".heatmap-overlay {")).toBeLessThan(css.indexOf(".raw-canvas.heatmap-original-overlay {"));
-    expect(css.indexOf(".raw-canvas.heatmap-original-overlay {")).toBeLessThan(css.indexOf(".heatmap-cell-grid {"));
-    expect(css.indexOf(".heatmap-cell-grid {")).toBeLessThan(css.indexOf(".heatmap-tooltip {"));
+    expect(css.indexOf(".raw-canvas.heatmap-original-overlay {")).toBeLessThan(css.indexOf(".heatmap-tooltip {"));
   });
 
   test("bounds the report, clips the plot, and permits header text to wrap", async () => {

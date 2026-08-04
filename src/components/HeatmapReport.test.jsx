@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import HeatmapReport, { gridLines } from "./HeatmapReport.jsx";
+import HeatmapReport from "./HeatmapReport.jsx";
 
 const heatmap = {
   width: 10,
@@ -34,7 +34,7 @@ describe("HeatmapReport", () => {
     vi.restoreAllMocks();
   });
 
-  test("renders the absolute heatmap figure with axes, grid, TIFF overlay, and hover status", () => {
+  test("renders axes outside the heatmap without drawing a grid over the image", () => {
     render(
       <HeatmapReport
         heatmap={heatmap}
@@ -56,15 +56,9 @@ describe("HeatmapReport", () => {
     expect(screen.getAllByTestId("heatmap-x-tick")).toHaveLength(5);
     expect(screen.getAllByTestId("heatmap-y-tick")).toHaveLength(5);
     expect(screen.getAllByTestId("heatmap-scale-tick")).toHaveLength(5);
-    expect(screen.getByLabelText("heatmap cell grid")).toBeInTheDocument();
+    expect(screen.queryByLabelText("heatmap cell grid")).not.toBeInTheDocument();
     expect(screen.getByLabelText("heatmap original image")).toHaveStyle({ opacity: "0.5" });
     expect(screen.getByRole("status")).toHaveTextContent("Row 1, Column 1");
-  });
-
-  test("stretches a rectangular cell grid across the full plot", () => {
-    renderAbsoluteReport();
-
-    expect(screen.getByLabelText("heatmap cell grid")).toHaveAttribute("preserveAspectRatio", "none");
   });
 
   test("positions five axis ticks at the four plot intervals", () => {
@@ -143,22 +137,3 @@ function renderAbsoluteReport() {
     />,
   );
 }
-
-test("gridLines uses image-space positions and includes partial-cell image edges", () => {
-  const lines = gridLines({
-    width: 10,
-    height: 5,
-    cells: [
-      { x: 0, y: 0, width: 4, height: 5 },
-      { x: 4, y: 0, width: 6, height: 5 },
-    ],
-  });
-
-  expect(lines).toEqual([
-    { key: "vertical-0", attributes: { x1: "0%", x2: "0%", y1: "0%", y2: "100%" } },
-    { key: "vertical-4", attributes: { x1: "40%", x2: "40%", y1: "0%", y2: "100%" } },
-    { key: "vertical-10", attributes: { x1: "100%", x2: "100%", y1: "0%", y2: "100%" } },
-    { key: "horizontal-0", attributes: { x1: "0%", x2: "100%", y1: "0%", y2: "0%" } },
-    { key: "horizontal-5", attributes: { x1: "0%", x2: "100%", y1: "100%", y2: "100%" } },
-  ]);
-});

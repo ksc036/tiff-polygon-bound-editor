@@ -78,6 +78,10 @@ input[type="range"] {
   background: #101317;
 }
 
+.app-shell.side-panel-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .top-toolbar {
   grid-column: 1 / -1;
   display: grid;
@@ -135,6 +139,10 @@ input[type="range"] {
   padding: 14px;
   border-right: 1px solid #27313c;
   background: #151a20;
+}
+
+.side-panel[hidden] {
+  display: none;
 }
 
 .panel-heading {
@@ -388,6 +396,22 @@ input[type="range"] {
   background: #111820;
 }
 
+.side-panel-toggle {
+  display: inline-grid;
+  grid-template-columns: 16px auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px 0 7px;
+}
+
+.side-panel-toggle-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  color: #9fc9ed;
+  font-weight: 800;
+}
+
 .stage-tools label {
   display: inline-flex;
   align-items: center;
@@ -607,15 +631,6 @@ input[type="range"] {
 
 .raw-canvas.heatmap-original-overlay {
   z-index: 2;
-  pointer-events: none;
-}
-
-.heatmap-cell-grid {
-  z-index: 3;
-  overflow: visible;
-  stroke: rgba(255, 255, 255, 0.58);
-  stroke-width: 0.34;
-  filter: drop-shadow(0 0 0.35px rgba(0, 0, 0, 0.9));
   pointer-events: none;
 }
 
