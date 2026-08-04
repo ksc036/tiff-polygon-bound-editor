@@ -338,6 +338,7 @@ function mockApi({
   rootImages = images,
   rootPath = "/data/root",
   appliedRootPath = "/typed/root",
+  appliedRootImages = rootImages,
   saveResponse = null,
   exportResponse = null,
   delayedExport = false,
@@ -359,7 +360,7 @@ function mockApi({
       return jsonResponse({ rootPath, images: rootImages });
     }
     if (url === "/api/root" && method === "POST") {
-      return jsonResponse({ rootPath: appliedRootPath, images: rootImages });
+      return jsonResponse({ rootPath: appliedRootPath, images: appliedRootImages });
     }
     if (url === "/api/root/select" && method === "POST") {
       return jsonResponse({ rootPath: "/selected/root", images: rootImages });
@@ -1495,6 +1496,73 @@ describe("App", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=100"),
     );
+  });
+
+  test("hides the current report while navigation waits for the next image heatmap", async () => {
+    const nextHeatmapRequest = deferred();
+    const { fetchMock } = mockApi({
+      heatmapResponse: (url, cellSize) =>
+        url.includes("scan-b")
+          ? nextHeatmapRequest.promise
+          : jsonResponse({ heatmap: heatmapFixture("plate-a", cellSize) }),
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(await screen.findByText("Current: plate-a")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=20"),
+    );
+    expect(screen.queryByLabelText("heatmap report")).not.toBeInTheDocument();
+
+    await act(async () => {
+      nextHeatmapRequest.resolve(await jsonResponse({
+        heatmap: heatmapFixture("plate-b", 20, 0.08, 120, 90),
+      }));
+    });
+    expect(await screen.findByText("Current: plate-b")).toBeInTheDocument();
+  });
+
+  test("reloads and hides a heatmap when a new root reuses the image identity", async () => {
+    const replacementHeatmapRequest = deferred();
+    let heatmapRequestCount = 0;
+    const replacementImage = {
+      ...images[0],
+      folder: "replacement-plate",
+      imageFolder: "replacement-plate",
+    };
+    const { fetchMock } = mockApi({
+      appliedRootPath: "/replacement/root",
+      appliedRootImages: [replacementImage],
+      heatmapResponse: (_url, cellSize) => {
+        heatmapRequestCount += 1;
+        return heatmapRequestCount === 1
+          ? jsonResponse({ heatmap: heatmapFixture("plate-a", cellSize) })
+          : replacementHeatmapRequest.promise;
+      },
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(await screen.findByText("Current: plate-a")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/root path/i), { target: { value: "/replacement/root" } });
+    fireEvent.click(screen.getByRole("button", { name: /set root/i }));
+
+    await waitFor(() => expect(screen.getByLabelText(/root path/i)).toHaveValue("/replacement/root"));
+    await waitFor(() => expect(heatmapRequestCount).toBe(2));
+    expect(screen.queryByLabelText("heatmap report")).not.toBeInTheDocument();
+
+    await act(async () => {
+      replacementHeatmapRequest.resolve(await jsonResponse({
+        heatmap: heatmapFixture("replacement-plate", 20),
+      }));
+    });
+    expect(await screen.findByText("Current: replacement-plate")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20");
   });
 
   test("ignores stale editable heatmap presets and keeps fixed viewer sizes", async () => {

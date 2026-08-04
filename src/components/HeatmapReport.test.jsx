@@ -61,6 +61,45 @@ describe("HeatmapReport", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Row 1, Column 1");
   });
 
+  test("stretches a rectangular cell grid across the full plot", () => {
+    renderAbsoluteReport();
+
+    expect(screen.getByLabelText("heatmap cell grid")).toHaveAttribute("preserveAspectRatio", "none");
+  });
+
+  test("positions five axis ticks at the four plot intervals", () => {
+    renderAbsoluteReport();
+
+    const plot = screen.getByLabelText("heatmap report plot");
+    const yAxis = screen.getByLabelText("Grid Y axis");
+    const xTick = screen.getAllByTestId("heatmap-x-tick")[0];
+    expect(plot.parentElement).toBe(yAxis.parentElement);
+    expect(plot.parentElement).toHaveClass("heatmap-report-main");
+    expect(xTick.closest(".heatmap-x-axis-main")).toBeInTheDocument();
+    expect(screen.getAllByTestId("heatmap-x-tick").map((tick) => tick.style.left)).toEqual([
+      "0%",
+      "25%",
+      "50%",
+      "75%",
+      "100%",
+    ]);
+    expect(screen.getAllByTestId("heatmap-y-tick").map((tick) => tick.style.top)).toEqual([
+      "0%",
+      "25%",
+      "50%",
+      "75%",
+      "100%",
+    ]);
+  });
+
+  test("matches the export pixel-density unit and visible scale wording", () => {
+    renderAbsoluteReport();
+
+    expect(screen.getByText("Color range: 0 to 1 ratio")).toBeInTheDocument();
+    expect(screen.getByText("Scale")).toBeInTheDocument();
+    expect(screen.getByLabelText("Pixel Density (ratio)")).toHaveClass("absolute");
+  });
+
   test("renders a signed difference scale and both image labels for comparisons", () => {
     render(
       <HeatmapReport
@@ -83,10 +122,27 @@ describe("HeatmapReport", () => {
 
     expect(screen.getByText("Current: scan-a")).toBeInTheDocument();
     expect(screen.getByText("Previous: scan-previous")).toBeInTheDocument();
-    expect(screen.getByText("Color range: -0.1 to +0.1")).toBeInTheDocument();
+    expect(screen.getByText("Color range: -0.1 to +0.1 ratio")).toBeInTheDocument();
+    expect(screen.getByText("Scale")).toBeInTheDocument();
     expect(screen.getByLabelText("Delta Pixel Density")).toHaveClass("difference");
   });
 });
+
+function renderAbsoluteReport() {
+  render(
+    <HeatmapReport
+      heatmap={heatmap}
+      metric="pixel-density"
+      calibration={{ slope: 0.1, intercept: 0.01 }}
+      comparison={null}
+      pointer={null}
+      currentImageName="scan-a"
+      previousImageName={null}
+      originalCanvasRef={{ current: null }}
+      originalOpacity={0.5}
+    />,
+  );
+}
 
 test("gridLines uses image-space positions and includes partial-cell image edges", () => {
   const lines = gridLines({

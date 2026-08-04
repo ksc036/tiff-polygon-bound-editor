@@ -63,6 +63,26 @@ describe("application layout CSS", () => {
     expect(headerRule).toContain("overflow-wrap: anywhere");
   });
 
+  test("anchors all five report axis ticks to the four plot intervals", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const xAxisRule = css.match(/\.heatmap-x-axis\s*\{[^}]+\}/)?.[0] ?? "";
+    const yAxisRule = css.match(/\.heatmap-y-axis\s*\{[^}]+\}/)?.[0] ?? "";
+    const reportMainRule = css.match(/\.heatmap-report-main\s*\{[^}]+\}/)?.[0] ?? "";
+    const xAxisMainRule = css.match(/\.heatmap-x-axis-main\s*\{[^}]+\}/)?.[0] ?? "";
+    const xTickRule = css.match(/\.heatmap-x-axis \[data-testid="heatmap-x-tick"\]\s*\{[^}]+\}/)?.[0] ?? "";
+    const yTickRule = css.match(/\.heatmap-y-axis \[data-testid="heatmap-y-tick"\]\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(xAxisRule).toContain("position: relative");
+    expect(yAxisRule).toContain("position: relative");
+    expect(reportMainRule).toContain("grid-template-columns: var(--report-y-band) minmax(0, 1fr)");
+    expect(xAxisMainRule).toContain("grid-template-columns: var(--report-y-band) minmax(0, 1fr)");
+    expect(xTickRule).toContain("position: absolute");
+    expect(xTickRule).toContain("transform: translateX(-50%)");
+    expect(yTickRule).toContain("position: absolute");
+    expect(yTickRule).toContain("transform: translateY(-50%)");
+  });
+
   test("reserves the mobile Heat Map stage for the report", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 

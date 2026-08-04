@@ -174,6 +174,7 @@ export default function App() {
     readStoredOpacity(HEATMAP_ORIGINAL_OPACITY_KEY, 0.5),
   );
   const [heatmap, setHeatmap] = useState(null);
+  const [heatmapSourceKey, setHeatmapSourceKey] = useState("");
   const [previousHeatmap, setPreviousHeatmap] = useState(null);
   const [heatmapComparePrevious, setHeatmapComparePrevious] = useState(false);
   const [heatmapLoading, setHeatmapLoading] = useState(false);
@@ -198,10 +199,16 @@ export default function App() {
     (roiSettingsOpen ? 0 : ROI_SETTINGS_COLLAPSED_STAGE_GAIN);
   const analysisPanelStageAdjustPx = DEFAULT_ANALYSIS_PANEL_HEIGHT - analysisPanelHeight;
   const selectedHeatmapCellSize = FIXED_HEATMAP_PRESETS[heatmapPreset];
-  const activeStageAspect = imageLayer === "heatmap" && heatmap
+  const activeHeatmapSourceKey = heatmapSourceKeyFor({
+    rootPath: activeRootPath,
+    image: activeImage,
+    cellSize: selectedHeatmapCellSize,
+  });
+  const matchingHeatmap = heatmapSourceKey === activeHeatmapSourceKey ? heatmap : null;
+  const activeStageAspect = imageLayer === "heatmap" && matchingHeatmap
     ? heatmapReportAspect({
-        columns: heatmap.columns,
-        rows: heatmap.rows,
+        columns: matchingHeatmap.columns,
+        rows: matchingHeatmap.rows,
         imageAspect: activeImageAspect,
       }) ?? activeImageAspect
     : activeImageAspect;
@@ -209,14 +216,14 @@ export default function App() {
     heatmapMetric === "estimated-collagen-density" &&
     !Number.isFinite(estimateHeatmapCollagenDensity(0, densityCalibration));
   const heatmapComparison = useMemo(() => {
-    if (!heatmapComparePrevious || !heatmap || !previousHeatmap) {
+    if (!heatmapComparePrevious || !matchingHeatmap || !previousHeatmap) {
       return { value: null, error: "" };
     }
 
     try {
       return {
         value: buildHeatmapDifference({
-          current: heatmap,
+          current: matchingHeatmap,
           previous: previousHeatmap,
           metric: heatmapMetric,
           calibration: densityCalibration,
@@ -226,7 +233,7 @@ export default function App() {
     } catch (error) {
       return { value: null, error: error.message };
     }
-  }, [densityCalibration, heatmap, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
+  }, [densityCalibration, matchingHeatmap, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
   const heatmapViewStatus = heatmapLoading
     ? "Loading heatmap"
     : heatmapError
@@ -394,6 +401,7 @@ export default function App() {
     setHeatmapLoading(true);
     setHeatmapError("");
     setHeatmap(null);
+    setHeatmapSourceKey("");
     setPreviousHeatmap(null);
     setPreviousHeatmapError("");
     setPreviousHeatmapLoading(false);
@@ -407,6 +415,7 @@ export default function App() {
         const dimensionError = heatmapDimensionError(currentPayload.heatmap, activeImage);
         if (dimensionError) throw new Error(dimensionError);
         setHeatmap(currentPayload.heatmap);
+        setHeatmapSourceKey(activeHeatmapSourceKey);
       } catch (error) {
         if (!isCurrentRequest()) return;
         setHeatmapError(error.message);
@@ -419,13 +428,13 @@ export default function App() {
     return () => {
       if (isCurrentRequest()) heatmapRequestRef.current += 1;
     };
-  }, [activeImage?.height, activeImage?.id, activeImage?.width, hasActiveImageDimensions, imageLayer, selectedHeatmapCellSize]);
+  }, [activeHeatmapSourceKey, hasActiveImageDimensions, imageLayer, selectedHeatmapCellSize]);
 
   useEffect(() => {
     const requestId = (previousHeatmapRequestRef.current += 1);
     const isCurrentRequest = () => requestId === previousHeatmapRequestRef.current;
 
-    if (imageLayer !== "heatmap" || !heatmapComparePrevious || !heatmap || !previousImage) {
+    if (imageLayer !== "heatmap" || !heatmapComparePrevious || !matchingHeatmap || !previousImage) {
       setPreviousHeatmapLoading(false);
       if (!heatmapComparePrevious) setPreviousHeatmap(null);
       return undefined;
@@ -441,7 +450,7 @@ export default function App() {
           await fetch(`/api/images/${previousImage.id}/heatmap?cellSize=${selectedHeatmapCellSize}`),
         );
         if (!isCurrentRequest()) return;
-        const compatibilityError = heatmapCompatibilityError(heatmap, previousPayload.heatmap);
+        const compatibilityError = heatmapCompatibilityError(matchingHeatmap, previousPayload.heatmap);
         if (compatibilityError) throw new Error(compatibilityError);
         setPreviousHeatmap(previousPayload.heatmap);
       } catch (error) {
@@ -457,7 +466,7 @@ export default function App() {
     return () => {
       if (isCurrentRequest()) previousHeatmapRequestRef.current += 1;
     };
-  }, [heatmap, heatmapComparePrevious, imageLayer, previousImage?.id, selectedHeatmapCellSize]);
+  }, [matchingHeatmap, heatmapComparePrevious, imageLayer, previousImage?.id, selectedHeatmapCellSize]);
 
   useEffect(() => {
     if (!analysisResizeDrag) return undefined;
@@ -1655,9 +1664,9 @@ export default function App() {
                 src={`/api/images/${activeImage.id}/skeleton-preview`}
               />
             ) : null}
-            {imageLayer === "heatmap" && heatmap ? (
+            {imageLayer === "heatmap" && matchingHeatmap ? (
               <HeatmapReport
-                heatmap={heatmap}
+                heatmap={matchingHeatmap}
                 metric={heatmapMetric}
                 calibration={densityCalibration}
                 comparison={heatmapComparison.value}
@@ -2638,6 +2647,11 @@ function firstFinite(...values) {
 
 function hasImageDimensions(image) {
   return Number.isFinite(image?.width) && Number.isFinite(image?.height);
+}
+
+function heatmapSourceKeyFor({ rootPath, image, cellSize }) {
+  if (!image?.id || !hasImageDimensions(image) || !Number.isFinite(cellSize)) return "";
+  return JSON.stringify([rootPath, image.id, image.width, image.height, cellSize]);
 }
 
 function imageContentRect(contentElement, fallbackElement) {
