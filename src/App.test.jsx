@@ -28,6 +28,30 @@ const images = [
 
 const imagesWithoutDimensions = images.map(({ height, width, ...image }) => image);
 
+const subimageImages = images.map((image) => ({ ...image, width: 100, height: 80 }));
+
+const savedSubimage = {
+  schemaVersion: 1,
+  imageFolder: "plate-a",
+  imageFile: "a.tif",
+  sourceWidth: 100,
+  sourceHeight: 80,
+  x: 10,
+  y: 8,
+  width: 50,
+  height: 40,
+  aspectRatio: 1.25,
+  updatedAt: "2026-08-04T00:00:00.000Z",
+};
+
+const savedSubimageB = {
+  ...savedSubimage,
+  imageFolder: "plate-b",
+  imageFile: "b.tif",
+  x: 30,
+  y: 20,
+};
+
 function heatmapFixture(imageFolder, cellSize, pixelDensity = 0.04, width = 100, height = 80) {
   return {
     schemaVersion: 1,
@@ -348,6 +372,10 @@ function mockApi({
   selectHeatmapFolderResponse,
   generateHeatmapsResponse,
   rawDimensionsById = {},
+  subimageResponse,
+  saveSubimageResponse,
+  createSubimagesResponse,
+  replaceSubimagesResponse,
 } = {}) {
   const calls = [];
   const exportDeferred = delayedExport ? deferred() : null;
@@ -378,6 +406,30 @@ function mockApi({
         failed: 0,
         generatedFiles: 6,
         failures: [],
+      });
+    }
+    if (url === "/api/subimages/create-missing" && method === "POST") {
+      if (createSubimagesResponse) return createSubimagesResponse(options);
+      return jsonResponse({
+        operation: "create-missing",
+        discovered: rootImages.length,
+        completed: rootImages.length,
+        created: rootImages.map((image) => image.imageFolder),
+        preserved: [],
+        replaced: [],
+        failed: [],
+      });
+    }
+    if (url === "/api/subimages/replace-all" && method === "POST") {
+      if (replaceSubimagesResponse) return replaceSubimagesResponse(options);
+      return jsonResponse({
+        operation: "replace-all",
+        discovered: rootImages.length,
+        completed: rootImages.length,
+        created: [],
+        preserved: [],
+        replaced: rootImages.map((image) => image.imageFolder),
+        failed: [],
       });
     }
     if (url === "/api/export" && method === "POST") {
@@ -427,6 +479,15 @@ function mockApi({
     }
     if (url === "/api/images/scan-c/roi-overlay" && method === "POST") {
       return pngResponse();
+    }
+    const subimageMatch = url.match(/^\/api\/images\/([^/]+)\/subimage$/);
+    if (subimageMatch && method === "GET") {
+      if (subimageResponse) return subimageResponse(subimageMatch[1], options);
+      return jsonResponse({ hasSubimage: false, crop: null });
+    }
+    if (subimageMatch && method === "PUT") {
+      if (saveSubimageResponse) return saveSubimageResponse(subimageMatch[1], options);
+      return jsonResponse({ crop: JSON.parse(options.body).crop });
     }
     if (url === "/api/images/scan-a/bounds" && method === "GET") {
       return jsonResponse({ bounds: boundsQueue.shift() ?? savedBounds, hasBounds: true });
@@ -488,6 +549,92 @@ function mockApi({
     calls,
     releaseExport: (response) => exportDeferred?.resolve(response),
   };
+}
+
+function mockSubimageApi(options = {}) {
+  return mockApi({
+    rootImages: subimageImages,
+    rawDimensionsById: { "scan-a": [100, 80], "scan-b": [100, 80] },
+    subimageResponse: (imageId) => jsonResponse(
+      imageId === "scan-a"
+        ? { hasSubimage: true, crop: savedSubimage }
+        : { hasSubimage: true, crop: savedSubimageB },
+    ),
+    ...options,
+  });
+}
+
+function renderedRect(width = 1000, height = 800) {
+  return {
+    left: 0,
+    top: 0,
+    right: width,
+    bottom: height,
+    width,
+    height,
+    x: 0,
+    y: 0,
+    toJSON: () => {},
+  };
+}
+
+async function enterSubimage() {
+  await screen.findByRole("button", { name: "Saved Tissue" });
+  fireEvent.click(screen.getByRole("button", { name: "Subimage" }));
+  await screen.findByRole("heading", { name: "Subimage" });
+}
+
+function mockSubimageCanvasRect() {
+  const canvas = screen.getByLabelText("raw16 image");
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue(renderedRect());
+  return screen.getByTestId("image-stage");
+}
+
+function drawSubimageCrop(stage, {
+  start = { clientX: 100, clientY: 80 },
+  end = { clientX: 590, clientY: 470 },
+} = {}) {
+  fireSubimagePointer(stage, "pointerdown", { ...start, button: 0, pointerId: 1 });
+  fireSubimagePointer(stage, "pointermove", { ...end, pointerId: 1 });
+  fireSubimagePointer(stage, "pointerup", { ...end, pointerId: 1 });
+}
+
+function moveSubimageCrop(stage) {
+  fireSubimagePointer(stage, "pointerdown", {
+    clientX: 400,
+    clientY: 300,
+    button: 0,
+    pointerId: 2,
+  });
+  fireSubimagePointer(stage, "pointermove", {
+    clientX: 1000,
+    clientY: 0,
+    pointerId: 2,
+  });
+  fireSubimagePointer(stage, "pointerup", {
+    clientX: 1000,
+    clientY: 0,
+    pointerId: 2,
+  });
+}
+
+function fireSubimagePointer(target, type, { pointerId, ...init }) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
+  Object.defineProperties(event, {
+    pointerId: { value: pointerId },
+    pointerType: { value: "mouse" },
+  });
+  fireEvent(target, event);
+}
+
+async function renderDirtySubimage(options = {}) {
+  const api = mockSubimageApi(options);
+  render(<App />);
+  await enterSubimage();
+  const stage = mockSubimageCanvasRect();
+  moveSubimageCrop(stage);
+  await screen.findByText("x 50");
+  return { ...api, stage };
 }
 
 describe("App", () => {
@@ -2637,6 +2784,443 @@ describe("App", () => {
 
     await waitFor(() => expect(screen.getByText(/save failed/i)).toBeInTheDocument());
     expect(screen.getByText(/unsaved/i)).toBeInTheDocument();
+  });
+
+  test("shows only the original crop presentation and Subimage controls in Subimage mode", async () => {
+    mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+
+    expect(await screen.findByLabelText("Subimage crop overlay")).toBeInTheDocument();
+    expect(screen.getByLabelText("raw16 image")).not.toHaveClass("hidden-layer");
+    expect(screen.queryByLabelText("Bounds overlay")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Point order")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Analysis")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Heatmap controls")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Heatmap batch")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Point opacity")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Show ROI")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Import previous bound" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add group" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set migration" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save subimage" })).toBeInTheDocument();
+  });
+
+  test("blocks polygon clicks and p d m shortcuts in Subimage mode", async () => {
+    mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+
+    const stage = mockSubimageCanvasRect();
+    fireEvent.mouseMove(stage, { clientX: 550, clientY: 240 });
+    fireEvent.click(stage, { clientX: 550, clientY: 240 });
+    fireEvent.keyDown(window, { code: "KeyP" });
+    fireEvent.keyDown(window, { code: "KeyD" });
+    fireEvent.keyDown(window, { code: "KeyM" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    expect(screen.getAllByLabelText(/^Vertex /)).toHaveLength(3);
+    expect(screen.getByLabelText("Vertex point-1")).toHaveAttribute("cx", "10");
+    expect(screen.getByText("Clean")).toBeInTheDocument();
+  });
+
+  test("draws a source-aspect initial crop without writing and enables create-missing", async () => {
+    const { fetchMock } = mockSubimageApi({
+      subimageResponse: () => jsonResponse({ hasSubimage: false, crop: null }),
+    });
+    render(<App />);
+    await enterSubimage();
+
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    const stage = mockSubimageCanvasRect();
+    drawSubimageCrop(stage);
+
+    expect(await screen.findByText("50 x 40 px")).toBeInTheDocument();
+    expect(screen.getByText("x 10")).toBeInTheDocument();
+    expect(screen.getByText("y 8")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeEnabled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/subimage"),
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+
+  test("moves a locked crop without resizing or writing until Save subimage", async () => {
+    const { fetchMock } = mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+
+    const stage = mockSubimageCanvasRect();
+    moveSubimageCrop(stage);
+
+    expect(await screen.findByText("x 50")).toBeInTheDocument();
+    expect(screen.getByText("y 0")).toBeInTheDocument();
+    expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/images/scan-a/subimage",
+      expect.objectContaining({ method: "PUT" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Save subimage" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/images/scan-a/subimage",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ crop: { ...savedSubimage, x: 50, y: 0 } }),
+      }),
+    ));
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+
+  test("creates missing crops from the first image template, reports results, and reloads the active crop", async () => {
+    let activeLoads = 0;
+    const { fetchMock } = mockSubimageApi({
+      subimageResponse: (imageId) => {
+        if (imageId !== "scan-a") return jsonResponse({ hasSubimage: false, crop: null });
+        activeLoads += 1;
+        return jsonResponse(activeLoads === 1
+          ? { hasSubimage: false, crop: null }
+          : { hasSubimage: true, crop: { ...savedSubimage, x: 11, y: 9 } });
+      },
+      createSubimagesResponse: () => jsonResponse({
+        operation: "create-missing",
+        discovered: 3,
+        completed: 2,
+        created: ["plate-a"],
+        preserved: ["plate-b"],
+        replaced: [],
+        failed: [{ imageFolder: "plate-c", code: "WRITE_FAILED", message: "Unable to save subimage." }],
+      }),
+    });
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    drawSubimageCrop(mockSubimageCanvasRect());
+
+    fireEvent.click(screen.getByRole("button", { name: "Create all subimages" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/subimages/create-missing",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.any(String),
+      }),
+    ));
+    const createCall = fetchMock.mock.calls.find(([url, options]) =>
+      url === "/api/subimages/create-missing" && options?.method === "POST");
+    expect(JSON.parse(createCall[1].body)).toEqual({
+      templateCrop: expect.objectContaining({ x: 10, y: 8, width: 50, height: 40 }),
+    });
+    expect(await screen.findByText("Created (1): plate-a")).toBeInTheDocument();
+    expect(screen.getByText("Preserved (1): plate-b")).toBeInTheDocument();
+    expect(screen.getByText("Failed (1): plate-c - Unable to save subimage.")).toBeInTheDocument();
+    expect(await screen.findByText("x 11")).toBeInTheDocument();
+    expect(screen.getByText("y 9")).toBeInTheDocument();
+    expect(activeLoads).toBe(2);
+  });
+
+  test("reloads after a partial batch but preserves the active draft when that image failed", async () => {
+    let activeLoads = 0;
+    mockSubimageApi({
+      subimageResponse: (imageId) => {
+        if (imageId !== "scan-a") return jsonResponse({ hasSubimage: false, crop: null });
+        activeLoads += 1;
+        return jsonResponse(activeLoads === 1
+          ? { hasSubimage: false, crop: null }
+          : { hasSubimage: true, crop: { ...savedSubimage, x: 33, y: 24 } });
+      },
+      createSubimagesResponse: () => jsonResponse({
+        operation: "create-missing",
+        discovered: 2,
+        completed: 1,
+        created: ["plate-b"],
+        preserved: [],
+        replaced: [],
+        failed: [{ imageFolder: "plate-a", code: "WRITE_FAILED", message: "Unable to save subimage." }],
+      }),
+    });
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    drawSubimageCrop(mockSubimageCanvasRect());
+
+    fireEvent.click(screen.getByRole("button", { name: "Create all subimages" }));
+
+    expect(await screen.findByText("Failed (1): plate-a - Unable to save subimage.")).toBeInTheDocument();
+    expect(await screen.findByText("x 10")).toBeInTheDocument();
+    expect(screen.getByText("y 8")).toBeInTheDocument();
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(activeLoads).toBe(2);
+  });
+
+  test("loads distinct saved crops in order and reserves create-missing for the first image", async () => {
+    mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+    expect(await screen.findByText("x 10")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+
+    expect(await screen.findByText("x 30")).toBeInTheDocument();
+    expect(screen.getByText("y 20")).toBeInTheDocument();
+    expect(screen.getByText("Template: plate-a")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
+  });
+
+  test("reviews a replacement candidate and restores the saved crop when replacement is cancelled", async () => {
+    confirm.mockReturnValue(false);
+    const { fetchMock } = mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await screen.findByText("x 30");
+
+    fireEvent.click(screen.getByRole("button", { name: "Replace all subimages" }));
+    drawSubimageCrop(mockSubimageCanvasRect(), {
+      start: { clientX: 0, clientY: 0 },
+      end: { clientX: 390, clientY: 310 },
+    });
+    expect(await screen.findByText("40 x 32 px")).toBeInTheDocument();
+    expect(screen.getByText("Review replacement crop")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply replacement" }));
+    expect(confirm).toHaveBeenCalledWith("Replace all saved subimages with this crop?");
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/subimages/replace-all",
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel replacement" }));
+    expect(await screen.findByText("x 30")).toBeInTheDocument();
+    expect(screen.getByText("y 20")).toBeInTheDocument();
+    expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
+  });
+
+  test("confirms replacement, reloads the server-normalized active crop, and locks its new size", async () => {
+    let scanBLoads = 0;
+    const replacementCrop = { ...savedSubimageB, x: 5, y: 4, width: 40, height: 32 };
+    const { fetchMock } = mockSubimageApi({
+      subimageResponse: (imageId) => {
+        if (imageId === "scan-a") return jsonResponse({ hasSubimage: true, crop: savedSubimage });
+        scanBLoads += 1;
+        return jsonResponse({ hasSubimage: true, crop: scanBLoads === 1 ? savedSubimageB : replacementCrop });
+      },
+    });
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await screen.findByText("x 30");
+
+    fireEvent.click(screen.getByRole("button", { name: "Replace all subimages" }));
+    const stage = mockSubimageCanvasRect();
+    drawSubimageCrop(stage, {
+      start: { clientX: 0, clientY: 0 },
+      end: { clientX: 390, clientY: 310 },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply replacement" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/subimages/replace-all",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.any(String),
+      }),
+    ));
+    const replaceCall = fetchMock.mock.calls.find(([url, options]) =>
+      url === "/api/subimages/replace-all" && options?.method === "POST");
+    expect(JSON.parse(replaceCall[1].body)).toEqual({
+      templateCrop: expect.objectContaining({ x: 0, y: 0, width: 40, height: 32 }),
+    });
+    expect(await screen.findByText("x 5")).toBeInTheDocument();
+    expect(screen.getByText("y 4")).toBeInTheDocument();
+    expect(screen.getByText("40 x 32 px")).toBeInTheDocument();
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+
+    fireSubimagePointer(stage, "pointerdown", {
+      clientX: 100,
+      clientY: 100,
+      button: 0,
+      pointerId: 3,
+    });
+    fireSubimagePointer(stage, "pointermove", { clientX: 1000, clientY: 0, pointerId: 3 });
+    fireSubimagePointer(stage, "pointerup", { clientX: 1000, clientY: 0, pointerId: 3 });
+    expect(screen.getByText("40 x 32 px")).toBeInTheDocument();
+    expect(screen.getByText("x 60")).toBeInTheDocument();
+  });
+
+  test("ignores a stale Subimage GET after navigating to another image", async () => {
+    const firstLoad = deferred();
+    let scanALoads = 0;
+    mockSubimageApi({
+      subimageResponse: (imageId) => {
+        if (imageId === "scan-b") return jsonResponse({ hasSubimage: true, crop: savedSubimageB });
+        scanALoads += 1;
+        return scanALoads === 1
+          ? firstLoad.promise
+          : jsonResponse({ hasSubimage: true, crop: savedSubimage });
+      },
+    });
+    render(<App />);
+    await enterSubimage();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    expect(await screen.findByText("x 30")).toBeInTheDocument();
+
+    firstLoad.resolve(await jsonResponse({ hasSubimage: true, crop: savedSubimage }));
+    await act(async () => firstLoad.promise);
+    expect(screen.getByText("x 30")).toBeInTheDocument();
+    expect(screen.queryByText("x 10")).not.toBeInTheDocument();
+  });
+
+  test("clears Subimage state on root replacement and ignores the old root response", async () => {
+    const oldRootLoad = deferred();
+    const nextImage = {
+      ...subimageImages[0],
+      id: "scan-c",
+      folder: "plate-c",
+      imageFolder: "plate-c",
+      file: "c.tif",
+      imageFile: "c.tif",
+    };
+    const nextCrop = {
+      ...savedSubimage,
+      imageFolder: "plate-c",
+      imageFile: "c.tif",
+      x: 40,
+      y: 24,
+    };
+    mockSubimageApi({
+      appliedRootPath: "/next/root",
+      appliedRootImages: [nextImage],
+      subimageResponse: (imageId) => imageId === "scan-a"
+        ? oldRootLoad.promise
+        : jsonResponse({ hasSubimage: true, crop: nextCrop }),
+    });
+    render(<App />);
+    await enterSubimage();
+
+    fireEvent.change(screen.getByLabelText("Root path"), { target: { value: "/next/root" } });
+    fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+    expect(await screen.findByText("x 40")).toBeInTheDocument();
+
+    oldRootLoad.resolve(await jsonResponse({ hasSubimage: true, crop: savedSubimage }));
+    await act(async () => oldRootLoad.promise);
+    expect(screen.getByText("x 40")).toBeInTheDocument();
+    expect(screen.queryByText("x 10")).not.toBeInTheDocument();
+  });
+
+  test("confirms dirty Subimage drafts for previous and next buttons", async () => {
+    await renderDirtySubimage();
+    confirm.mockReturnValueOnce(false).mockReturnValue(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    expect(screen.getByText("x 50")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+
+    const stage = mockSubimageCanvasRect();
+    moveSubimageCrop(stage);
+    await screen.findByText("x 50");
+    confirm.mockReturnValueOnce(false).mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+  });
+
+  test("confirms dirty Subimage drafts for ArrowLeft and ArrowRight navigation", async () => {
+    await renderDirtySubimage();
+    confirm.mockReturnValueOnce(false).mockReturnValue(true);
+
+    fireEvent.keyDown(window, { code: "ArrowRight" });
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    fireEvent.keyDown(window, { code: "ArrowRight" });
+    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
+
+    moveSubimageCrop(mockSubimageCanvasRect());
+    await screen.findByText("x 50");
+    confirm.mockReturnValueOnce(false).mockReturnValue(true);
+    fireEvent.keyDown(window, { code: "ArrowLeft" });
+    expect(screen.getByText("2 / 2")).toBeInTheDocument();
+    fireEvent.keyDown(window, { code: "ArrowLeft" });
+    expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+  });
+
+  test.each([
+    ["Set root", "/api/root"],
+    ["Find root", "/api/root/select"],
+  ])("confirms a dirty Subimage draft before %s", async (buttonName, endpoint) => {
+    const { fetchMock } = await renderDirtySubimage();
+    confirm.mockReturnValueOnce(false).mockReturnValue(true);
+
+    fireEvent.click(screen.getByRole("button", { name: buttonName }));
+    expect(fetchMock).not.toHaveBeenCalledWith(endpoint, expect.objectContaining({ method: "POST" }));
+    expect(screen.getByText("x 50")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: buttonName }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(endpoint, expect.objectContaining({ method: "POST" })));
+    expect(confirm).toHaveBeenCalledWith("Discard unsaved subimage changes?");
+  });
+
+  test("confirms before leaving Subimage and restores the saved draft on approval", async () => {
+    await renderDirtySubimage();
+    confirm.mockReturnValueOnce(false).mockReturnValue(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    expect(screen.getByRole("button", { name: "Subimage" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("x 50")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    expect(screen.getByRole("button", { name: "Original" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Subimage" }));
+    expect(await screen.findByText("x 10")).toBeInTheDocument();
+  });
+
+  test("registers the legacy and modern beforeunload signals only for a dirty Subimage draft", async () => {
+    await renderDirtySubimage();
+    const event = new Event("beforeunload", { cancelable: true });
+    let returnValue = null;
+    Object.defineProperty(event, "returnValue", {
+      configurable: true,
+      get: () => returnValue,
+      set: (value) => {
+        returnValue = value;
+      },
+    });
+
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(returnValue).toBe("");
+  });
+
+  test("saving a Subimage crop does not clear independently dirty bounds", async () => {
+    const { fetchMock } = mockSubimageApi();
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+
+    fireEvent.mouseMove(screen.getByTestId("image-stage"), { clientX: 55, clientY: 24 });
+    fireEvent.keyDown(window, { code: "KeyP" });
+    expect(await screen.findByText("Unsaved")).toBeInTheDocument();
+
+    await enterSubimage();
+    moveSubimageCrop(mockSubimageCanvasRect());
+    fireEvent.click(await screen.findByRole("button", { name: "Save subimage" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/images/scan-a/subimage",
+      expect.objectContaining({ method: "PUT" }),
+    ));
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+    expect(screen.getByText("Unsaved")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/images/scan-a/bounds",
+      expect.objectContaining({ method: "PUT" }),
+    );
   });
 
   test("clicking an existing vertex does not add a point", async () => {
