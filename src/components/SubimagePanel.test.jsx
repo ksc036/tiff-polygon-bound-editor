@@ -60,9 +60,10 @@ describe("SubimagePanel", () => {
     expect(callbacks.onSetCrop).toHaveBeenCalledTimes(1);
   });
 
-  test("identifies a later image's template and disables template-only creation", () => {
+  test("identifies a later image and its separate template owner", () => {
     renderPanel({ activeImageName: "T02", isTemplateOwner: false, canCreateMissing: false });
 
+    expect(screen.getByText("T02")).toBeInTheDocument();
     expect(screen.getByText("Template: T01")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
   });
@@ -114,15 +115,15 @@ describe("SubimagePanel", () => {
     });
 
     expect(screen.getByRole("alert")).toHaveTextContent("Subimage batch preflight failed.");
-    expect(screen.getByText("Created: T03")).toBeInTheDocument();
-    expect(screen.getByText("Preserved: T04")).toBeInTheDocument();
-    expect(screen.getByText("Replaced: T01, T05")).toBeInTheDocument();
+    expect(screen.getByText("Created (1): T03")).toBeInTheDocument();
+    expect(screen.getByText("Preserved (1): T04")).toBeInTheDocument();
+    expect(screen.getByText("Replaced (2): T01, T05")).toBeInTheDocument();
+    expect(screen.getByText("Failed (2): T02 - Unable to save subimage., T06 - Unable to save subimage.")).toBeInTheDocument();
     expect(screen.getAllByTestId("subimage-batch-item").map((item) => item.textContent)).toEqual([
-      "Created: T03",
-      "Preserved: T04",
-      "Replaced: T01, T05",
-      "Failed: T02 - Unable to save subimage.",
-      "Failed: T06 - Unable to save subimage.",
+      "Created (1): T03",
+      "Preserved (1): T04",
+      "Replaced (2): T01, T05",
+      "Failed (2): T02 - Unable to save subimage., T06 - Unable to save subimage.",
     ]);
   });
 });

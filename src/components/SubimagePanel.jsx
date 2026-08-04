@@ -27,7 +27,8 @@ export default function SubimagePanel({
       <header className="subimage-heading">
         <h2 id="subimage-heading">Subimage</h2>
         <div className="subimage-identity">
-          <strong>{isTemplateOwner ? activeImageName : `Template: ${templateOwnerName}`}</strong>
+          <strong>{activeImageName}</strong>
+          {!isTemplateOwner ? <span>{`Template: ${templateOwnerName}`}</span> : null}
           <span>{hasSubimage ? "Saved" : "Missing"}</span>
           {dirty ? <span className="subimage-dirty">Unsaved changes</span> : null}
         </div>
@@ -89,7 +90,7 @@ function BatchResult({ result }) {
     ...batchEntries("Created", result.created),
     ...batchEntries("Preserved", result.preserved),
     ...batchEntries("Replaced", result.replaced),
-    ...(result.failed ?? []).map((failure) => `Failed: ${failure.imageFolder} - ${failure.message}`),
+    ...batchEntries("Failed", result.failed, (failure) => `${failure.imageFolder} - ${failure.message}`),
   ];
 
   return (
@@ -99,8 +100,8 @@ function BatchResult({ result }) {
   );
 }
 
-function batchEntries(label, imageFolders) {
-  return imageFolders?.length ? [`${label}: ${imageFolders.join(", ")}`] : [];
+function batchEntries(label, entries, formatEntry = (entry) => entry) {
+  return entries?.length ? [`${label} (${entries.length}): ${entries.map(formatEntry).join(", ")}`] : [];
 }
 
 function value(number) {
