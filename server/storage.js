@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -148,6 +148,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const skeletonDir = path.join(image.folderPath, "Skeletonize");
     const analysisDir = path.join(image.folderPath, "analysis");
     const heatmapDir = path.join(image.folderPath, "heatmap");
+    const subimageDir = path.join(image.folderPath, "subimage");
 
     return {
       folderPath: image.folderPath,
@@ -159,6 +160,9 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
       skeletonDir,
       analysisDir,
       heatmapDir,
+      subimageDir,
+      subimagePath: path.join(subimageDir, image.imageFile),
+      subimageCropPath: path.join(subimageDir, "crop.json"),
       skeletonPath: path.join(skeletonDir, `${image.imageFolder}.skeleton.png`),
       analysisPath: path.join(analysisDir, `${image.imageFolder}.analysis.json`),
     };
@@ -248,6 +252,44 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     return payload;
   }
 
+  async function loadSubimageCrop(id) {
+    const image = resolveImage(id);
+    const { subimageCropPath } = imagePaths(image);
+
+    try {
+      return JSON.parse(await readFile(subimageCropPath, "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      if (error instanceof SyntaxError) {
+        throw new Error(`Invalid subimage crop JSON for ${image.imageFolder}: ${error.message}`, { cause: error });
+      }
+      throw error;
+    }
+  }
+
+  async function saveSubimageCrop(id, crop) {
+    const image = resolveImage(id);
+    const { subimageDir, subimageCropPath } = imagePaths(image);
+    const payload = {
+      ...crop,
+      schemaVersion: 1,
+      imageFolder: image.imageFolder,
+      imageFile: image.imageFile,
+      updatedAt: new Date().toISOString(),
+    };
+    const tempPath = path.join(subimageDir, `.crop-${randomUUID()}.json.tmp`);
+
+    await mkdir(subimageDir, { recursive: true });
+    try {
+      await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
+      await rename(tempPath, subimageCropPath);
+    } catch (error) {
+      await rm(tempPath, { force: true });
+      throw error;
+    }
+    return payload;
+  }
+
   async function importPreviousBounds(id) {
     const image = resolveImage(id);
     const imageIndex = images.findIndex((candidate) => candidate.id === image.id);
@@ -283,6 +325,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
       getImage: snapshotStorage.getImage,
       loadBounds: snapshotStorage.loadBounds,
       loadAnalysis: snapshotStorage.loadAnalysis,
+      loadSubimageCrop: snapshotStorage.loadSubimageCrop,
       imagePaths: snapshotStorage.imagePaths,
     });
   }
@@ -315,6 +358,8 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     saveBounds,
     loadAnalysis,
     saveAnalysis,
+    loadSubimageCrop,
+    saveSubimageCrop,
     importPreviousBounds,
     imagePaths,
     createSnapshot,

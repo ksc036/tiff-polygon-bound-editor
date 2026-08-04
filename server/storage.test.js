@@ -75,6 +75,23 @@ describe("createStorage", () => {
     });
   });
 
+  test("resolves private subimage paths without exposing them in image DTOs", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+
+    expect(storage.getImage("selected-stack-sequence_T01")).toEqual({
+      id: "selected-stack-sequence_T01",
+      imageFolder: "selected-stack-sequence_T01",
+      imageFile: "frame001.tif",
+    });
+    expect(storage.imagePaths("selected-stack-sequence_T01")).toMatchObject({
+      subimageDir: path.join(rootDir, "selected-stack-sequence_T01", "subimage"),
+      subimagePath: path.join(rootDir, "selected-stack-sequence_T01", "subimage", "frame001.tif"),
+      subimageCropPath: path.join(rootDir, "selected-stack-sequence_T01", "subimage", "crop.json"),
+    });
+  });
+
   test("keeps an export snapshot bound to its original root after the active root changes", async () => {
     const firstRoot = await createTempRoot();
     const secondRoot = await createTempRoot();
@@ -226,6 +243,49 @@ describe("createStorage", () => {
     expect(Date.parse(saved.updatedAt)).not.toBeNaN();
   });
 
+  test("loads a missing subimage crop as null and saves crop JSON atomically", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+
+    await expect(storage.loadSubimageCrop("selected-stack-sequence_T01")).resolves.toBeNull();
+    const saved = await storage.saveSubimageCrop("selected-stack-sequence_T01", {
+      sourceWidth: 1008,
+      sourceHeight: 1008,
+      x: 120,
+      y: 80,
+      width: 400,
+      height: 400,
+      aspectRatio: 1,
+    });
+
+    await expect(readJson(storage.imagePaths("selected-stack-sequence_T01").subimageCropPath)).resolves.toEqual(saved);
+    expect(saved).toMatchObject({
+      schemaVersion: 1,
+      imageFolder: "selected-stack-sequence_T01",
+      imageFile: "frame001.tif",
+      x: 120,
+      y: 80,
+      width: 400,
+      height: 400,
+    });
+    expect(Date.parse(saved.updatedAt)).not.toBeNaN();
+    await expect(readdir(storage.imagePaths("selected-stack-sequence_T01").subimageDir)).resolves.toEqual(["crop.json"]);
+  });
+
+  test("wraps malformed subimage crop JSON with image context", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+    const { subimageDir, subimageCropPath } = storage.imagePaths("selected-stack-sequence_T01");
+    await mkdir(subimageDir, { recursive: true });
+    await writeFile(subimageCropPath, "{broken json");
+
+    await expect(storage.loadSubimageCrop("selected-stack-sequence_T01")).rejects.toThrow(
+      /Invalid subimage crop JSON for selected-stack-sequence_T01/i,
+    );
+  });
+
   test("wraps invalid bounds JSON with image context", async () => {
     const rootDir = await createTempRoot();
     await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
@@ -275,6 +335,8 @@ describe("createStorage", () => {
     expect(() => storage.imagePaths("../selected-stack-sequence_T01")).toThrow(/unknown image/i);
     await expect(storage.loadBounds("../selected-stack-sequence_T01")).rejects.toThrow(/unknown image/i);
     await expect(storage.saveBounds("../selected-stack-sequence_T01", { groups: [] })).rejects.toThrow(/unknown image/i);
+    await expect(storage.loadSubimageCrop("../selected-stack-sequence_T01")).rejects.toThrow(/unknown image/i);
+    await expect(storage.saveSubimageCrop("../selected-stack-sequence_T01", {})).rejects.toThrow(/unknown image/i);
   });
 
   test("selectRootWithFinder validates and sets selected roots", async () => {
