@@ -327,7 +327,7 @@ describe("saveSubimage", () => {
     await expect(renderStarted.promise).resolves.toBe(path.join(firstRoot, "T01", "image", "T01.tif"));
     storage.setRoot(secondRoot);
     continueRender.resolve();
-    await expect(save).resolves.toMatchObject({ crop: { imageFolder: "T01", x: 2, y: 2 } });
+    await expect(save).resolves.toMatchObject({ crop: { x: 2, y: 2 } });
 
     await expect(access(path.join(firstRoot, "T01", "subimage", "T01.tif"))).resolves.toBeUndefined();
     await expect(access(path.join(firstRoot, "T01", "subimage", "crop.json"))).resolves.toBeUndefined();
@@ -342,6 +342,26 @@ test("loadSubimage reports an absent saved pair", async () => {
   const storage = createStorage({ initialRoot: rootDir });
 
   await expect(loadSubimage(storage, "T01")).resolves.toEqual({ hasSubimage: false, crop: null });
+});
+
+test("loadSubimage ignores legacy identity metadata and recorded time format", async () => {
+  const rootDir = await createTempRoot();
+  await writeGrey16Tiff(rootDir, "T01", 8, 8, Array.from({ length: 64 }, (_, index) => index));
+  const storage = createStorage({ initialRoot: rootDir });
+  await saveSubimage(storage, "T01", squareCrop({ x: 2, y: 2 }));
+  const cropPath = storage.imagePaths("T01").subimageCropPath;
+  const crop = JSON.parse(await readFile(cropPath, "utf8"));
+  await writeFile(cropPath, JSON.stringify({
+    ...crop,
+    imageFolder: "old-folder",
+    imageFile: "old-file.tif",
+    updatedAt: "copied-without-original-clock",
+  }));
+
+  await expect(loadSubimage(storage, "T01")).resolves.toMatchObject({
+    hasSubimage: true,
+    crop: { x: 2, y: 2, width: 4, height: 4 },
+  });
 });
 
 test("loadSubimage maps a saved TIFF access failure without exposing filesystem details", async () => {

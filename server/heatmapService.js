@@ -67,7 +67,7 @@ function publicFailure(imageFolder, error) {
 }
 
 function sameMaskSnapshot(before, after) {
-  return ["dev", "ino", "size", "mtimeMs"].every((field) => before[field] === after[field]);
+  return ["dev", "ino", "size"].every((field) => before[field] === after[field]);
 }
 
 async function writeHeatmapAtomically(filePath, payload, fileSystem) {
@@ -193,10 +193,7 @@ function hasValidSavedMaskMetadata(maskSource) {
     typeof maskSource.size === "number" &&
     Number.isFinite(maskSource.size) &&
     Number.isInteger(maskSource.size) &&
-    maskSource.size >= 0 &&
-    typeof maskSource.mtimeMs === "number" &&
-    Number.isFinite(maskSource.mtimeMs) &&
-    maskSource.mtimeMs >= 0
+    maskSource.size >= 0
   );
 }
 
@@ -234,24 +231,6 @@ export async function loadImageHeatmap(storage, id, cellSize) {
 
   if (!hasValidSavedMaskMetadata(heatmap.maskSource)) {
     throw savedHeatmapError("INVALID_HEATMAP", "Saved heatmap is invalid.", 422);
-  }
-
-  let currentSource;
-  try {
-    currentSource = await selectMaskSource(image, paths.maskDir);
-    if (!currentSource) {
-      throw new Error("Mask source is unavailable.");
-    }
-    const metadata = await stat(currentSource.path);
-    if (
-      heatmap.maskSource.file !== currentSource.file ||
-      heatmap.maskSource.size !== metadata.size ||
-      heatmap.maskSource.mtimeMs !== metadata.mtimeMs
-    ) {
-      throw new Error("Mask source metadata changed.");
-    }
-  } catch (error) {
-    throw savedHeatmapError("STALE_HEATMAP", "Saved heatmap is stale.", 409, error);
   }
 
   return heatmap;

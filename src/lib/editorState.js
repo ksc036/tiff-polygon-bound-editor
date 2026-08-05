@@ -6,8 +6,6 @@ const ANALYSIS_MODES = new Set(["outside", "inside"]);
 export function createEmptyBounds(image) {
   return {
     schemaVersion: 1,
-    imageFolder: image.imageFolder ?? image.folder ?? "",
-    imageFile: image.imageFile ?? image.file ?? "",
     width: image.width,
     height: image.height,
     connectionMode: "input-order-cycle",

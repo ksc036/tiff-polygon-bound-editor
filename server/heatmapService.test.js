@@ -160,12 +160,37 @@ test("fails a bundle when the mask snapshot changes during decode", async () => 
   ]);
 });
 
-test("loads current image heatmaps and rejects stale mask metadata", async () => {
+test("does not treat an mtime-only change during decode as changed mask data", async () => {
+  const rootDir = await createTempRoot();
+  await writeBundle(rootDir, "sample-a", { width: 2, height: 2 });
+  const maskPath = path.join(rootDir, "sample-a", "mask", "sample-a.png");
+  const actualStats = await stat(maskPath);
+  let snapshot = 0;
+
+  const result = await generateHeatmapBatch({
+    rootPath: rootDir,
+    cellSizes: [5],
+    __testDependencies: {
+      stat: async (filePath) => {
+        expect(filePath).toBe(maskPath);
+        snapshot += 1;
+        return snapshot === 1
+          ? actualStats
+          : { ...actualStats, mtimeMs: actualStats.mtimeMs + 1_000 };
+      },
+    },
+  });
+
+  expect(snapshot).toBe(2);
+  expect(result).toMatchObject({ completed: 1, failed: 0, generatedFiles: 1 });
+});
+
+test("loads saved image heatmaps after the mask file time changes", async () => {
   const storage = await setupStorageWithSavedHeatmap();
 
   await expect(loadImageHeatmap(storage, "sample-a", 5)).resolves.toMatchObject({ cellWidth: 5 });
   await touchMask(storage.imagePaths("sample-a").maskDir);
-  await expect(loadImageHeatmap(storage, "sample-a", 5)).rejects.toMatchObject({ code: "STALE_HEATMAP" });
+  await expect(loadImageHeatmap(storage, "sample-a", 5)).resolves.toMatchObject({ cellWidth: 5 });
 });
 
 test("rejects saved heatmaps missing mask source metadata as invalid", async () => {
@@ -178,12 +203,14 @@ test("rejects saved heatmaps missing mask source metadata as invalid", async () 
   await expect(loadImageHeatmap(storage, "sample-a", 5)).rejects.toMatchObject({ code: "INVALID_HEATMAP" });
 });
 
-test("rejects saved heatmaps with wrongly typed mask source metadata as invalid", async () => {
+test("ignores malformed recorded mask times in saved heatmaps", async () => {
   const storage = await setupStorageWithSavedHeatmap();
   const filePath = savedHeatmapPath(storage, "sample-a", 5);
   const saved = JSON.parse(await readFile(filePath, "utf8"));
   saved.maskSource.mtimeMs = "not-a-time";
   await writeFile(filePath, JSON.stringify(saved));
 
-  await expect(loadImageHeatmap(storage, "sample-a", 5)).rejects.toMatchObject({ code: "INVALID_HEATMAP" });
+  const heatmap = await loadImageHeatmap(storage, "sample-a", 5);
+  expect(heatmap).toMatchObject({ cellWidth: 5 });
+  expect(heatmap.maskSource).not.toHaveProperty("mtimeMs");
 });

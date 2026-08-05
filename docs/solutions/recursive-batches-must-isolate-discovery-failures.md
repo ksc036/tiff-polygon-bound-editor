@@ -15,4 +15,4 @@ Treat root validation, descendant discovery, and item processing as separate fai
 
 Atomic persistence needs the same boundary discipline. When write or rename fails, remove the unique temporary file before reporting the item failure. Use injected filesystem operations in tests so discovery and rename failures are deterministic across operating systems.
 
-Persisted source metadata must also be validated before staleness comparison. Missing or malformed `size`/`mtimeMs` is invalid saved data, not merely stale data.
+Persisted structural metadata still needs validation, but time metadata is audit-only. A missing or malformed `size` is invalid saved heatmap data; a missing or malformed `mtimeMs` must not change whether saved measurements load.

@@ -145,7 +145,6 @@ describe("createStorage", () => {
     });
 
     await expect(readJson(path.join(firstRoot, "shared-id", "subimage", "crop.json"))).resolves.toMatchObject({
-      imageFolder: "shared-id",
       width: 4,
       height: 4,
     });
@@ -177,8 +176,6 @@ describe("createStorage", () => {
 
     await expect(storage.loadBounds("selected-stack-sequence_T01")).resolves.toEqual({
       schemaVersion: 1,
-      imageFolder: "selected-stack-sequence_T01",
-      imageFile: "frame001.tif",
       width: null,
       height: null,
       connectionMode: "input-order-cycle",
@@ -204,14 +201,39 @@ describe("createStorage", () => {
     await expect(readdir(boundsDir)).resolves.toEqual(["selected-stack-sequence_T01.bounds.json"]);
     expect(saved).toMatchObject({
       schemaVersion: 1,
-      imageFolder: "selected-stack-sequence_T01",
-      imageFile: "frame001.tif",
       width: 640,
       height: 480,
       connectionMode: "input-order-cycle",
       groups: [{ id: "group-1", points: [{ id: "point-1", x: 1, y: 2 }] }],
     });
+    expect(saved).not.toHaveProperty("imageFolder");
+    expect(saved).not.toHaveProperty("imageFile");
     expect(Date.parse(saved.updatedAt)).not.toBeNaN();
+  });
+
+  test("ignores legacy image identity metadata when loading bounds", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+    const { boundDir, boundsPath } = storage.imagePaths("selected-stack-sequence_T01");
+    await mkdir(boundDir, { recursive: true });
+    await writeFile(boundsPath, JSON.stringify({
+      schemaVersion: 1,
+      imageFolder: "old-location",
+      imageFile: "old-name.tif",
+      width: 10,
+      height: 20,
+      connectionMode: "input-order-cycle",
+      groups: [],
+    }));
+
+    await expect(storage.loadBounds("selected-stack-sequence_T01")).resolves.toEqual({
+      schemaVersion: 1,
+      width: 10,
+      height: 20,
+      connectionMode: "input-order-cycle",
+      groups: [],
+    });
   });
 
   test("concurrent saves use collision-resistant temp names", async () => {
@@ -277,10 +299,12 @@ describe("createStorage", () => {
     await expect(storage.loadAnalysis("selected-stack-sequence_T01")).resolves.toEqual(saved);
     await expect(readdir(analysisDir)).resolves.toEqual(["selected-stack-sequence_T01.analysis.json"]);
     expect(saved).toMatchObject({
-      ...analysis,
-      imageFolder: "selected-stack-sequence_T01",
-      imageFile: "frame001.tif",
+      schemaVersion: 1,
+      groups: [],
+      imageSummary: { maskPixelCount: 0 },
     });
+    expect(saved).not.toHaveProperty("imageFolder");
+    expect(saved).not.toHaveProperty("imageFile");
     expect(Date.parse(saved.updatedAt)).not.toBeNaN();
   });
 
@@ -303,13 +327,13 @@ describe("createStorage", () => {
     await expect(readJson(storage.imagePaths("selected-stack-sequence_T01").subimageCropPath)).resolves.toEqual(saved);
     expect(saved).toMatchObject({
       schemaVersion: 1,
-      imageFolder: "selected-stack-sequence_T01",
-      imageFile: "frame001.tif",
       x: 120,
       y: 80,
       width: 400,
       height: 400,
     });
+    expect(saved).not.toHaveProperty("imageFolder");
+    expect(saved).not.toHaveProperty("imageFile");
     expect(Date.parse(saved.updatedAt)).not.toBeNaN();
     await expect(readdir(storage.imagePaths("selected-stack-sequence_T01").subimageDir)).resolves.toEqual(["crop.json"]);
   });
@@ -355,8 +379,6 @@ describe("createStorage", () => {
 
     expect(imported).toMatchObject({
       schemaVersion: 1,
-      imageFolder: "selected-stack-sequence_T02",
-      imageFile: "frame002.tif",
       sourceImageFolder: "selected-stack-sequence_T01",
       width: 100,
       height: 200,

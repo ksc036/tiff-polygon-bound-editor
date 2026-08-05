@@ -14,9 +14,12 @@ could exceed memory or Sharp pixel limits.
    and file reads. Every stage of one export must use that same snapshot.
 2. Treat saved analysis as untrusted input. Rebuild an allow-listed primitive-only
    object before workbook generation, then reject analysis whose groups, modes,
-   ROI bands, mask snapshot, or timestamps disagree with current inputs. For a
-   schema that always records mask provenance, a missing `maskSource` is invalid;
-   optional provenance turns freshness checking into an accidental bypass.
+   ROI bands, mask identity, or dimensions disagree with current inputs. Persisted
+   timestamps and filesystem mtimes are audit metadata only: copying a valid dataset
+   to another machine rewrites them without changing the saved analysis. Malformed or
+   missing time metadata must be ignored rather than invalidating measurements. For a
+   schema that always records mask provenance, a missing `maskSource` is invalid.
+   Refresh mask measurements through the explicit Calculate workflow.
 3. Preserve partial success. Invalid or stale analysis skips statistics while source,
    ROI, heatmap, and report artifacts continue when independently valid.
 4. Plan heatmaps in two bounded passes. Keep only metadata/status descriptors and
@@ -47,7 +50,8 @@ silent sanitization would violate source-directory preservation.
 ## Verification
 
 Server coverage includes root switching with duplicate image IDs, Korean root names,
-formula-object and out-of-domain metric rejection, stale mask/bounds/mode/ROI-band
-detection (including missing mask provenance), lightweight heatmap planning, a
-populated rendered 680x680 grid, a 10,000x10,000 ROI frame plan, nullable aggregate
-band IDs, and visitor equivalence with canonical ROI assignment.
+formula-object and out-of-domain metric rejection, semantic bounds/mode/ROI-band
+compatibility detection (including missing mask provenance), acceptance of copied
+mask/bounds files and reversed or malformed audit timestamps, lightweight heatmap
+planning, a populated rendered 680x680 grid, a 10,000x10,000 ROI frame plan,
+nullable aggregate band IDs, and visitor equivalence with canonical ROI assignment.

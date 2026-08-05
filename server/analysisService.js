@@ -300,20 +300,21 @@ function sanitizeMaskSource(value) {
     typeof value.width !== "number" ||
     !Number.isFinite(value.width) ||
     typeof value.height !== "number" ||
-    !Number.isFinite(value.height) ||
-    typeof value.mtimeMs !== "number" ||
-    !Number.isFinite(value.mtimeMs)
+    !Number.isFinite(value.height)
   ) {
     throw analysisError("INVALID_ANALYSIS", "Saved analysis JSON is invalid.");
   }
 
-  return {
+  const sanitized = {
     file: path.basename(file),
     format: value.format,
     width: value.width,
     height: value.height,
-    mtimeMs: value.mtimeMs,
   };
+  if (typeof value.mtimeMs === "number" && Number.isFinite(value.mtimeMs)) {
+    sanitized.mtimeMs = value.mtimeMs;
+  }
+  return sanitized;
 }
 
 function sanitizeGroupAnalysis(value) {
@@ -408,8 +409,6 @@ function sanitizeAnalysis(analysis) {
 
   return {
     schemaVersion: analysis.schemaVersion ?? SCHEMA_VERSION,
-    imageFolder: typeof analysis.imageFolder === "string" ? path.basename(analysis.imageFolder) : analysis.imageFolder,
-    imageFile: typeof analysis.imageFile === "string" ? path.basename(analysis.imageFile) : analysis.imageFile,
     boundsFile: typeof analysis.boundsFile === "string" ? path.basename(analysis.boundsFile) : analysis.boundsFile,
     maskSource: sanitizeMaskSource(analysis.maskSource),
     skeletonFile: typeof analysis.skeletonFile === "string" ? path.basename(analysis.skeletonFile) : analysis.skeletonFile,
@@ -435,7 +434,7 @@ async function writeSkeletonAtomically(outputPath, skeleton, writeSkeleton) {
   }
 }
 
-function buildAnalysis({ image, paths, bounds, maskSource, mask, skeleton, roiBands, groups }) {
+function buildAnalysis({ paths, bounds, maskSource, mask, skeleton, roiBands, groups }) {
   let outsideAssignments;
   let insideAssignments;
   let assignments;
@@ -505,8 +504,6 @@ function buildAnalysis({ image, paths, bounds, maskSource, mask, skeleton, roiBa
 
   return {
     schemaVersion: SCHEMA_VERSION,
-    imageFolder: image.imageFolder,
-    imageFile: image.imageFile,
     boundsFile: path.basename(paths.boundsPath),
     maskSource: sourceForJson(maskSource),
     skeletonFile: path.basename(paths.skeletonPath),
@@ -591,7 +588,6 @@ export async function recalculateAnalysis(storage, id, { roiBands, roiBandsByGro
   }
 
   const analysis = buildAnalysis({
-    image,
     paths,
     bounds,
     maskSource: maskSourceWithDimensions,

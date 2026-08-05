@@ -240,25 +240,34 @@ test("rejects traversal in validateHeatmapPayload metadata", () => {
   ).toThrow("relative");
 });
 
-test("rejects non-canonical ISO timestamps when creating and validating payloads", () => {
-  expect(() =>
-    createHeatmapPayload({
-      imageFolder: "images/sample",
-      maskSource: { file: "masks/sample.png", format: "png" },
-      mask: { width: 1, height: 1, data: new Uint8Array([1]) },
-      cellSize: 1,
-      updatedAt: "2026-07-12 00:00:00Z",
-    }),
-  ).toThrow("ISO");
-
+test("records timestamps without using their format or presence for payload validity", () => {
   const payload = createHeatmapPayload({
     imageFolder: "images/sample",
     maskSource: { file: "masks/sample.png", format: "png" },
     mask: { width: 1, height: 1, data: new Uint8Array([1]) },
     cellSize: 1,
-    updatedAt: "2026-07-12T00:00:00.000Z",
+    updatedAt: "copied-without-original-clock",
   });
-  expect(() => validateHeatmapPayload({ ...payload, updatedAt: "2026-07-12 00:00:00Z" }, { cellSize: 1 })).toThrow(
-    "ISO",
-  );
+
+  expect(payload.updatedAt).toBe("copied-without-original-clock");
+  expect(validateHeatmapPayload(payload, { cellSize: 1 }).updatedAt).toBe("copied-without-original-clock");
+
+  const withoutTimestamp = { ...payload };
+  delete withoutTimestamp.updatedAt;
+  expect(validateHeatmapPayload(withoutTimestamp, { cellSize: 1 }).updatedAt).toBeNull();
+});
+
+test("strips malformed recorded mask times without invalidating heatmap data", () => {
+  const payload = createHeatmapPayload({
+    imageFolder: "images/sample",
+    maskSource: { file: "masks/sample.png", size: 123, mtimeMs: "not-a-time" },
+    mask: { width: 1, height: 1, data: new Uint8Array([1]) },
+    cellSize: 1,
+  });
+
+  expect(payload.maskSource).toEqual({ file: "masks/sample.png", size: 123 });
+  expect(validateHeatmapPayload(payload, { cellSize: 1 }).maskSource).toEqual({
+    file: "masks/sample.png",
+    size: 123,
+  });
 });

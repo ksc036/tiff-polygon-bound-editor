@@ -527,7 +527,7 @@ describe("createApp", () => {
     }
   });
 
-  test("heatmap loading maps missing, stale, and malformed saved data to safe statuses", async () => {
+  test("heatmap loading ignores file-time changes and maps missing or malformed data to safe statuses", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
     const folderName = "sample-a";
@@ -544,9 +544,9 @@ describe("createApp", () => {
       body: { rootPath: imageRoot, cellSizes: [10] },
     });
     await writeMask(imageRoot, folderName, "frame001.png");
-    const staleResponse = await request(app, `/api/images/${folderName}/heatmap?cellSize=10`);
-    expect(staleResponse.status).toBe(409);
-    await expect(staleResponse.json()).resolves.toEqual({ error: "Saved heatmap is stale." });
+    const copiedResponse = await request(app, `/api/images/${folderName}/heatmap?cellSize=10`);
+    expect(copiedResponse.status).toBe(200);
+    await expect(copiedResponse.json()).resolves.toMatchObject({ heatmap: { cellWidth: 10 } });
 
     const savedPath = path.join(imageRoot, folderName, "heatmap", "10x10", `${folderName}.heatmap.json`);
     await writeFile(savedPath, "{ malformed json");
@@ -582,7 +582,16 @@ describe("createApp", () => {
     );
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ bounds, hasBounds: true });
+    await expect(response.json()).resolves.toEqual({
+      bounds: {
+        schemaVersion: 1,
+        width: 10,
+        height: 20,
+        connectionMode: "manual",
+        groups: [{ id: "group-1", points: [{ x: 1, y: 2 }] }],
+      },
+      hasBounds: true,
+    });
   });
 
   test("saves bounds through PUT /api/images/:id/bounds", async () => {
@@ -606,10 +615,10 @@ describe("createApp", () => {
     const { bounds } = await response.json();
     expect(bounds).toMatchObject({
       schemaVersion: 1,
-      imageFolder: "selected-stack-sequence_T01",
-      imageFile: "frame001.tif",
       ...body,
     });
+    expect(bounds).not.toHaveProperty("imageFolder");
+    expect(bounds).not.toHaveProperty("imageFile");
     expect(Date.parse(bounds.updatedAt)).not.toBeNaN();
   });
 
@@ -760,9 +769,11 @@ describe("createApp", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       bounds: {
-        ...previousBounds,
-        imageFolder: "selected-stack-sequence_T02",
-        imageFile: "frame002.tif",
+        schemaVersion: 1,
+        width: 10,
+        height: 20,
+        connectionMode: "manual",
+        groups: [{ id: "previous-group", points: [{ x: 1, y: 2 }] }],
         sourceImageFolder: "selected-stack-sequence_T01",
       },
     });
@@ -976,7 +987,20 @@ describe("createApp", () => {
     const savedResponse = await request(app, "/api/images/selected-stack-sequence_T01/analysis");
 
     expect(savedResponse.status).toBe(200);
-    await expect(savedResponse.json()).resolves.toEqual({ analysis, hasAnalysis: true });
+    await expect(savedResponse.json()).resolves.toEqual({
+      analysis: {
+        schemaVersion: 5,
+        boundsFile: "selected-stack-sequence_T01.bounds.json",
+        maskSource: { file: "frame001.png", format: "png", width: 2, height: 2, mtimeMs: 1 },
+        skeletonFile: "selected-stack-sequence_T01.skeleton.png",
+        roiBands: analysis.roiBands,
+        groups: [],
+        imageSummary: {},
+        warnings: [],
+        updatedAt: "2026-07-05T00:00:00.000Z",
+      },
+      hasAnalysis: true,
+    });
   });
 
   test("POST /api/images/:id/analysis/recalculate recalculates and saves analysis", async () => {
@@ -1007,7 +1031,6 @@ describe("createApp", () => {
     expect(body).toMatchObject({
       hasAnalysis: true,
       analysis: {
-        imageFolder: folderName,
         maskSource: { file: "frame001.png", format: "png", width: 2, height: 2, mtimeMs: expect.any(Number) },
         skeletonFile: `${folderName}.skeleton.png`,
         groups: [{ groupId: "cell", groupName: null, color: null }],
@@ -1132,7 +1155,10 @@ describe("createApp", () => {
       body: { crop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
     });
     expect(saved.status).toBe(200);
-    await expect(saved.json()).resolves.toMatchObject({ crop: { imageFolder: "T01", width: 2, height: 2 } });
+    const savedBody = await saved.json();
+    expect(savedBody).toMatchObject({ crop: { width: 2, height: 2 } });
+    expect(savedBody.crop).not.toHaveProperty("imageFolder");
+    expect(savedBody.crop).not.toHaveProperty("imageFile");
   });
 
   test("returns a safe coded response for invalid or missing subimage crops", async () => {

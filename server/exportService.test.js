@@ -309,31 +309,31 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   const workbook = await openWorkbookEntry(archive, "/T02_statistics.xlsx");
   const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
   expect(reportMessages).toContain("Current bounds auto-saved before export");
-  expect(reportMessages).toContain("Saved analysis may predate the auto-saved bounds");
+  expect(reportMessages).toContain("Recalculate analysis if the auto-saved boundary geometry changed");
   expect(reportMessages).toContain("T02 Pixel Density heatmap skipped: Saved heatmap is missing.");
   expect(JSON.stringify(workbook.worksheets.map((sheet) => sheet.getSheetValues()))).not.toContain(fixture.rootDir);
 });
 
-test("keeps the ZIP usable when saved heatmaps are stale or adjacent grids are incompatible", async () => {
-  const staleFixture = await createExportFixture({
+test("keeps saved heatmaps after file times change and skips incompatible adjacent grids", async () => {
+  const copiedFixture = await createExportFixture({
     imageFolders: ["T01", "T02"],
     heatmapSizes: { T01: [20, 50, 100], T02: [20, 50, 100] },
   });
-  const staleMaskPath = path.join(staleFixture.rootDir, "T02", "mask", "T02.png");
-  const staleMaskStat = await stat(staleMaskPath);
-  const changedTime = new Date(staleMaskStat.mtimeMs + 2_000);
-  await utimes(staleMaskPath, changedTime, changedTime);
-  const staleOutput = new PassThrough();
-  const staleZipPromise = collectStream(staleOutput);
-  const staleWritePromise = writeDatasetZip({
-    storage: staleFixture.storage,
-    output: staleOutput,
+  const copiedMaskPath = path.join(copiedFixture.rootDir, "T02", "mask", "T02.png");
+  const copiedMaskStat = await stat(copiedMaskPath);
+  const changedTime = new Date(copiedMaskStat.mtimeMs + 2_000);
+  await utimes(copiedMaskPath, changedTime, changedTime);
+  const copiedOutput = new PassThrough();
+  const copiedZipPromise = collectStream(copiedOutput);
+  const copiedWritePromise = writeDatasetZip({
+    storage: copiedFixture.storage,
+    output: copiedOutput,
     calibration: { slope: 0.1, intercept: 0 },
   });
-  const staleArchive = await unzipper.Open.buffer(await staleZipPromise);
-  await staleWritePromise;
-  expect(staleArchive.files.some((file) => file.path.endsWith("/T02_statistics.xlsx"))).toBe(true);
-  expect(staleArchive.files.some((file) => file.path.includes("/T02/heatmap/"))).toBe(false);
+  const copiedArchive = await unzipper.Open.buffer(await copiedZipPromise);
+  await copiedWritePromise;
+  expect(copiedArchive.files.some((file) => file.path.endsWith("/T02_statistics.xlsx"))).toBe(true);
+  expect(copiedArchive.files.some((file) => file.path.includes("/T02/heatmap/"))).toBe(true);
 
   const incompatibleFixture = await createExportFixture({
     imageFolders: ["T01", "T02"],
@@ -396,6 +396,28 @@ test("accepts null band ids used by saved aggregate and inside metrics", async (
   const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
 
   expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(2);
+  expect(reportMessages).toContain("Saved analysis loaded for export.");
+});
+
+test("ignores saved image folder and file metadata when exporting bounds and analysis", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const boundsPath = path.join(fixture.rootDir, "T01", "bound", "T01.bounds.json");
+  const bounds = JSON.parse(await readFile(boundsPath, "utf8"));
+  await writeFile(boundsPath, JSON.stringify({ ...bounds, imageFolder: "old-folder", imageFile: "old-file.tif" }));
+
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  await writeFile(analysisPath, JSON.stringify({ ...analysis, imageFolder: "old-folder", imageFile: "old-file.tif" }));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+  const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
+
+  expect(archive.files.some((file) => file.path.includes("/roi/T01_ROI_overview.png"))).toBe(true);
+  expect(reportMessages).toContain("Saved bounds loaded for export.");
   expect(reportMessages).toContain("Saved analysis loaded for export.");
 });
 
@@ -596,7 +618,7 @@ test("rejects schema-5 analysis without mask provenance", async () => {
   );
 });
 
-test("skips saved analysis when its recorded mask snapshot no longer matches the selected mask", async () => {
+test("keeps saved analysis when copying the selected mask changes only its file mtime", async () => {
   const fixture = await createExportFixture({
     imageFolders: ["T01"],
     heatmapSizes: { T01: [20, 50, 100] },
@@ -619,13 +641,11 @@ test("skips saved analysis when its recorded mask snapshot no longer matches the
   const archive = await exportFixtureArchive(fixture);
   const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
 
-  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
-  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
-    "Saved analysis is stale or incompatible with current bounds or mask.",
-  );
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(2);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain("Saved analysis loaded for export.");
 });
 
-test("skips saved analysis when the bounds file is newer than the analysis file", async () => {
+test("keeps saved analysis when copying bounds changes only its file mtime", async () => {
   const fixture = await createExportFixture({
     imageFolders: ["T01"],
     heatmapSizes: { T01: [20, 50, 100] },
@@ -639,13 +659,11 @@ test("skips saved analysis when the bounds file is newer than the analysis file"
   const archive = await exportFixtureArchive(fixture);
   const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
 
-  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
-  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
-    "Saved analysis is stale or incompatible with current bounds or mask.",
-  );
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(2);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain("Saved analysis loaded for export.");
 });
 
-test("skips saved analysis when saved timestamps show newer bounds despite file mtime order", async () => {
+test("keeps saved analysis regardless of recorded timestamp order", async () => {
   const fixture = await createExportFixture({
     imageFolders: ["T01"],
     heatmapSizes: { T01: [20, 50, 100] },
@@ -662,10 +680,26 @@ test("skips saved analysis when saved timestamps show newer bounds despite file 
   const archive = await exportFixtureArchive(fixture);
   const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
 
-  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
-  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain(
-    "Saved analysis is stale or incompatible with current bounds or mask.",
-  );
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(2);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain("Saved analysis loaded for export.");
+});
+
+test("keeps saved analysis when audit time fields are malformed", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const analysisPath = path.join(fixture.rootDir, "T01", "analysis", "T01.analysis.json");
+  const analysis = JSON.parse(await readFile(analysisPath, "utf8"));
+  analysis.updatedAt = "copied-without-original-clock";
+  analysis.maskSource.mtimeMs = "not-a-time";
+  await writeFile(analysisPath, JSON.stringify(analysis));
+
+  const archive = await exportFixtureArchive(fixture);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(2);
+  expect(workbook.getWorksheet("Export Report").getColumn(4).values).toContain("Saved analysis loaded for export.");
 });
 
 test("skips outside analysis whose saved per-group ROI bands differ from current limits", async () => {

@@ -14,7 +14,6 @@ return {
   imageFolder: payload.imageFolder,
   maskSource: {
     file: payload.maskSource.file,
-    mtimeMs: payload.maskSource.mtimeMs,
     size: payload.maskSource.size,
   },
   cells: payload.cells.map(({ row, column, pixelDensity }) => ({
@@ -24,5 +23,9 @@ return {
   })),
 };
 ```
+
+Time fields are the exception to structural numeric validation when they are kept
+only for audit display. Copy them only when already well formed, otherwise omit them;
+never let `mtimeMs` or `updatedAt` decide whether scientific data is accepted.
 
 Reject `.` and `..` path segments in public filenames for both slash styles, and test injected absolute paths at nested and top-level positions. The safe contract is the object returned after validation, not merely the set of fields that happened to be checked.

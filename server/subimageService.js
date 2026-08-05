@@ -169,12 +169,8 @@ async function validateOutputMetadata(outputPath, crop, options = {}, errorCode 
   }
 }
 
-function validateSavedCrop(crop, image, source) {
-  if (
-    !crop || typeof crop !== "object" || crop.schemaVersion !== 1 ||
-    crop.imageFolder !== image.imageFolder || crop.imageFile !== image.imageFile ||
-    typeof crop.updatedAt !== "string" || Number.isNaN(Date.parse(crop.updatedAt))
-  ) {
+function validateSavedCrop(crop, source) {
+  if (!crop || typeof crop !== "object" || crop.schemaVersion !== 1) {
     throw new SubimageError("INVALID_SAVED_CROP", "Saved crop metadata is invalid.");
   }
 
@@ -338,7 +334,7 @@ async function runBatch(storage, templateCrop, operation, options = {}) {
 }
 
 export async function loadSubimage(storage, id, options = {}) {
-  const { image, paths } = subimageImageContext(storage, id);
+  const { paths } = subimageImageContext(storage, id);
   const deps = dependencies(options);
   let crop;
 
@@ -358,7 +354,7 @@ export async function loadSubimage(storage, id, options = {}) {
   }
 
   const source = await readSupportedSource(paths.imagePath, options);
-  const normalized = validateSavedCrop(crop, image, source);
+  const normalized = validateSavedCrop(crop, source);
   await validateOutputMetadata(paths.subimagePath, normalized, options);
   return { hasSubimage: true, crop: normalized };
 }

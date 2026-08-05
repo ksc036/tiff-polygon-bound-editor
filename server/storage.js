@@ -67,16 +67,23 @@ function publicImage(image) {
   return { ...visibleImage };
 }
 
-function emptyBoundsPayload(image) {
+function emptyBoundsPayload() {
   return {
     schemaVersion: 1,
-    imageFolder: image.imageFolder,
-    imageFile: image.imageFile,
     width: null,
     height: null,
     connectionMode: DEFAULT_CONNECTION_MODE,
     groups: [],
   };
+}
+
+function withoutImageIdentity(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const { imageFolder, imageFile, ...payload } = value;
+  return payload;
 }
 
 function settingsPath(dataDir) {
@@ -179,10 +186,10 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const { boundsPath } = imagePaths(image);
 
     try {
-      return JSON.parse(await readFile(boundsPath, "utf8"));
+      return withoutImageIdentity(JSON.parse(await readFile(boundsPath, "utf8")));
     } catch (error) {
       if (error.code === "ENOENT") {
-        return emptyBoundsPayload(image);
+        return emptyBoundsPayload();
       }
 
       if (error instanceof SyntaxError) {
@@ -198,8 +205,6 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const { boundDir, boundsPath } = imagePaths(image);
     const payload = {
       schemaVersion: 1,
-      imageFolder: image.imageFolder,
-      imageFile: image.imageFile,
       width: bounds?.width ?? null,
       height: bounds?.height ?? null,
       connectionMode: DEFAULT_CONNECTION_MODE,
@@ -219,7 +224,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const { analysisPath } = imagePaths(id);
 
     try {
-      return JSON.parse(await readFile(analysisPath, "utf8"));
+      return withoutImageIdentity(JSON.parse(await readFile(analysisPath, "utf8")));
     } catch (error) {
       if (error.code === "ENOENT") {
         return null;
@@ -237,10 +242,8 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const image = resolveImage(id);
     const { analysisDir, analysisPath } = imagePaths(image);
     const payload = {
-      ...analysis,
+      ...withoutImageIdentity(analysis),
       schemaVersion: analysis?.schemaVersion ?? 1,
-      imageFolder: image.imageFolder,
-      imageFile: image.imageFile,
       updatedAt: new Date().toISOString(),
     };
     const tempPath = path.join(analysisDir, `${image.imageFolder}.analysis.json.tmp-${randomUUID()}`);
@@ -257,7 +260,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const { subimageCropPath } = imagePaths(image);
 
     try {
-      return JSON.parse(await readFile(subimageCropPath, "utf8"));
+      return withoutImageIdentity(JSON.parse(await readFile(subimageCropPath, "utf8")));
     } catch (error) {
       if (error.code === "ENOENT") return null;
       if (error instanceof SyntaxError) {
@@ -271,10 +274,8 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     const image = resolveImage(id);
     const { subimageDir, subimageCropPath } = imagePaths(image);
     const payload = {
-      ...crop,
+      ...withoutImageIdentity(crop),
       schemaVersion: 1,
-      imageFolder: image.imageFolder,
-      imageFile: image.imageFile,
       updatedAt: new Date().toISOString(),
     };
     const tempPath = path.join(subimageDir, `.crop-${randomUUID()}.json.tmp`);
@@ -309,8 +310,6 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
 
     return {
       ...previousBounds,
-      imageFolder: image.imageFolder,
-      imageFile: image.imageFile,
       sourceImageFolder: previousImage.imageFolder,
     };
   }

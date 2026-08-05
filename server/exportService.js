@@ -219,7 +219,7 @@ async function collectImageExportRecords({ storage, images, plan, autoSavedImage
     }
 
     try {
-      record.bounds = validateSavedBounds(await storage.loadBounds(image.id), image);
+      record.bounds = validateSavedBounds(await storage.loadBounds(image.id));
       const metadata = await stat(paths.boundsPath);
       const boundsFile = safeArchiveSegment(path.basename(paths.boundsPath));
       record.sourceFiles.bounds = { file: boundsFile, mtimeMs: metadata.mtimeMs };
@@ -231,14 +231,12 @@ async function collectImageExportRecords({ storage, images, plan, autoSavedImage
     }
 
     try {
-      record.analysis = validateSavedAnalysis(await storage.loadAnalysis(image.id), image);
+      record.analysis = validateSavedAnalysis(await storage.loadAnalysis(image.id));
       const metadata = await stat(paths.analysisPath);
       assertSavedAnalysisCurrent({
         analysis: record.analysis,
         bounds: record.bounds,
         maskSource: record.maskSource,
-        boundsMtimeMs: record.sourceFiles.bounds?.mtimeMs,
-        analysisMtimeMs: metadata.mtimeMs,
       });
       const analysisFile = safeArchiveSegment(path.basename(paths.analysisPath));
       record.sourceFiles.analysis = { file: analysisFile, mtimeMs: metadata.mtimeMs };
@@ -258,7 +256,7 @@ async function collectImageExportRecords({ storage, images, plan, autoSavedImage
 
     if (record.autoSavedBounds) {
       reportEntries.push(report("Included", "Bounds", "Current bounds auto-saved before export"));
-      reportEntries.push(report("Warning", "Analysis", "Saved analysis may predate the auto-saved bounds"));
+      reportEntries.push(report("Warning", "Analysis", "Recalculate analysis if the auto-saved boundary geometry changed"));
     }
 
     appendUnmatchedAnalysisWarnings(record);
@@ -518,12 +516,10 @@ function dimensionsFrom(bounds) {
   };
 }
 
-function validateSavedBounds(value, image) {
+function validateSavedBounds(value) {
   if (
     !isPlainObject(value) ||
     value.schemaVersion !== 1 ||
-    value.imageFolder !== image.imageFolder ||
-    value.imageFile !== image.imageFile ||
     !Number.isSafeInteger(value.width) ||
     value.width <= 0 ||
     !Number.isSafeInteger(value.height) ||
@@ -575,12 +571,10 @@ function validateSavedBounds(value, image) {
   return value;
 }
 
-function validateSavedAnalysis(value, image) {
+function validateSavedAnalysis(value) {
   if (
     !isPlainObject(value) ||
     value.schemaVersion !== 5 ||
-    value.imageFolder !== image.imageFolder ||
-    value.imageFile !== image.imageFile ||
     !isPlainObject(value.maskSource) ||
     !Array.isArray(value.groups) ||
     value.groups.length === 0
@@ -590,8 +584,6 @@ function validateSavedAnalysis(value, image) {
 
   const sanitized = {
     schemaVersion: 5,
-    imageFolder: value.imageFolder,
-    imageFile: value.imageFile,
     maskSource: sanitizeSavedMaskSource(value.maskSource),
     roiBands: sanitizeSavedRoiBands(value.roiBands ?? []),
     groups: [],
@@ -601,10 +593,7 @@ function validateSavedAnalysis(value, image) {
     sanitized.boundsFile = value.boundsFile;
   }
   if (value.updatedAt !== undefined) {
-    if (typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt))) {
-      throw new TypeError("Invalid saved analysis.");
-    }
-    sanitized.updatedAt = value.updatedAt;
+    sanitized.updatedAt = typeof value.updatedAt === "string" ? value.updatedAt : null;
   }
 
   const ids = new Set();
@@ -753,51 +742,33 @@ function sanitizeSavedMaskSource(value) {
     !Number.isSafeInteger(value.width) ||
     value.width <= 0 ||
     !Number.isSafeInteger(value.height) ||
-    value.height <= 0 ||
-    typeof value.mtimeMs !== "number" ||
-    !Number.isFinite(value.mtimeMs)
+    value.height <= 0
   ) {
     throw new TypeError("Invalid saved analysis.");
   }
-  return {
+  const sanitized = {
     file: value.file,
     format: value.format,
     width: value.width,
     height: value.height,
-    mtimeMs: value.mtimeMs,
   };
+  if (typeof value.mtimeMs === "number" && Number.isFinite(value.mtimeMs)) {
+    sanitized.mtimeMs = value.mtimeMs;
+  }
+  return sanitized;
 }
 
 function assertSavedAnalysisCurrent({
   analysis,
   bounds,
   maskSource,
-  boundsMtimeMs,
-  analysisMtimeMs,
 }) {
   if (!bounds || !analysis) throw new StaleAnalysisError();
-  if (
-    Number.isFinite(boundsMtimeMs) &&
-    Number.isFinite(analysisMtimeMs) &&
-    analysisMtimeMs < boundsMtimeMs
-  ) {
-    throw new StaleAnalysisError();
-  }
-  const boundsUpdatedAt = Date.parse(bounds.updatedAt);
-  const analysisUpdatedAt = Date.parse(analysis.updatedAt);
-  if (
-    Number.isFinite(boundsUpdatedAt) &&
-    Number.isFinite(analysisUpdatedAt) &&
-    analysisUpdatedAt < boundsUpdatedAt
-  ) {
-    throw new StaleAnalysisError();
-  }
   if (
     analysis.maskSource &&
     (
       !maskSource ||
       analysis.maskSource.file !== maskSource.file ||
-      Math.abs(analysis.maskSource.mtimeMs - maskSource.mtimeMs) > 0.001 ||
       analysis.maskSource.width !== bounds.width ||
       analysis.maskSource.height !== bounds.height
     )

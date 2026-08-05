@@ -21,12 +21,6 @@ function assertRelativeMetadata(value, label) {
   }
 }
 
-function assertIsoTimestamp(value) {
-  if (typeof value !== "string" || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
-    throw new Error("Heatmap updatedAt must be an ISO timestamp.");
-  }
-}
-
 function assertMaskSource(maskSource) {
   if (!maskSource || typeof maskSource !== "object") {
     throw new Error("Heatmap maskSource must include a relative file path.");
@@ -36,7 +30,7 @@ function assertMaskSource(maskSource) {
 
 function publicMaskSource(maskSource) {
   const source = { file: maskSource.file };
-  if (maskSource.mtimeMs !== undefined) {
+  if (typeof maskSource.mtimeMs === "number" && Number.isFinite(maskSource.mtimeMs)) {
     source.mtimeMs = maskSource.mtimeMs;
   }
   if (maskSource.size !== undefined) {
@@ -185,8 +179,7 @@ export function createHeatmapPayload({ imageFolder, maskSource, mask, cellSize, 
   assertRelativeMetadata(imageFolder, "imageFolder");
   assertMaskSource(maskSource);
   const grid = buildMaskHeatmapGrid({ mask, cellSize });
-  const timestamp = updatedAt ?? new Date().toISOString();
-  assertIsoTimestamp(timestamp);
+  const timestamp = typeof updatedAt === "string" ? updatedAt : new Date().toISOString();
 
   return {
     schemaVersion: SCHEMA_VERSION,
@@ -203,14 +196,12 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
     typeof payload !== "object" ||
     payload.schemaVersion !== SCHEMA_VERSION ||
     !("imageFolder" in payload) ||
-    !("maskSource" in payload) ||
-    !("updatedAt" in payload)
+    !("maskSource" in payload)
   ) {
     throw new Error("Invalid heatmap payload schema.");
   }
   assertRelativeMetadata(payload.imageFolder, "imageFolder");
   assertMaskSource(payload.maskSource);
-  assertIsoTimestamp(payload.updatedAt);
   assertPositiveSafeInteger(payload.width, "width");
   assertPositiveSafeInteger(payload.height, "height");
   const expectedCellSize = validateCellSize(cellSize);
@@ -243,6 +234,6 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
     columns: payload.columns,
     rows: payload.rows,
     cells: payload.cells.map(publicCell),
-    updatedAt: payload.updatedAt,
+    updatedAt: typeof payload.updatedAt === "string" ? payload.updatedAt : null,
   };
 }

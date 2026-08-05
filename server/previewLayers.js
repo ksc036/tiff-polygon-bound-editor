@@ -38,8 +38,6 @@ async function imageDimensions(imagePath, maxImagePixels) {
 function overlayBounds(bounds, dimensions) {
   return {
     schemaVersion: bounds?.schemaVersion ?? 1,
-    imageFolder: bounds?.imageFolder ?? null,
-    imageFile: bounds?.imageFile ?? null,
     width: Number.isInteger(bounds?.width) ? bounds.width : dimensions.width,
     height: Number.isInteger(bounds?.height) ? bounds.height : dimensions.height,
     connectionMode: "input-order-cycle",

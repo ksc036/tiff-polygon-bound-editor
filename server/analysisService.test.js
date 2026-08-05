@@ -181,8 +181,6 @@ describe("recalculateAnalysis", () => {
     expect(result.hasAnalysis).toBe(true);
     expect(result.analysis).toMatchObject({
       schemaVersion: 5,
-      imageFolder: folderName,
-      imageFile: "frame001.tif",
       boundsFile: `${folderName}.bounds.json`,
       maskSource: { file: "frame001.png", format: "png", width: 8, height: 8, mtimeMs: expect.any(Number) },
       skeletonFile: `${folderName}.skeleton.png`,
@@ -529,7 +527,7 @@ describe("recalculateAnalysis", () => {
         format: "png",
         width: 8,
         height: 8,
-        mtimeMs: 123.45,
+        mtimeMs: "not-a-time",
         path: path.join(rootDir, folderName, "mask", "frame001.png"),
       },
       skeletonFile: path.join(rootDir, folderName, "Skeletonize", `${folderName}.skeleton.png`),
@@ -552,7 +550,7 @@ describe("recalculateAnalysis", () => {
       ],
       imageSummary: { ...metric(), width: 8, height: 8, bands: { near: metric({ bandId: "near" }) } },
       warnings: ["safe warning", path.join(rootDir, "leaky-warning")],
-      updatedAt: "2026-07-05T00:00:00.000Z",
+      updatedAt: "copied-without-original-clock",
       arbitrary: "stale",
     };
     await mkdir(analysisDir, { recursive: true });
@@ -563,15 +561,12 @@ describe("recalculateAnalysis", () => {
     expect(result.hasAnalysis).toBe(true);
     expect(result.analysis).toEqual({
       schemaVersion: 5,
-      imageFolder: folderName,
-      imageFile: "frame001.tif",
       boundsFile: `${folderName}.bounds.json`,
       maskSource: {
         file: "frame001.png",
         format: "png",
         width: 8,
         height: 8,
-        mtimeMs: 123.45,
       },
       skeletonFile: `${folderName}.skeleton.png`,
       roiBands: saved.roiBands,
@@ -588,7 +583,7 @@ describe("recalculateAnalysis", () => {
       ],
       imageSummary: saved.imageSummary,
       warnings: ["safe warning"],
-      updatedAt: "2026-07-05T00:00:00.000Z",
+      updatedAt: "copied-without-original-clock",
     });
     expect(JSON.stringify(result)).not.toContain(rootDir);
     expect(JSON.stringify(result)).not.toContain("arbitrary");
