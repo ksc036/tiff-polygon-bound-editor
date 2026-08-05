@@ -474,12 +474,13 @@ export default function App() {
 
         const ownerCrop = validSubimageCropFor(ownerPayload, ownerImage);
         const activeCrop = validSubimageCropFor(activePayload, requestedImage);
+        const templateCrop = ownerCrop ?? subimageTemplateCrop;
         setSubimageTemplateCrop((current) => ownerCrop ?? current);
         setSubimageSizeLocked((current) => current || Boolean(ownerCrop));
 
         setSavedSubimageCrop(activeCrop);
         setSubimageDraft(
-          activeCrop ?? (ownerCrop && cropFitsImage(ownerCrop, requestedImage) ? ownerCrop : null),
+          activeCrop ?? (templateCrop && cropFitsImage(templateCrop, requestedImage) ? templateCrop : null),
         );
       } catch (error) {
         if (isCurrentSubimageRequest(context)) setSubimageError(error.message);

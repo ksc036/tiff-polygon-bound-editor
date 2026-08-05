@@ -3085,8 +3085,8 @@ describe("App", () => {
     expect(activeLoads).toBe(2);
   });
 
-  test("keeps size locked across navigation after a partial batch writes another image", async () => {
-    mockSubimageApi({
+  test("keeps size locked and rehydrates the failed owner for retry after a partial batch", async () => {
+    const { fetchMock } = mockSubimageApi({
       subimageResponse: (imageId) => jsonResponse(
         imageId === "scan-b"
           ? { hasSubimage: true, crop: savedSubimageB }
@@ -3116,6 +3116,24 @@ describe("App", () => {
     expect(await screen.findByText("x 50")).toBeInTheDocument();
     expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save subimage" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    expect(await screen.findByText("x 10")).toBeInTheDocument();
+    expect(screen.getByText("y 8")).toBeInTheDocument();
+    expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
+
+    const createAll = screen.getByRole("button", { name: "Create all subimages" });
+    expect(createAll).toBeEnabled();
+    fireEvent.click(createAll);
+    await waitFor(() => {
+      const createCalls = fetchMock.mock.calls.filter(([url, options]) => (
+        url === "/api/subimages/create-missing" && options?.method === "POST"
+      ));
+      expect(createCalls).toHaveLength(2);
+      expect(JSON.parse(createCalls[1][1].body)).toEqual({
+        templateCrop: expect.objectContaining({ x: 10, y: 8, width: 50, height: 40 }),
+      });
+    });
   });
 
   test("loads distinct saved crops in order and reserves create-missing for the first image", async () => {
