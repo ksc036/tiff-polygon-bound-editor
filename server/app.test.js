@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import unzipper from "unzipper";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createApp } from "./app.js";
 import { FOLDER_PICKER_CODES, FolderPickerError } from "./folderPicker.js";
 import { createStorage } from "./storage.js";
@@ -1203,6 +1203,41 @@ describe("createApp", () => {
     });
   });
 
+  test("captures a dedicated mutation context for each Subimage write request", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01");
+    const storage = createStorage({ initialRoot: imageRoot });
+    const context = Object.freeze({
+      getRoot: storage.getRoot,
+      scanImages: storage.scanImages,
+      getImage: storage.getImage,
+      imagePaths: storage.imagePaths,
+      loadSubimageCrop: storage.loadSubimageCrop,
+      saveSubimageCrop: storage.saveSubimageCrop,
+    });
+    storage.createSubimageMutationContext = vi.fn(() => context);
+    const app = createApp({ rootDir: appRoot, storage });
+
+    const save = await jsonRequest(app, "/api/images/T01/subimage", {
+      method: "PUT",
+      body: { crop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+    const batch = await jsonRequest(app, "/api/subimages/create-missing", {
+      method: "POST",
+      body: { templateCrop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+    const replacement = await jsonRequest(app, "/api/subimages/replace-all", {
+      method: "POST",
+      body: { templateCrop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+
+    expect(save.status).toBe(200);
+    expect(batch.status).toBe(200);
+    expect(replacement.status).toBe(200);
+    expect(storage.createSubimageMutationContext).toHaveBeenCalledTimes(3);
+  });
+
   test("returns safe preflight failures without local paths", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
@@ -1248,15 +1283,33 @@ describe("createApp", () => {
     });
   });
 
-  test("subimage routes preserve the existing unknown-image and malformed-JSON responses", async () => {
+  test("returns a stable Subimage-only code for unknown image IDs", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
     await writeImage(imageRoot, "T01");
     const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
 
-    const unknown = await jsonRequest(app, "/api/images/missing/subimage");
-    expect(unknown.status).toBe(404);
-    await expect(unknown.json()).resolves.toEqual({ error: "Image not found." });
+    const getUnknown = await jsonRequest(app, "/api/images/missing/subimage");
+    expect(getUnknown.status).toBe(404);
+    await expect(getUnknown.json()).resolves.toEqual({ error: "Image not found.", code: "IMAGE_NOT_FOUND" });
+
+    const putUnknown = await jsonRequest(app, "/api/images/missing/subimage", {
+      method: "PUT",
+      body: { crop: { sourceWidth: 2, sourceHeight: 2, x: 0, y: 0, width: 2, height: 2 } },
+    });
+    expect(putUnknown.status).toBe(404);
+    await expect(putUnknown.json()).resolves.toEqual({ error: "Image not found.", code: "IMAGE_NOT_FOUND" });
+
+    const legacyUnknown = await jsonRequest(app, "/api/images/missing");
+    expect(legacyUnknown.status).toBe(404);
+    await expect(legacyUnknown.json()).resolves.toEqual({ error: "Image not found." });
+  });
+
+  test("preserves the existing malformed-JSON response for Subimage batches", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01");
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
 
     const malformed = await request(app, "/api/subimages/replace-all", {
       method: "POST",

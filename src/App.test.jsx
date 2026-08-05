@@ -2825,9 +2825,16 @@ describe("App", () => {
     expect(screen.getByText("Clean")).toBeInTheDocument();
   });
 
-  test("draws a source-aspect initial crop without writing and enables create-missing", async () => {
+  test("redraws the initial crop at a different size before Create All, then locks the committed size", async () => {
+    let activeLoads = 0;
     const { fetchMock } = mockSubimageApi({
-      subimageResponse: () => jsonResponse({ hasSubimage: false, crop: null }),
+      subimageResponse: (imageId) => {
+        if (imageId !== "scan-a") return jsonResponse({ hasSubimage: false, crop: null });
+        activeLoads += 1;
+        return jsonResponse(activeLoads === 1
+          ? { hasSubimage: false, crop: null }
+          : { hasSubimage: true, crop: { ...savedSubimage, x: 0, y: 0, width: 40, height: 32 } });
+      },
     });
     render(<App />);
     await enterSubimage();
@@ -2839,8 +2846,25 @@ describe("App", () => {
     expect(await screen.findByText("50 x 40 px")).toBeInTheDocument();
     expect(screen.getByText("x 10")).toBeInTheDocument();
     expect(screen.getByText("y 8")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Create all subimages" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    drawSubimageCrop(stage, {
+      start: { clientX: 0, clientY: 0 },
+      end: { clientX: 390, clientY: 310 },
+    });
+    expect(await screen.findByText("40 x 32 px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create all subimages" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/subimages/create-missing",
+      expect.objectContaining({ method: "POST" }),
+    ));
+    expect(await screen.findByText("40 x 32 px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
+    expect(activeLoads).toBe(2);
     expect(fetchMock).not.toHaveBeenCalledWith(
       expect.stringContaining("/subimage"),
       expect.objectContaining({ method: "PUT" }),
@@ -2912,6 +2936,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Subimage" }));
 
     expect(await screen.findByText("- x - px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Replace all subimages" })).toBeDisabled();
   });
@@ -2955,6 +2980,14 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save subimage" }));
     expect(await screen.findByText("Saving subimage")).toBeInTheDocument();
+    const findRoot = screen.getByRole("button", { name: "Find root" });
+    const setRoot = screen.getByRole("button", { name: "Set root" });
+    expect(findRoot).toBeDisabled();
+    expect(setRoot).toBeDisabled();
+    fireEvent.click(findRoot);
+    fireEvent.submit(setRoot.closest("form"));
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/root/select", expect.objectContaining({ method: "POST" }));
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/root", expect.objectContaining({ method: "POST" }));
     fireSubimagePointer(stage, "pointermove", { clientX: 0, clientY: 800, pointerId: 8 });
     const stayedAtSubmittedPosition = Boolean(screen.queryByText("x 50")) && Boolean(screen.queryByText("y 0"));
 
@@ -3048,7 +3081,41 @@ describe("App", () => {
     expect(await screen.findByText("x 10")).toBeInTheDocument();
     expect(screen.getByText("y 8")).toBeInTheDocument();
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
     expect(activeLoads).toBe(2);
+  });
+
+  test("keeps size locked across navigation after a partial batch writes another image", async () => {
+    mockSubimageApi({
+      subimageResponse: (imageId) => jsonResponse(
+        imageId === "scan-b"
+          ? { hasSubimage: true, crop: savedSubimageB }
+          : { hasSubimage: false, crop: null },
+      ),
+      createSubimagesResponse: () => jsonResponse({
+        operation: "create-missing",
+        discovered: 2,
+        completed: 1,
+        created: ["plate-b"],
+        preserved: [],
+        replaced: [],
+        failed: [{ imageFolder: "plate-a", code: "WRITE_FAILED", message: "Unable to save subimage." }],
+      }),
+    });
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    drawSubimageCrop(mockSubimageCanvasRect());
+    fireEvent.click(screen.getByRole("button", { name: "Create all subimages" }));
+    expect(await screen.findByText("Failed (1): plate-a - Unable to save subimage.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    expect(await screen.findByText("x 30")).toBeInTheDocument();
+    moveSubimageCrop(mockSubimageCanvasRect());
+
+    expect(await screen.findByText("x 50")).toBeInTheDocument();
+    expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save subimage" })).toBeEnabled();
   });
 
   test("loads distinct saved crops in order and reserves create-missing for the first image", async () => {
@@ -3093,6 +3160,33 @@ describe("App", () => {
     expect(await screen.findByText("x 30")).toBeInTheDocument();
     expect(screen.getByText("y 20")).toBeInTheDocument();
     expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
+  });
+
+  test("does not offer replacement apply until a new selection produces geometry", async () => {
+    const { fetchMock } = mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+
+    fireEvent.click(screen.getByRole("button", { name: "Replace all subimages" }));
+    const stage = mockSubimageCanvasRect();
+    fireSubimagePointer(stage, "pointerdown", {
+      clientX: 100,
+      clientY: 80,
+      button: 0,
+      pointerId: 11,
+    });
+    fireSubimagePointer(stage, "pointerup", {
+      clientX: 100,
+      clientY: 80,
+      pointerId: 11,
+    });
+
+    expect(screen.getByText("Select a replacement crop")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply replacement" })).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/subimages/replace-all",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   test("confirms replacement, reloads the server-normalized active crop, and locks its new size", async () => {
@@ -3171,7 +3265,7 @@ describe("App", () => {
     expect(screen.queryByText("x 10")).not.toBeInTheDocument();
   });
 
-  test("clears Subimage state on root replacement and ignores the old root response", async () => {
+  test("blocks root replacement while Subimage is loading, then clears state for the next root", async () => {
     const oldRootLoad = deferred();
     const nextImage = {
       ...subimageImages[0],
@@ -3199,12 +3293,18 @@ describe("App", () => {
     await enterSubimage();
 
     fireEvent.change(screen.getByLabelText("Root path"), { target: { value: "/next/root" } });
-    fireEvent.click(screen.getByRole("button", { name: "Set root" }));
-    expect(await screen.findByText("x 40")).toBeInTheDocument();
+    const setRoot = screen.getByRole("button", { name: "Set root" });
+    expect(setRoot).toBeDisabled();
+    fireEvent.submit(setRoot.closest("form"));
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
 
     oldRootLoad.resolve(await jsonResponse({ hasSubimage: true, crop: savedSubimage }));
     await act(async () => oldRootLoad.promise);
-    expect(screen.getByText("x 40")).toBeInTheDocument();
+    expect(await screen.findByText("x 10")).toBeInTheDocument();
+    expect(setRoot).toBeEnabled();
+
+    fireEvent.click(setRoot);
+    expect(await screen.findByText("x 40")).toBeInTheDocument();
     expect(screen.queryByText("x 10")).not.toBeInTheDocument();
   });
 

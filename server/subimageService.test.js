@@ -21,6 +21,16 @@ async function createTempRoot() {
   return rootDir;
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((rootDir) => rm(rootDir, { recursive: true, force: true })));
 });
@@ -95,6 +105,14 @@ async function writeUnsupportedTiff(rootDir, folderName, input, transform = (ima
   await mkdir(imageDir, { recursive: true });
   await mkdir(maskDir, { recursive: true });
   await transform(sharp(input)).tiff({ compression: "none" }).toFile(path.join(imageDir, `${folderName}.tif`));
+}
+
+async function renderGrey16Crop({ sourcePath, tempPath, crop }) {
+  await sharp(sourcePath)
+    .extract({ left: crop.x, top: crop.y, width: crop.width, height: crop.height })
+    .toColourspace("grey16")
+    .tiff({ compression: "lzw" })
+    .toFile(tempPath);
 }
 
 describe("validateCrop", () => {
@@ -232,12 +250,14 @@ describe("saveSubimage", () => {
     const paths = storage.imagePaths("T01");
     const priorTiff = await readFile(paths.subimagePath);
     const priorCrop = await readFile(paths.subimageCropPath);
-    const saveSubimageCrop = storage.saveSubimageCrop;
-    storage.saveSubimageCrop = async () => {
-      throw new Error("simulated crop JSON failure");
+    const failingStorage = {
+      ...storage.createSubimageMutationContext(),
+      async saveSubimageCrop() {
+        throw new Error("simulated crop JSON failure");
+      },
     };
 
-    await expect(saveSubimage(storage, "T01", {
+    await expect(saveSubimage(failingStorage, "T01", {
       sourceWidth: 8, sourceHeight: 8, x: 4, y: 4, width: 4, height: 4,
     })).rejects.toMatchObject({ code: "CROP_SAVE_FAILED" });
 
@@ -255,7 +275,6 @@ describe("saveSubimage", () => {
         aspectRatio: 1,
       },
     });
-    storage.saveSubimageCrop = saveSubimageCrop;
   });
 
   test("keeps the prior saved pair when creating its TIFF backup fails", async () => {
@@ -283,6 +302,37 @@ describe("saveSubimage", () => {
     expect(await readFile(paths.subimagePath)).toEqual(priorTiff);
     expect(await readFile(paths.subimageCropPath)).toEqual(priorCrop);
     await expect(readdir(paths.subimageDir)).resolves.toEqual(["T01.tif", "crop.json"]);
+  });
+
+  test("keeps a single save bound to its starting root when the live root changes during rendering", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    const pixels = Array.from({ length: 64 }, (_, index) => index * 101);
+    await writeGrey16Tiff(firstRoot, "T01", 8, 8, pixels);
+    await writeGrey16Tiff(secondRoot, "T01", 8, 8, pixels.map((value) => value + 1));
+    const storage = createStorage({ initialRoot: firstRoot });
+    const renderStarted = deferred();
+    const continueRender = deferred();
+
+    const save = saveSubimage(storage, "T01", squareCrop({ x: 2, y: 2 }), {
+      __testDependencies: {
+        async renderCropTiff(args) {
+          renderStarted.resolve(args.sourcePath);
+          await continueRender.promise;
+          await renderGrey16Crop(args);
+        },
+      },
+    });
+
+    await expect(renderStarted.promise).resolves.toBe(path.join(firstRoot, "T01", "image", "T01.tif"));
+    storage.setRoot(secondRoot);
+    continueRender.resolve();
+    await expect(save).resolves.toMatchObject({ crop: { imageFolder: "T01", x: 2, y: 2 } });
+
+    await expect(access(path.join(firstRoot, "T01", "subimage", "T01.tif"))).resolves.toBeUndefined();
+    await expect(access(path.join(firstRoot, "T01", "subimage", "crop.json"))).resolves.toBeUndefined();
+    await expect(access(path.join(secondRoot, "T01", "subimage", "T01.tif"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(path.join(secondRoot, "T01", "subimage", "crop.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
@@ -463,7 +513,7 @@ test("reports a runtime partial batch and preserves the failed image pair", asyn
   const oldJson = await readFile(storage.imagePaths("T02").subimageCropPath);
 
   const failingStorage = {
-    ...storage,
+    ...storage.createSubimageMutationContext(),
     async saveSubimageCrop(id, crop) {
       if (id === "T02") throw new Error("simulated crop JSON write failure");
       return storage.saveSubimageCrop(id, crop);
@@ -479,4 +529,46 @@ test("reports a runtime partial batch and preserves the failed image pair", asyn
   });
   await expect(readFile(storage.imagePaths("T02").subimagePath)).resolves.toEqual(oldTiff);
   await expect(readFile(storage.imagePaths("T02").subimageCropPath)).resolves.toEqual(oldJson);
+});
+
+test("keeps every batch image bound to its starting root when the live root changes mid-batch", async () => {
+  const firstRoot = await createThreeImageRoot({ width: 8, height: 8 });
+  const secondRoot = await createThreeImageRoot({ width: 8, height: 8 });
+  const storage = createStorage({ initialRoot: firstRoot });
+  const renderStarted = deferred();
+  const continueRender = deferred();
+  let renderCount = 0;
+
+  const batch = createMissingSubimages(storage, squareCrop({ x: 2, y: 2 }), {
+    __testDependencies: {
+      async renderCropTiff(args) {
+        renderCount += 1;
+        if (renderCount === 1) {
+          renderStarted.resolve(args.sourcePath);
+          await continueRender.promise;
+        }
+        await renderGrey16Crop(args);
+      },
+    },
+  });
+
+  await expect(renderStarted.promise).resolves.toBe(path.join(firstRoot, "T01", "image", "T01.tif"));
+  storage.setRoot(secondRoot);
+  continueRender.resolve();
+  await expect(batch).resolves.toMatchObject({
+    status: "complete",
+    created: ["T01", "T02", "T03"],
+    failed: [],
+  });
+
+  for (const imageFolder of ["T01", "T02", "T03"]) {
+    await expect(access(path.join(firstRoot, imageFolder, "subimage", `${imageFolder}.tif`))).resolves.toBeUndefined();
+    await expect(access(path.join(firstRoot, imageFolder, "subimage", "crop.json"))).resolves.toBeUndefined();
+    await expect(access(path.join(secondRoot, imageFolder, "subimage", `${imageFolder}.tif`))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(access(path.join(secondRoot, imageFolder, "subimage", "crop.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  }
 });

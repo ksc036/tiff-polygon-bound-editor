@@ -111,6 +111,47 @@ describe("createStorage", () => {
       path.join(firstRoot, "shared-id", "image", "first.tif"),
     );
     expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(snapshot.saveSubimageCrop).toBeUndefined();
+  });
+
+  test("creates a frozen Subimage mutation context bound to one root with narrow write access", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeImage(firstRoot, "shared-id", "frame.tif");
+    await writeImage(secondRoot, "shared-id", "frame.tif");
+    const storage = createStorage({ initialRoot: firstRoot });
+
+    expect(storage.createSubimageMutationContext).toBeTypeOf("function");
+    const context = storage.createSubimageMutationContext();
+    storage.setRoot(secondRoot);
+
+    expect(Object.isFrozen(context)).toBe(true);
+    expect(context.setRoot).toBeUndefined();
+    expect(context.saveBounds).toBeUndefined();
+    expect(context.saveAnalysis).toBeUndefined();
+    expect(context.saveSubimageCrop).toBeTypeOf("function");
+    expect(context.imagePaths("shared-id").subimageCropPath).toBe(
+      path.join(firstRoot, "shared-id", "subimage", "crop.json"),
+    );
+
+    await context.saveSubimageCrop("shared-id", {
+      sourceWidth: 8,
+      sourceHeight: 8,
+      x: 0,
+      y: 0,
+      width: 4,
+      height: 4,
+      aspectRatio: 1,
+    });
+
+    await expect(readJson(path.join(firstRoot, "shared-id", "subimage", "crop.json"))).resolves.toMatchObject({
+      imageFolder: "shared-id",
+      width: 4,
+      height: 4,
+    });
+    await expect(readFile(path.join(secondRoot, "shared-id", "subimage", "crop.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   test("rejects roots with no folders containing image and mask directories", async () => {

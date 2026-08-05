@@ -330,6 +330,20 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     });
   }
 
+  function createSubimageMutationContext() {
+    ensureRoot();
+    const snapshotStorage = createStorage({ initialRoot: rootDir });
+
+    return Object.freeze({
+      getRoot: snapshotStorage.getRoot,
+      scanImages: snapshotStorage.scanImages,
+      getImage: snapshotStorage.getImage,
+      loadSubimageCrop: snapshotStorage.loadSubimageCrop,
+      saveSubimageCrop: snapshotStorage.saveSubimageCrop,
+      imagePaths: snapshotStorage.imagePaths,
+    });
+  }
+
   async function selectRootWithFinder() {
     if (!selectRoot) {
       throw new Error("Root selection is unsupported in this environment.");
@@ -363,5 +377,6 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
     importPreviousBounds,
     imagePaths,
     createSnapshot,
+    createSubimageMutationContext,
   };
 }

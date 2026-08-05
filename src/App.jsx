@@ -201,6 +201,7 @@ export default function App() {
   const [savedSubimageCrop, setSavedSubimageCrop] = useState(null);
   const [subimageDraft, setSubimageDraft] = useState(null);
   const [subimageTemplateCrop, setSubimageTemplateCrop] = useState(null);
+  const [subimageSizeLocked, setSubimageSizeLocked] = useState(false);
   const [subimageMode, setSubimageMode] = useState("idle");
   const [subimageInteraction, setSubimageInteraction] = useState(null);
   const [subimageBusy, setSubimageBusy] = useState(null);
@@ -217,13 +218,13 @@ export default function App() {
   const isBoundsLayer = imageLayer !== "heatmap" && imageLayer !== "subimage";
   const isTemplateOwner = activeIndex === 0;
   const subimageDirty = Boolean(subimageDraft) && !sameCrop(subimageDraft, savedSubimageCrop);
-  const subimageSizeLocked = Boolean(subimageTemplateCrop) && subimageMode === "idle";
   const subimageDraftMatchesTemplateSize = sameCropSize(subimageDraft, subimageTemplateCrop);
-  const canSetSubimageCrop = isTemplateOwner && !subimageTemplateCrop;
+  const canSetSubimageCrop = isTemplateOwner && !subimageSizeLocked;
   const canCreateMissing =
     isTemplateOwner && Boolean(subimageDraft) && subimageDraftMatchesTemplateSize;
   const canSaveSubimage =
     subimageSizeLocked &&
+    subimageMode === "idle" &&
     subimageDirty &&
     subimageDraftMatchesTemplateSize &&
     (Boolean(savedSubimageCrop) || !isTemplateOwner);
@@ -294,6 +295,7 @@ export default function App() {
     setSavedSubimageCrop(null);
     setSubimageDraft(null);
     setSubimageTemplateCrop(null);
+    setSubimageSizeLocked(false);
     setSubimageMode("idle");
     setSubimageInteraction(null);
     setSubimageBusy(null);
@@ -472,7 +474,8 @@ export default function App() {
 
         const ownerCrop = validSubimageCropFor(ownerPayload, ownerImage);
         const activeCrop = validSubimageCropFor(activePayload, requestedImage);
-        setSubimageTemplateCrop(ownerCrop);
+        setSubimageTemplateCrop((current) => ownerCrop ?? current);
+        setSubimageSizeLocked((current) => current || Boolean(ownerCrop));
 
         setSavedSubimageCrop(activeCrop);
         setSubimageDraft(
@@ -656,11 +659,14 @@ export default function App() {
 
   const discardSubimageDraft = useCallback(() => {
     setSubimageDraft(savedSubimageCrop);
-    if (isTemplateOwner) setSubimageTemplateCrop(savedSubimageCrop);
+    if (isTemplateOwner && !subimageSizeLocked) {
+      setSubimageTemplateCrop(savedSubimageCrop);
+      setSubimageSizeLocked(Boolean(savedSubimageCrop));
+    }
     setSubimageMode("idle");
     setSubimageInteraction(null);
     setSubimageError("");
-  }, [isTemplateOwner, savedSubimageCrop]);
+  }, [isTemplateOwner, savedSubimageCrop, subimageSizeLocked]);
 
   const confirmNavigationDiscard = useCallback(() => {
     if (!dirty && !subimageDirty) return true;
@@ -687,7 +693,7 @@ export default function App() {
   }, [subimageDirty]);
 
   const replaceRoot = async (endpoint, body) => {
-    if (exportInFlightRef.current) return;
+    if (exportInFlightRef.current || subimageBusy !== null) return;
     if (!confirmNavigationDiscard()) return;
 
     try {
@@ -1150,6 +1156,7 @@ export default function App() {
 
   function handleStartSubimageReplacement() {
     if (!canReplaceSubimages || subimageBusy !== null) return;
+    setSubimageDraft(null);
     setSubimageMode("select-replacement");
     setSubimageInteraction(null);
     setSubimageError("");
@@ -1235,6 +1242,7 @@ export default function App() {
       );
       if (!isCurrentSubimageRequest(context)) return;
       setSubimageBatchResult(result);
+      if (batchHasCommittedCrop(result)) setSubimageSizeLocked(true);
       await reloadActiveSubimageAfterBatch(context, result);
     } catch (error) {
       if (isCurrentSubimageRequest(context)) setSubimageError(error.message);
@@ -1268,6 +1276,7 @@ export default function App() {
       );
       if (!isCurrentSubimageRequest(context)) return;
       setSubimageBatchResult(result);
+      if (batchHasCommittedCrop(result)) setSubimageSizeLocked(true);
       const reloaded = await reloadActiveSubimageAfterBatch(context, result);
       if (reloaded && isCurrentSubimageRequest(context)) setSubimageMode("idle");
     } catch (error) {
@@ -1555,10 +1564,14 @@ export default function App() {
         className="top-toolbar"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!exporting) replaceRoot("/api/root", { rootPath });
+          if (!exporting && subimageBusy === null) replaceRoot("/api/root", { rootPath });
         }}
       >
-        <button type="button" disabled={exporting} onClick={() => replaceRoot("/api/root/select")}>
+        <button
+          type="button"
+          disabled={exporting || subimageBusy !== null}
+          onClick={() => replaceRoot("/api/root/select")}
+        >
           Find root
         </button>
         <label className="path-field" htmlFor="root-path">
@@ -1573,7 +1586,7 @@ export default function App() {
             onChange={(event) => setRootPath(event.target.value)}
           />
         </label>
-        <button type="submit" disabled={exporting}>Set root</button>
+        <button type="submit" disabled={exporting || subimageBusy !== null}>Set root</button>
         <button
           type="button"
           aria-label="Previous image"
@@ -2849,6 +2862,10 @@ function sameCropSize(crop, template) {
     crop.width === template.width &&
     crop.height === template.height
   );
+}
+
+function batchHasCommittedCrop(result) {
+  return [result?.created, result?.preserved, result?.replaced].some((items) => items?.length > 0);
 }
 
 function heatmapDimensionError(heatmap, image) {

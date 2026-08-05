@@ -48,6 +48,28 @@ function isMissingFile(error) {
   return error?.code === "ENOENT";
 }
 
+function isUnknownImage(error) {
+  return /unknown image id/i.test(error?.message ?? "");
+}
+
+function captureMutationContext(storage) {
+  return storage.createSubimageMutationContext?.() ?? storage;
+}
+
+function subimageImageContext(storage, id) {
+  try {
+    return {
+      image: storage.getImage(id),
+      paths: storage.imagePaths(id),
+    };
+  } catch (error) {
+    if (isUnknownImage(error)) {
+      throw new SubimageError("IMAGE_NOT_FOUND", "Image not found.", { status: 404, cause: error });
+    }
+    throw error;
+  }
+}
+
 async function fileExists(filePath, deps, { errorCode = "INVALID_SAVED_CROP", errorMessage = "Unable to inspect saved subimage TIFF." } = {}) {
   try {
     await deps.access(filePath);
@@ -290,6 +312,7 @@ async function preflightBatch(storage, templateCrop, operation, options) {
 }
 
 async function runBatch(storage, templateCrop, operation, options = {}) {
+  storage = captureMutationContext(storage);
   const plannedImages = await preflightBatch(storage, templateCrop, operation, options);
   const result = emptyBatchResult(operation);
 
@@ -315,7 +338,7 @@ async function runBatch(storage, templateCrop, operation, options = {}) {
 }
 
 export async function loadSubimage(storage, id, options = {}) {
-  const paths = storage.imagePaths(id);
+  const { image, paths } = subimageImageContext(storage, id);
   const deps = dependencies(options);
   let crop;
 
@@ -335,14 +358,14 @@ export async function loadSubimage(storage, id, options = {}) {
   }
 
   const source = await readSupportedSource(paths.imagePath, options);
-  const normalized = validateSavedCrop(crop, storage.getImage(id), source);
+  const normalized = validateSavedCrop(crop, image, source);
   await validateOutputMetadata(paths.subimagePath, normalized, options);
   return { hasSubimage: true, crop: normalized };
 }
 
 export async function saveSubimage(storage, id, crop, options = {}) {
-  const paths = storage.imagePaths(id);
-  const image = storage.getImage(id);
+  storage = captureMutationContext(storage);
+  const { image, paths } = subimageImageContext(storage, id);
   const deps = dependencies(options);
   const source = await readSupportedSource(paths.imagePath, options);
   const normalized = validateCrop(crop, source);

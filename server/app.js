@@ -24,6 +24,7 @@ import {
 
 const CONNECTION_MODE = "input-order-cycle";
 const SUBIMAGE_ERROR_MESSAGES = {
+  IMAGE_NOT_FOUND: "Image not found.",
   MISSING_SOURCE: "Source TIFF is missing.",
   UNSUPPORTED_SOURCE: "Source TIFF must be single-channel 16-bit grayscale.",
   DIMENSION_MISMATCH: "Source image dimensions do not match.",
@@ -78,6 +79,10 @@ function safeSubimageFailures(failures) {
     code,
     message: SUBIMAGE_BATCH_FAILURE_MESSAGES[code] ?? "Unable to process subimage.",
   }));
+}
+
+function subimageMutationContext(storage) {
+  return storage.createSubimageMutationContext?.() ?? storage;
 }
 
 function safeErrorResponse(error) {
@@ -527,21 +532,24 @@ export function createApp({
   app.put(
     "/api/images/:id/subimage",
     asyncRoute(async (request, response) => {
-      response.json(await saveSubimage(imageStorage, request.params.id, request.body?.crop, { maxImagePixels }));
+      const storageContext = subimageMutationContext(imageStorage);
+      response.json(await saveSubimage(storageContext, request.params.id, request.body?.crop, { maxImagePixels }));
     }),
   );
 
   app.post(
     "/api/subimages/create-missing",
     asyncRoute(async (request, response) => {
-      response.json(await createMissingSubimages(imageStorage, request.body?.templateCrop, { maxImagePixels }));
+      const storageContext = subimageMutationContext(imageStorage);
+      response.json(await createMissingSubimages(storageContext, request.body?.templateCrop, { maxImagePixels }));
     }),
   );
 
   app.post(
     "/api/subimages/replace-all",
     asyncRoute(async (request, response) => {
-      response.json(await replaceAllSubimages(imageStorage, request.body?.templateCrop, { maxImagePixels }));
+      const storageContext = subimageMutationContext(imageStorage);
+      response.json(await replaceAllSubimages(storageContext, request.body?.templateCrop, { maxImagePixels }));
     }),
   );
 
