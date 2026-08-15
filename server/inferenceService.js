@@ -1,0 +1,487 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
+import sharp from "sharp";
+import { polygonSelfIntersects } from "./analysisGeometry.js";
+import { resolveMaxImagePixels } from "./imageProcessing.js";
+import {
+  closestThreshold,
+  createProbabilityOverlayPng,
+  parseProbabilityNpy,
+  probabilityMetrics,
+  writeThresholdMaskPng,
+} from "./probabilityMap.js";
+
+const DEFAULT_THRESHOLD = 0.5;
+
+export class InferenceError extends Error {
+  constructor(code, message, { status = 422, cause } = {}) {
+    super(message, { cause });
+    this.name = "InferenceError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+function inferenceError(code, message, status, cause) {
+  return new InferenceError(code, message, { status, cause });
+}
+
+function isTiff(fileName) {
+  return /\.tiff?$/i.test(fileName);
+}
+
+function imageStem(fileName) {
+  return fileName.replace(/\.tiff?$/i, "");
+}
+
+function compareNames(left, right) {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function inferenceId(timestampFolder, imageFile) {
+  return Buffer.from(JSON.stringify([timestampFolder, imageFile])).toString("base64url");
+}
+
+function ensureRootPath(rootPath) {
+  if (!rootPath || !path.isAbsolute(rootPath)) {
+    throw inferenceError("INVALID_ROOT", "Inference root must be an absolute directory.", 400);
+  }
+  return rootPath;
+}
+
+export async function scanInferenceImages(rootPath) {
+  const root = ensureRootPath(rootPath);
+  let rootStat;
+  try {
+    rootStat = await stat(root);
+  } catch (error) {
+    throw inferenceError("INVALID_ROOT", "Inference root must be an existing directory.", 400, error);
+  }
+  if (!rootStat.isDirectory()) {
+    throw inferenceError("INVALID_ROOT", "Inference root must be an existing directory.", 400);
+  }
+
+  const timestampEntries = await readdir(root, { withFileTypes: true });
+  const images = [];
+  for (const entry of timestampEntries.filter((candidate) => candidate.isDirectory()).sort((left, right) => compareNames(left.name, right.name))) {
+    const timestampFolder = entry.name;
+    const timestampPath = path.join(root, timestampFolder);
+    const imageDir = path.join(timestampPath, "image");
+    let imageEntries;
+    try {
+      imageEntries = await readdir(imageDir, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+      throw error;
+    }
+
+    for (const imageEntry of imageEntries.filter((candidate) => candidate.isFile() && isTiff(candidate.name)).sort((left, right) => compareNames(left.name, right.name))) {
+      const imageFile = imageEntry.name;
+      const stem = imageStem(imageFile);
+      const probabilityMapsDir = path.join(timestampPath, "probability-maps");
+      images.push({
+        id: inferenceId(timestampFolder, imageFile),
+        timestampFolder,
+        imageFile,
+        imagePath: path.join(imageDir, imageFile),
+        probabilityMapsDir,
+        mapPath: path.join(probabilityMapsDir, `${stem}.probability.npy`),
+        settingsPath: path.join(probabilityMapsDir, `${stem}.mask-setting.json`),
+        maskPath: path.join(timestampPath, "mask", `${stem}.png`),
+      });
+    }
+  }
+  return images;
+}
+
+function validThreshold(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function safeMessage(error) {
+  return error instanceof InferenceError ? error.message : "Unable to run model inference.";
+}
+
+function cleanSettings(image, value = {}) {
+  return {
+    schemaVersion: 1,
+    timestampFolder: image.timestampFolder,
+    imageFile: image.imageFile,
+    threshold: validThreshold(value.threshold) ? value.threshold : DEFAULT_THRESHOLD,
+    referenceId: typeof value.referenceId === "string" ? value.referenceId : null,
+    targetAreaFraction: validThreshold(value.targetAreaFraction) ? value.targetAreaFraction : null,
+    roiGroupId: typeof value.roiGroupId === "string" ? value.roiGroupId : null,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null,
+  };
+}
+
+async function writeAtomically(filePath, bytes) {
+  const directory = path.dirname(filePath);
+  const tempPath = path.join(directory, `.${path.basename(filePath)}.tmp-${randomUUID()}`);
+  await mkdir(directory, { recursive: true });
+  try {
+    await writeFile(tempPath, bytes);
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function validPoint(point) {
+  return point && typeof point === "object" && typeof point.x === "number" && Number.isFinite(point.x) &&
+    typeof point.y === "number" && Number.isFinite(point.y);
+}
+
+function validPolygon(group, width, height) {
+  if (!group || typeof group.id !== "string" || !Array.isArray(group.points) || group.points.length < 3 ||
+      !group.points.every(validPoint) || polygonSelfIntersects(group.points)) {
+    return null;
+  }
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) return null;
+  return group.points.map(({ x, y }) => ({ x, y }));
+}
+
+function sourceDimensions(imagePath, maxImagePixels) {
+  return sharp(imagePath, { limitInputPixels: resolveMaxImagePixels(maxImagePixels) })
+    .metadata()
+    .then((metadata) => {
+      if (!Number.isInteger(metadata.width) || !Number.isInteger(metadata.height) || metadata.width <= 0 || metadata.height <= 0) {
+        throw inferenceError("INVALID_SOURCE", "Unable to read source image dimensions.", 422);
+      }
+      return { width: metadata.width, height: metadata.height };
+    })
+    .catch((error) => {
+      if (error instanceof InferenceError) throw error;
+      throw inferenceError("INVALID_SOURCE", "Unable to read source image dimensions.", 422, error);
+    });
+}
+
+function normalizedServerUrl(serverUrl) {
+  try {
+    const url = new URL(serverUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Unsupported protocol.");
+    return url;
+  } catch (error) {
+    throw inferenceError("INVALID_SERVER_URL", "Model server URL must be a valid HTTP URL.", 400, error);
+  }
+}
+
+export function createInferenceService({ storage, fetchImpl = globalThis.fetch, maxImagePixels } = {}) {
+  if (!storage || typeof storage.getRoot !== "function" || typeof storage.loadBounds !== "function") {
+    throw new TypeError("Inference service requires storage root and bounds access.");
+  }
+  if (typeof fetchImpl !== "function") {
+    throw new TypeError("Inference service requires fetch.");
+  }
+
+  const jobs = new Map();
+  const sourceStates = new Map();
+
+  async function images() {
+    const rootPath = storage.getRoot();
+    if (!rootPath) throw inferenceError("ROOT_UNSET", "Storage root has not been set.", 400);
+    return scanInferenceImages(rootPath);
+  }
+
+  async function imageFor(id) {
+    const image = (await images()).find((candidate) => candidate.id === id);
+    if (!image) throw inferenceError("IMAGE_NOT_FOUND", "Inference image not found.", 404);
+    return image;
+  }
+
+  async function loadMap(image) {
+    let bytes;
+    try {
+      bytes = await readFile(image.mapPath);
+    } catch (error) {
+      if (error.code === "ENOENT") throw inferenceError("MISSING_PROBABILITY_MAP", "Probability map does not exist.", 404, error);
+      throw inferenceError("INVALID_PROBABILITY_MAP", "Saved probability map is invalid.", 422, error);
+    }
+
+    let map;
+    try {
+      map = parseProbabilityNpy(bytes);
+    } catch (error) {
+      throw inferenceError("INVALID_PROBABILITY_MAP", "Saved probability map is invalid.", 422, error);
+    }
+    const dimensions = await sourceDimensions(image.imagePath, maxImagePixels);
+    if (map.width !== dimensions.width || map.height !== dimensions.height) {
+      throw inferenceError("DIMENSION_MISMATCH", "Probability map dimensions do not match the source image.", 422);
+    }
+    return map;
+  }
+
+  async function hasCompleteMap(image) {
+    try {
+      await loadMap(image);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function loadSettings(image, { persistDefault = false } = {}) {
+    let parsed;
+    try {
+      parsed = JSON.parse(await readFile(image.settingsPath, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+        throw inferenceError("INVALID_SETTINGS", "Saved threshold settings are invalid.", 422, error);
+      }
+      const settings = cleanSettings(image);
+      if (persistDefault) await writeSettings(image, settings);
+      return settings;
+    }
+
+    if (!parsed || typeof parsed !== "object" || !validThreshold(parsed.threshold)) {
+      throw inferenceError("INVALID_SETTINGS", "Saved threshold settings are invalid.", 422);
+    }
+    return cleanSettings(image, parsed);
+  }
+
+  async function writeSettings(image, settings) {
+    const payload = { ...cleanSettings(image, settings), updatedAt: new Date().toISOString() };
+    await writeAtomically(image.settingsPath, `${JSON.stringify(payload, null, 2)}\n`);
+    return payload;
+  }
+
+  async function polygonForTimestamp(timestampFolder, roiGroupId, width, height) {
+    if (!roiGroupId) return null;
+    let bounds;
+    try {
+      bounds = await storage.loadBounds(timestampFolder);
+    } catch {
+      return null;
+    }
+    if (!bounds || bounds.width !== width || bounds.height !== height || !Array.isArray(bounds.groups)) return null;
+    return validPolygon(bounds.groups.find((group) => group?.id === roiGroupId), width, height);
+  }
+
+  async function selectableGroups(timestampFolder, width, height) {
+    let bounds;
+    try {
+      bounds = await storage.loadBounds(timestampFolder);
+    } catch {
+      return [];
+    }
+    if (!bounds || bounds.width !== width || bounds.height !== height || !Array.isArray(bounds.groups)) return [];
+    return bounds.groups
+      .filter((group) => validPolygon(group, width, height))
+      .map((group) => ({ id: group.id, name: typeof group.name === "string" ? group.name : null, color: typeof group.color === "string" ? group.color : null }));
+  }
+
+  async function requestProbabilityMap(image, serverUrl) {
+    let sourceBytes;
+    try {
+      sourceBytes = await readFile(image.imagePath);
+    } catch (error) {
+      throw inferenceError("SOURCE_READ_FAILED", "Unable to read source image.", 422, error);
+    }
+    const form = new FormData();
+    form.append("file", new Blob([sourceBytes], { type: "image/tiff" }), image.imageFile);
+    let response;
+    try {
+      response = await fetchImpl(new URL("/v1/inference/probability-map", serverUrl), { method: "POST", body: form });
+    } catch (error) {
+      throw inferenceError("MODEL_REQUEST_FAILED", "Model inference failed.", 502, error);
+    }
+    if (!response?.ok) throw inferenceError("MODEL_REQUEST_FAILED", "Model inference failed.", 502);
+
+    let bytes;
+    let map;
+    try {
+      bytes = Buffer.from(await response.arrayBuffer());
+      map = parseProbabilityNpy(bytes);
+    } catch (error) {
+      throw inferenceError("INVALID_PROBABILITY_MAP", "Model probability map is invalid.", 502, error);
+    }
+    const dimensions = await sourceDimensions(image.imagePath, maxImagePixels);
+    if (map.width !== dimensions.width || map.height !== dimensions.height) {
+      throw inferenceError("DIMENSION_MISMATCH", "Model probability map dimensions do not match the source image.", 502);
+    }
+    return { bytes, map };
+  }
+
+  async function listImages() {
+    const scanned = await images();
+    return Promise.all(scanned.map(async (image) => {
+      const transient = sourceStates.get(image.id);
+      const status = transient?.status === "sending"
+        ? "sending"
+        : transient?.status === "failed"
+          ? "failed"
+          : await hasCompleteMap(image)
+            ? "complete"
+            : "waiting";
+      return { ...image, status, ...(transient?.message ? { message: transient.message } : {}) };
+    }));
+  }
+
+  async function saveThreshold(id, { threshold, referenceId, targetAreaFraction, roiGroupId } = {}) {
+    if (!validThreshold(threshold)) {
+      throw inferenceError("INVALID_THRESHOLD", "Threshold must be between 0 and 1.", 400);
+    }
+    if (referenceId !== undefined && referenceId !== null && typeof referenceId !== "string") {
+      throw inferenceError("INVALID_REFERENCE", "Reference image is invalid.", 400);
+    }
+    if (targetAreaFraction !== undefined && targetAreaFraction !== null && !validThreshold(targetAreaFraction)) {
+      throw inferenceError("INVALID_TARGET_FRACTION", "Target area fraction must be between 0 and 1.", 400);
+    }
+    if (roiGroupId !== undefined && roiGroupId !== null && typeof roiGroupId !== "string") {
+      throw inferenceError("INVALID_ROI", "ROI group is invalid.", 400);
+    }
+    const image = await imageFor(id);
+    const previous = await loadSettings(image);
+    return writeSettings(image, {
+      ...previous,
+      threshold,
+      ...(referenceId !== undefined ? { referenceId } : {}),
+      ...(targetAreaFraction !== undefined ? { targetAreaFraction } : {}),
+      ...(roiGroupId !== undefined ? { roiGroupId } : {}),
+    });
+  }
+
+  async function loadReview(id) {
+    const image = await imageFor(id);
+    const map = await loadMap(image);
+    const settings = await loadSettings(image, { persistDefault: true });
+    const polygon = await polygonForTimestamp(image.timestampFolder, settings.roiGroupId, map.width, map.height);
+    const wholeImage = probabilityMetrics({ probabilityMap: map, threshold: settings.threshold });
+    return {
+      id: image.id,
+      timestampFolder: image.timestampFolder,
+      imageFile: image.imageFile,
+      width: map.width,
+      height: map.height,
+      threshold: settings.threshold,
+      settings,
+      map,
+      wholeImage,
+      groups: await selectableGroups(image.timestampFolder, map.width, map.height),
+      polygon,
+      roi: polygon
+        ? { groupId: settings.roiGroupId, metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon }) }
+        : null,
+    };
+  }
+
+  async function applyReferenceThresholds({ referenceId, roiGroupId = null } = {}) {
+    if (typeof referenceId !== "string" || (roiGroupId !== null && typeof roiGroupId !== "string")) {
+      throw inferenceError("INVALID_REFERENCE", "Reference image is invalid.", 400);
+    }
+    const referenceImage = await imageFor(referenceId);
+    const referenceMap = await loadMap(referenceImage);
+    const referenceSettings = await loadSettings(referenceImage, { persistDefault: true });
+    const referencePolygon = await polygonForTimestamp(referenceImage.timestampFolder, roiGroupId, referenceMap.width, referenceMap.height);
+    const targetAreaFraction = probabilityMetrics({
+      probabilityMap: referenceMap,
+      threshold: referenceSettings.threshold,
+      polygon: referencePolygon,
+    }).areaFraction;
+    let updated = 0;
+    for (const image of await listImages()) {
+      if (image.id === referenceId || image.status !== "complete") continue;
+      const map = await loadMap(image);
+      const polygon = await polygonForTimestamp(image.timestampFolder, roiGroupId, map.width, map.height);
+      const { threshold } = closestThreshold({ probabilityMap: map, targetFraction: targetAreaFraction, polygon });
+      await saveThreshold(image.id, {
+        threshold,
+        referenceId,
+        targetAreaFraction,
+        roiGroupId: polygon ? roiGroupId : null,
+      });
+      updated += 1;
+    }
+    return { updated, targetAreaFraction, roiGroupId: referencePolygon ? roiGroupId : null };
+  }
+
+  async function createOverlay(id, { threshold } = {}) {
+    if (!validThreshold(threshold)) {
+      throw inferenceError("INVALID_THRESHOLD", "Threshold must be between 0 and 1.", 400);
+    }
+    return createProbabilityOverlayPng({ probabilityMap: await loadMap(await imageFor(id)), threshold });
+  }
+
+  async function generateMasks() {
+    const result = { completed: 0, failed: 0 };
+    for (const image of await listImages()) {
+      if (image.status !== "complete") continue;
+      try {
+        const [map, settings] = await Promise.all([
+          loadMap(image),
+          loadSettings(image, { persistDefault: true }),
+        ]);
+        await mkdir(path.dirname(image.maskPath), { recursive: true });
+        await writeThresholdMaskPng(image.maskPath, { probabilityMap: map, threshold: settings.threshold });
+        result.completed += 1;
+      } catch {
+        result.failed += 1;
+      }
+    }
+    return result;
+  }
+
+  async function runJob(job, serverUrl) {
+    for (const image of await images()) {
+      sourceStates.set(image.id, { status: "sending" });
+      try {
+        const { bytes } = await requestProbabilityMap(image, serverUrl);
+        await writeAtomically(image.mapPath, bytes);
+        sourceStates.set(image.id, { status: "complete" });
+        job.completed += 1;
+      } catch (error) {
+        sourceStates.set(image.id, { status: "failed", message: safeMessage(error) });
+        job.failed += 1;
+      }
+    }
+    job.status = job.failed > 0 ? "partial" : "complete";
+    job.finishedAt = new Date().toISOString();
+  }
+
+  function publicJob(job) {
+    return { ...job };
+  }
+
+  function startJob({ serverUrl } = {}) {
+    const normalizedUrl = normalizedServerUrl(serverUrl);
+    const job = {
+      id: randomUUID(),
+      status: "running",
+      total: 0,
+      completed: 0,
+      failed: 0,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+    };
+    jobs.set(job.id, job);
+    void images().then((scanned) => {
+      job.total = scanned.length;
+      return runJob(job, normalizedUrl);
+    }).catch((error) => {
+      job.status = "failed";
+      job.failed = Math.max(job.failed, 1);
+      job.message = safeMessage(error);
+      job.finishedAt = new Date().toISOString();
+    });
+    return publicJob(job);
+  }
+
+  function getJob(jobId) {
+    const job = jobs.get(jobId);
+    if (!job) throw inferenceError("JOB_NOT_FOUND", "Inference job not found.", 404);
+    return publicJob(job);
+  }
+
+  return {
+    listImages,
+    startJob,
+    getJob,
+    loadReview,
+    saveThreshold,
+    applyReferenceThresholds,
+    createOverlay,
+    generateMasks,
+  };
+}
