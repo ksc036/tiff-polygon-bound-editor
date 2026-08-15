@@ -28,9 +28,8 @@ function scanRoot(rootDir) {
     .flatMap((entry) => {
       const folderPath = path.join(rootDir, entry.name);
       const imageDir = path.join(folderPath, "image");
-      const maskDir = path.join(folderPath, "mask");
 
-      if (!existsSync(imageDir) || !statSync(imageDir).isDirectory() || !existsSync(maskDir) || !statSync(maskDir).isDirectory()) {
+      if (!existsSync(imageDir) || !statSync(imageDir).isDirectory()) {
         return [];
       }
 
