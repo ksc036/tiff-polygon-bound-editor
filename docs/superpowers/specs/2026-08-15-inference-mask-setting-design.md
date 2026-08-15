@@ -14,7 +14,7 @@ same timestamp folder.
 
 ## Stored Files
 
-For every image, the application may create:
+For every source TIFF, the application may create:
 
 ```text
 <root>/<timestamp>/
@@ -62,10 +62,13 @@ and lets the client observe durable progress.
 ## Root Scan And Progress
 
 The inference root scan accepts timestamp folders with an `image` directory and
-at least one TIFF image. Unlike the analysis root scan, a `mask` directory is not
-required before inference.
+at least one TIFF image. It discovers **every TIFF in each `image` directory**;
+the processing unit is `(timestamp folder, source filename)`, not just the
+timestamp folder. Unlike the analysis root scan, a `mask` directory is not
+required before inference. The existing polygon editor keeps its current
+one-image-per-timestamp behavior and is not used to enumerate inference jobs.
 
-Each discovered image has one of these client-visible states:
+Each discovered source TIFF has one of these client-visible states:
 
 | State | Meaning |
 | --- | --- |
@@ -86,9 +89,10 @@ Existing valid probability maps are considered complete when a root is reopened.
 3. The user explicitly fixes this selected image as the reference. Threshold
    adjustment alone does not change any other image.
 4. The user presses **Set other thresholds from reference**. For every other
-   complete image, select a threshold in `[0, 1]` whose area fraction is nearest
+   complete source TIFF, select a threshold in `[0, 1]` whose area fraction is nearest
    to the reference target:
-   - use the same saved ROI geometry when the reference has a valid ROI;
+   - use the polygon group with the same group ID from that source TIFF's
+     timestamp bounds when the reference has a valid selected ROI;
    - otherwise use whole-image area fraction.
 5. Each suggested threshold remains individually editable. A later manual edit
    changes only that image. The batch action may be run again from a different
@@ -114,7 +118,7 @@ analysis and heatmap paths.
 
 - Top bar: root path, folder picker, model server URL, and sequential inference
   action/status.
-- Left list: naturally sorted timestamp/image rows with Waiting, Sending,
+- Left list: naturally sorted timestamp/source-file rows with Waiting, Sending,
   Complete, or Failed status.
 - Main stage: raw source image with the thresholded mask overlay; ROI boundary is
   shown only when it is used for area-fraction matching.
@@ -124,7 +128,7 @@ analysis and heatmap paths.
 
 ## Boundaries And Failure Rules
 
-- Missing or invalid bounds never block whole-image thresholding or mask
+- Missing, invalid, or dimension-mismatched same-ID bounds never block whole-image thresholding or mask
   generation; they simply disable ROI matching for that image.
 - A response with an unsupported `.npy` schema, wrong dimensions, non-float32
   dtype, non-finite values, or values outside `[0, 1]` is rejected and not saved.
