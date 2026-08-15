@@ -85,7 +85,7 @@ export function closestThreshold({ probabilityMap, targetFraction, polygon }) {
   for (let y = 0; y < probabilityMap.height; y += 1) {
     for (let x = 0; x < probabilityMap.width; x += 1) {
       if (polygon && !pointInPolygon({ x, y }, polygon)) continue;
-      const bin = Math.round(probabilityMap.data[y * probabilityMap.width + x] * 1000);
+      const bin = Math.floor(probabilityMap.data[y * probabilityMap.width + x] * 1000 + 1e-9);
       histogram[bin] += 1;
       areaPx += 1;
     }
@@ -98,7 +98,6 @@ export function closestThreshold({ probabilityMap, targetFraction, polygon }) {
   let bestError = Number.POSITIVE_INFINITY;
   for (let bin = HISTOGRAM_SIZE - 1; bin >= 0; bin -= 1) {
     countAtOrAbove += histogram[bin];
-    if (histogram[bin] === 0) continue;
     const areaFraction = countAtOrAbove / areaPx;
     const error = Math.abs(areaFraction - targetFraction);
     const threshold = bin / 1000;

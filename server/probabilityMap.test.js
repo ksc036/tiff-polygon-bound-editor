@@ -34,7 +34,7 @@ function fixtureMap() {
   return {
     width: 3,
     height: 2,
-    data: new Float32Array([0, 0.5, 1, 0.25, 0.25, 1]),
+    data: new Float32Array([0, 0.5, 1, 0.25, 0.5, 0]),
   };
 }
 
@@ -84,7 +84,21 @@ describe("probability map computations", () => {
   });
 
   test("chooses the lower 0.001-grid threshold when errors are tied", () => {
-    expect(closestThreshold({ probabilityMap: fixtureMap(), targetFraction: 0.5 })).toMatchObject({ threshold: 0.5 });
+    expect(closestThreshold({ probabilityMap: fixtureMap(), targetFraction: 0.5 })).toMatchObject({ threshold: 0.251 });
+  });
+
+  test("evaluates empty grid candidates when selecting a zero target fraction", () => {
+    const probabilityMap = { width: 1, height: 1, data: new Float32Array([0.5004]) };
+    expect(closestThreshold({ probabilityMap, targetFraction: 0 })).toEqual({ threshold: 0.501, areaFraction: 0 });
+  });
+
+  test("does not round a probability into the next threshold bin", () => {
+    const probabilityMap = { width: 1, height: 1, data: new Float32Array([0.5006]) };
+    expect(probabilityMetrics({ probabilityMap, threshold: 0.501 })).toEqual({
+      pixelCount: 0,
+      areaPx: 1,
+      areaFraction: 0,
+    });
   });
 });
 
@@ -96,7 +110,7 @@ describe("probability PNG output", () => {
     await writeThresholdMaskPng(outputPath, { probabilityMap: fixtureMap(), threshold: 0.5 });
     const { data, info } = await sharp(outputPath).greyscale().raw().toBuffer({ resolveWithObject: true });
     expect(info).toMatchObject({ width: 3, height: 2, channels: 1 });
-    expect([...data]).toEqual([0, 255, 255, 0, 0, 255]);
+    expect([...data]).toEqual([0, 255, 255, 0, 255, 0]);
   });
 
   test("renders threshold foreground as red with transparent background", async () => {
@@ -108,8 +122,8 @@ describe("probability PNG output", () => {
       255, 0, 0, 255,
       255, 0, 0, 255,
       0, 0, 0, 0,
-      0, 0, 0, 0,
       255, 0, 0, 255,
+      0, 0, 0, 0,
     ]);
   });
 });
