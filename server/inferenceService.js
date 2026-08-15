@@ -13,6 +13,7 @@ import {
 } from "./probabilityMap.js";
 
 const DEFAULT_THRESHOLD = 0.5;
+const THRESHOLD_GRID = 1000;
 
 export class InferenceError extends Error {
   constructor(code, message, { status = 422, cause } = {}) {
@@ -94,6 +95,10 @@ function validThreshold(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+function normalizeThreshold(value) {
+  return validThreshold(value) ? Math.round(value * THRESHOLD_GRID) / THRESHOLD_GRID : null;
+}
+
 function objectPayload(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -107,7 +112,7 @@ function cleanSettings(image, value = {}) {
     schemaVersion: 1,
     timestampFolder: image.timestampFolder,
     imageFile: image.imageFile,
-    threshold: validThreshold(value.threshold) ? value.threshold : DEFAULT_THRESHOLD,
+    threshold: normalizeThreshold(value.threshold) ?? DEFAULT_THRESHOLD,
     referenceId: typeof value.referenceId === "string" ? value.referenceId : null,
     targetAreaFraction: validThreshold(value.targetAreaFraction) ? value.targetAreaFraction : null,
     roiGroupId: typeof value.roiGroupId === "string" ? value.roiGroupId : null,
@@ -323,7 +328,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
   async function listImages() {
     const scanned = await images();
     return Promise.all(scanned.map(async (image) => {
-      const transient = sourceStates.get(image.id);
+      const transient = sourceStates.get(image.imagePath);
       const status = transient?.status === "sending"
         ? "sending"
         : transient?.status === "failed"
@@ -337,7 +342,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
 
   async function saveThreshold(id, payload = {}) {
     const { threshold, referenceId, targetAreaFraction, roiGroupId } = objectPayload(payload);
-    if (!validThreshold(threshold)) {
+    const normalizedThreshold = normalizeThreshold(threshold);
+    if (normalizedThreshold === null) {
       throw inferenceError("INVALID_THRESHOLD", "Threshold must be between 0 and 1.", 400);
     }
     if (referenceId !== undefined && referenceId !== null && typeof referenceId !== "string") {
@@ -353,7 +359,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     const previous = await loadSettings(image);
     return writeSettings(image, {
       ...previous,
-      threshold,
+      threshold: normalizedThreshold,
       ...(referenceId !== undefined ? { referenceId } : {}),
       ...(targetAreaFraction !== undefined ? { targetAreaFraction } : {}),
       ...(roiGroupId !== undefined ? { roiGroupId } : {}),
@@ -422,10 +428,11 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
   }
 
   async function createOverlay(id, { threshold } = {}) {
-    if (!validThreshold(threshold)) {
+    const normalizedThreshold = normalizeThreshold(threshold);
+    if (normalizedThreshold === null) {
       throw inferenceError("INVALID_THRESHOLD", "Threshold must be between 0 and 1.", 400);
     }
-    return createProbabilityOverlayPng({ probabilityMap: await loadMap(await imageFor(id)), threshold });
+    return createProbabilityOverlayPng({ probabilityMap: await loadMap(await imageFor(id)), threshold: normalizedThreshold });
   }
 
   async function generateMasks() {
@@ -447,16 +454,16 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     return result;
   }
 
-  async function runJob(job, serverUrl) {
-    for (const image of await images()) {
-      sourceStates.set(image.id, { status: "sending" });
+  async function runJob(job, serverUrl, scannedImages) {
+    for (const image of scannedImages) {
+      sourceStates.set(image.imagePath, { status: "sending" });
       try {
         const { bytes } = await requestProbabilityMap(image, serverUrl);
         await writeAtomically(image.mapPath, bytes);
-        sourceStates.set(image.id, { status: "complete" });
+        sourceStates.set(image.imagePath, { status: "complete" });
         job.completed += 1;
       } catch (error) {
-        sourceStates.set(image.id, { status: "failed", message: safeMessage(error) });
+        sourceStates.set(image.imagePath, { status: "failed", message: safeMessage(error) });
         job.failed += 1;
       }
     }
@@ -465,7 +472,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
   }
 
   function publicJob(job) {
-    return { ...job };
+    const { rootPath: _rootPath, ...publicFields } = job;
+    return publicFields;
   }
 
   function startJob({ serverUrl } = {}) {
@@ -473,6 +481,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       throw inferenceError("JOB_IN_PROGRESS", "Inference is already running.", 409);
     }
     const normalizedUrl = normalizedServerUrl(serverUrl);
+    const rootPath = storage.getRoot();
+    if (!rootPath) throw inferenceError("ROOT_UNSET", "Storage root has not been set.", 400);
     const job = {
       id: randomUUID(),
       status: "running",
@@ -481,12 +491,13 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       failed: 0,
       startedAt: new Date().toISOString(),
       finishedAt: null,
+      rootPath,
     };
     jobs.set(job.id, job);
     activeJobId = job.id;
     void images().then((scanned) => {
       job.total = scanned.length;
-      return runJob(job, normalizedUrl);
+      return runJob(job, normalizedUrl, scanned);
     }).catch((error) => {
       job.status = "failed";
       job.failed = Math.max(job.failed, 1);
@@ -500,12 +511,28 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
 
   function getJob(jobId) {
     const job = jobs.get(jobId);
-    if (!job) throw inferenceError("JOB_NOT_FOUND", "Inference job not found.", 404);
+    if (!job || job.rootPath !== storage.getRoot()) {
+      throw inferenceError("JOB_NOT_FOUND", "Inference job not found.", 404);
+    }
     return publicJob(job);
+  }
+
+  async function changeRoot(change) {
+    if (activeJobId) {
+      throw inferenceError("JOB_IN_PROGRESS", "Inference is already running.", 409);
+    }
+    const previousRoot = storage.getRoot();
+    const result = await change();
+    if (storage.getRoot() !== previousRoot) {
+      jobs.clear();
+      sourceStates.clear();
+    }
+    return result;
   }
 
   return {
     listImages,
+    changeRoot,
     startJob,
     getJob,
     loadSourceRaw16,

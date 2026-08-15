@@ -177,6 +177,44 @@ describe("createInferenceService", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  test("rejects root changes during an active job and clears transient state after a root change", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeTiff(path.join(firstRoot, "T01", "image", "frame.tif"));
+    await writeTiff(path.join(secondRoot, "T01", "image", "frame.tif"));
+    let releaseRequest;
+    const requestGate = new Promise((resolve) => {
+      releaseRequest = resolve;
+    });
+    const storage = createStorage({ initialRoot: firstRoot });
+    const fetchImpl = vi.fn(async () => {
+      await requestGate;
+      return new Response("unavailable", { status: 503 });
+    });
+    const service = createInferenceService({
+      storage,
+      fetchImpl,
+    });
+
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await waitFor(() => fetchImpl.mock.calls.length === 1);
+
+    await expect(service.changeRoot(() => storage.setRoot(secondRoot))).rejects.toMatchObject({
+      code: "JOB_IN_PROGRESS",
+    });
+    expect(storage.getRoot()).toBe(firstRoot);
+
+    releaseRequest();
+    await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "partial", failed: 1 });
+    expect((await service.listImages())[0]).toMatchObject({ status: "failed" });
+
+    await service.changeRoot(() => storage.setRoot(secondRoot));
+
+    expect((await service.listImages())[0]).toMatchObject({ status: "waiting" });
+    expect((await service.listImages())[0].id).toBe((await scanInferenceImages(firstRoot))[0].id);
+    expect(() => service.getJob(job.id)).toThrow(expect.objectContaining({ code: "JOB_NOT_FOUND" }));
+  });
+
   test("continues a job after an HTTP failure without saving the failed source", async () => {
     const fetchImpl = vi
       .fn()
@@ -362,6 +400,26 @@ describe("createInferenceService", () => {
     expect(after).toEqual(before);
     expect([...firstMask.data]).toEqual([0, 0, 255, 255]);
     await expect(access(images[1].maskPath)).resolves.toBeUndefined();
+  });
+
+  test("normalizes off-grid thresholds consistently for persistence, review, overlays, and masks", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+    await writeProbabilityMap(image, [0.1238, 0.1242, 0.5, 1]);
+
+    const saved = await service.saveThreshold(image.id, { threshold: 0.1236 });
+    const review = await service.loadReview(image.id);
+    const overlay = await service.createOverlay(image.id, { threshold: 0.1236 });
+    await service.generateMasks();
+
+    const persisted = JSON.parse(await readFile(image.settingsPath, "utf8"));
+    const overlayPixels = await sharp(overlay).ensureAlpha().raw().toBuffer();
+    const maskPixels = await sharp(image.maskPath).greyscale().raw().toBuffer();
+    expect(saved.threshold).toBe(0.124);
+    expect(persisted.threshold).toBe(0.124);
+    expect(review).toMatchObject({ threshold: 0.124, wholeImage: { pixelCount: 3 } });
+    expect([overlayPixels[3], overlayPixels[7], overlayPixels[11], overlayPixels[15]]).toEqual([0, 255, 255, 255]);
+    expect([...maskPixels]).toEqual([0, 255, 255, 255]);
   });
 
   test("rejects malformed threshold requests with a safe service error", async () => {

@@ -329,7 +329,7 @@ export function createApp({
   app.post(
     ["/api/root", "/api/inference/root"],
     asyncRoute(async (request, response) => {
-      imageStorage.setRoot(request.body?.rootPath);
+      await inferenceService.changeRoot(() => imageStorage.setRoot(request.body?.rootPath));
       response.json(await rootPayload(imageStorage));
     }),
   );
@@ -338,8 +338,9 @@ export function createApp({
     ["/api/root/select", "/api/inference/root/select"],
     asyncRoute(async (_request, response) => {
       try {
-        await imageStorage.selectRootWithFinder();
+        await inferenceService.changeRoot(() => imageStorage.selectRootWithFinder());
       } catch (error) {
+        if (error instanceof InferenceError) throw error;
         if (isInvalidStorageRootError(error)) {
           response.status(400).json({ error: "Selected folder is not a valid image root." });
           return;

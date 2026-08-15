@@ -349,6 +349,59 @@ describe("createApp", () => {
     expect((await images.json()).images.every((image) => image.status === "complete")).toBe(true);
   });
 
+  test.each([
+    ["/api/root", false],
+    ["/api/inference/root", false],
+    ["/api/root/select", true],
+    ["/api/inference/root/select", true],
+  ])("rejects %s root changes while inference is running", async (endpoint, usesPicker) => {
+    const appRoot = await createTempRoot();
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeImage(firstRoot, "T01", "frame001.tif");
+    await writeImage(secondRoot, "T01", "frame001.tif");
+    let releaseRequest;
+    const requestGate = new Promise((resolve) => {
+      releaseRequest = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await requestGate;
+      return new Response(
+        npyFixture({ width: 2, height: 2, values: [0, 0.5, 0.75, 1] }),
+        { headers: { "content-type": "application/x-npy" } },
+      );
+    });
+    const app = createApp({
+      rootDir: appRoot,
+      initialRoot: firstRoot,
+      fetchImpl,
+      ...(usesPicker ? { selectRoot: async () => secondRoot } : {}),
+    });
+    const start = await jsonRequest(app, "/api/inference/jobs", {
+      method: "POST",
+      body: { serverUrl: "http://model:8080" },
+    });
+    const jobId = (await start.json()).job.id;
+    for (let attempts = 0; attempts < 100 && fetchImpl.mock.calls.length === 0; attempts += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const rootChange = await jsonRequest(app, endpoint, {
+      method: "POST",
+      ...(usesPicker ? {} : { body: { rootPath: secondRoot } }),
+    });
+
+    expect(rootChange.status).toBe(409);
+    await expect(rootChange.json()).resolves.toEqual({
+      error: "Inference is already running.",
+      code: "JOB_IN_PROGRESS",
+    });
+    await expect((await request(app, "/api/inference/images")).json()).resolves.toMatchObject({ rootPath: firstRoot });
+
+    releaseRequest();
+    await waitForInferenceJob(app, jobId);
+  });
+
   test("returns raw16 bytes for the exact opaque inference image id", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();

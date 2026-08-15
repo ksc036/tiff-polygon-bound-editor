@@ -97,7 +97,10 @@ function mockInferenceApi({
   images: initialImages = baseImages,
   imageSnapshots = null,
   jobStatus = "complete",
+  jobDeferred,
+  overlayDeferredByUrl = {},
   reviewDeferredById = {},
+  rootData = null,
   thresholdSave,
 } = {}) {
   let images = clone(initialImages);
@@ -109,7 +112,9 @@ function mockInferenceApi({
     const method = options.method ?? "GET";
 
     if (url === "/api/inference/images" && method === "GET") {
-      if (imageSnapshots?.length) {
+      if (rootData?.[rootPath]) {
+        images = clone(rootData[rootPath].images);
+      } else if (imageSnapshots?.length) {
         images = clone(imageSnapshots[Math.min(imageSnapshotIndex, imageSnapshots.length - 1)]);
         imageSnapshotIndex += 1;
       }
@@ -130,6 +135,7 @@ function mockInferenceApi({
       }, 202);
     }
     if (url === "/api/inference/jobs/job-1" && method === "GET") {
+      if (jobDeferred) await jobDeferred.promise;
       images = images.map((image) => image.status === "sending" ? { ...image, status: "complete" } : image);
       return jsonResponse({
         job: { id: "job-1", status: jobStatus, total: images.length, completed: images.length, failed: 0 },
@@ -138,7 +144,7 @@ function mockInferenceApi({
     if (url.startsWith("/api/inference/images/") && url.includes("/review") && method === "GET") {
       const id = url.split("/")[4];
       if (reviewDeferredById[id]) await reviewDeferredById[id].promise;
-      const review = clone(currentReviews[id] ?? reviews["complete-a"]);
+      const review = clone(rootData?.[rootPath]?.reviews?.[id] ?? currentReviews[id] ?? reviews["complete-a"]);
       const roiGroupId = new URLSearchParams(url.split("?")[1] ?? "").get("roiGroupId");
       if (roiGroupId === "roi-b") {
         review.roi = { groupId: "roi-b", metrics: { areaFraction: 0.75 } };
@@ -148,12 +154,16 @@ function mockInferenceApi({
     if (url.startsWith("/api/inference/images/") && url.endsWith("/threshold") && method === "PUT") {
       const id = url.split("/")[4];
       const threshold = JSON.parse(options.body).threshold;
-      if (thresholdSave) await thresholdSave.promise;
+      if (thresholdSave) {
+        const response = await thresholdSave.promise;
+        if (response) return response;
+      }
       currentReviews[id].threshold = threshold;
       currentReviews[id].settings.threshold = threshold;
       return jsonResponse(currentReviews[id].settings);
     }
     if (url.startsWith("/api/inference/images/") && url.includes("/overlay?") && method === "GET") {
+      if (overlayDeferredByUrl[url]) await overlayDeferredByUrl[url].promise;
       return overlayResponse();
     }
     if (url.startsWith("/api/inference/images/") && url.endsWith("/raw16") && method === "GET") {
@@ -344,6 +354,22 @@ test("commits a threshold only for the active source without implicit propagatio
   expect(fetchMock.mock.calls.some(([url]) => url === "/api/inference/reference-thresholds")).toBe(false);
 });
 
+test("normalizes off-grid threshold edits for overlay requests and persistence", async () => {
+  const { fetchMock } = mockInferenceApi();
+  render(<InferencePage />);
+  const threshold = await screen.findByLabelText("Threshold");
+
+  fireEvent.change(threshold, { target: { value: "0.7236" } });
+  fireEvent.blur(threshold);
+
+  await waitFor(() => expect(fetchMock.mock.calls.some(
+    ([url]) => url === "/api/inference/images/complete-a/overlay?threshold=0.724",
+  )).toBe(true));
+  const thresholdCall = fetchMock.mock.calls.find(([url]) => url === "/api/inference/images/complete-a/threshold");
+  expect(requestBody(thresholdCall)).toEqual({ threshold: 0.724 });
+  expect(await screen.findByDisplayValue("0.724")).toBeInTheDocument();
+});
+
 test("propagates from the active image and selected ROI only on the explicit action", async () => {
   const { fetchMock } = mockInferenceApi();
   render(<InferencePage />);
@@ -439,6 +465,113 @@ test("generates masks for completed images and reports the result", async () => 
 
   expect(await screen.findByText("Generated 2 masks; 0 failed")).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith("/api/inference/generate-masks", expect.objectContaining({ method: "POST" }));
+});
+
+test("waits for an edited active threshold to save before generating masks", async () => {
+  const thresholdSave = deferred();
+  const { fetchMock } = mockInferenceApi({ thresholdSave });
+  render(<InferencePage />);
+  const threshold = await screen.findByLabelText("Threshold");
+
+  fireEvent.change(threshold, { target: { value: "0.723" } });
+  fireEvent.blur(threshold);
+  fireEvent.click(screen.getByRole("button", { name: "Generate masks" }));
+  expect(fetchMock.mock.calls.some(([url]) => url === "/api/inference/generate-masks")).toBe(false);
+
+  thresholdSave.resolve();
+
+  await waitFor(() => expect(fetchMock.mock.calls.some(
+    ([url]) => url === "/api/inference/generate-masks",
+  )).toBe(true));
+});
+
+test("aborts mask generation when the active threshold save fails", async () => {
+  const thresholdSave = deferred();
+  const { fetchMock } = mockInferenceApi({ thresholdSave });
+  render(<InferencePage />);
+  const threshold = await screen.findByLabelText("Threshold");
+
+  fireEvent.change(threshold, { target: { value: "0.723" } });
+  fireEvent.blur(threshold);
+  fireEvent.click(screen.getByRole("button", { name: "Generate masks" }));
+  thresholdSave.resolve(jsonResponse({ error: "Threshold storage failed." }, 500));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Threshold storage failed.");
+  expect(fetchMock.mock.calls.some(([url]) => url === "/api/inference/generate-masks")).toBe(false);
+});
+
+test("invalidates the mask overlay immediately when threshold or source identity changes", async () => {
+  const thresholdOverlay = deferred();
+  const nextImageOverlay = deferred();
+  const { fetchMock } = mockInferenceApi({
+    overlayDeferredByUrl: {
+      "/api/inference/images/complete-a/overlay?threshold=0.723": thresholdOverlay,
+      "/api/inference/images/complete-b/overlay?threshold=0.610": nextImageOverlay,
+    },
+  });
+  render(<InferencePage />);
+  const threshold = await screen.findByLabelText("Threshold");
+  expect(await screen.findByAltText("Binary mask overlay")).toBeInTheDocument();
+
+  fireEvent.change(threshold, { target: { value: "0.723" } });
+  expect(screen.queryByAltText("Binary mask overlay")).not.toBeInTheDocument();
+  thresholdOverlay.resolve();
+  expect(await screen.findByAltText("Binary mask overlay")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Next complete image" }));
+  expect(screen.queryByAltText("Binary mask overlay")).not.toBeInTheDocument();
+  await waitFor(() => expect(fetchMock.mock.calls.some(
+    ([url]) => url === "/api/inference/images/complete-b/overlay?threshold=0.610",
+  )).toBe(true));
+  nextImageOverlay.resolve();
+  expect(await screen.findByAltText("Binary mask overlay")).toBeInTheDocument();
+});
+
+test("resets review and completed-job state when roots reuse the same image id", async () => {
+  const sharedImage = [{ id: "complete-a", timestampFolder: "002", imageFile: "reference.tif", status: "complete" }];
+  const secondReview = {
+    ...reviews["complete-a"],
+    threshold: 0.8,
+    settings: { threshold: 0.8, roiGroupId: null },
+    wholeImage: { areaFraction: 1 },
+    groups: [],
+    roi: null,
+  };
+  mockInferenceApi({
+    images: sharedImage,
+    rootData: {
+      "/data/inference": { images: sharedImage, reviews: { "complete-a": reviews["complete-a"] } },
+      "/new/root": { images: sharedImage, reviews: { "complete-a": secondReview } },
+    },
+  });
+  render(<InferencePage />);
+  await screen.findByDisplayValue("0.500");
+  fireEvent.click(screen.getByRole("button", { name: "Run inference" }));
+  expect(await screen.findByText(/Inference complete:/)).toBeInTheDocument();
+
+  const rootInput = screen.getByLabelText("Root path");
+  fireEvent.change(rootInput, { target: { value: "/new/root" } });
+  fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+
+  expect(await screen.findByDisplayValue("0.800")).toBeInTheDocument();
+  expect(screen.getByText("100.00%")).toBeInTheDocument();
+  expect(screen.queryByText(/Inference complete:/)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Saved ROI group")).not.toBeInTheDocument();
+});
+
+test("disables root changes while an inference job is active", async () => {
+  const jobDeferred = deferred();
+  mockInferenceApi({ jobDeferred });
+  render(<InferencePage />);
+  await screen.findByDisplayValue("0.500");
+
+  fireEvent.click(screen.getByRole("button", { name: "Run inference" }));
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Run inference" })).toBeDisabled());
+  expect(screen.getByLabelText("Root path")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Set root" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Find root" })).toBeDisabled();
+  jobDeferred.resolve();
 });
 
 test("revokes binary overlay object URLs when the selection changes and on cleanup", async () => {

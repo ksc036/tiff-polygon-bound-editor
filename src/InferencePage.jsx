@@ -3,6 +3,7 @@ import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
 
 const DEFAULT_SERVER_URL = "http://localhost:8000";
 const TERMINAL_JOB_STATES = new Set(["complete", "partial", "failed"]);
+const THRESHOLD_GRID = 1000;
 
 async function readJsonResponse(response, fallbackMessage) {
   if (!response.ok) {
@@ -32,6 +33,10 @@ function validThreshold(value) {
   return Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+function normalizeThreshold(value) {
+  return validThreshold(value) ? Math.round(value * THRESHOLD_GRID) / THRESHOLD_GRID : null;
+}
+
 function reviewUrl(imageId, roiGroupId) {
   const base = `/api/inference/images/${encodeURIComponent(imageId)}/review`;
   return roiGroupId === undefined ? base : `${base}?roiGroupId=${encodeURIComponent(roiGroupId)}`;
@@ -39,13 +44,14 @@ function reviewUrl(imageId, roiGroupId) {
 
 export default function InferencePage() {
   const [rootPath, setRootPath] = useState("");
+  const [activeRootPath, setActiveRootPath] = useState("");
   const [images, setImages] = useState([]);
   const [activeImageId, setActiveImageId] = useState(null);
   const [review, setReview] = useState(null);
   const [selectedRoiByImage, setSelectedRoiByImage] = useState({});
   const [thresholdDraft, setThresholdDraft] = useState("0.500");
   const [rawImage, setRawImage] = useState(null);
-  const [overlayUrl, setOverlayUrl] = useState(null);
+  const [overlay, setOverlay] = useState(null);
   const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL);
   const [job, setJob] = useState(null);
   const [jobMessage, setJobMessage] = useState("");
@@ -60,6 +66,7 @@ export default function InferencePage() {
   const mountedRef = useRef(true);
   const thresholdSaveRef = useRef(null);
   const activeImageIdRef = useRef(activeImageId);
+  const activeRootPathRef = useRef(null);
   const reviewRequestIdRef = useRef(0);
   activeImageIdRef.current = activeImageId;
 
@@ -77,6 +84,36 @@ export default function InferencePage() {
   const selectedRoiGroupId = activeCompleteImage
     ? selectedRoiByImage[activeCompleteImage.id]
     : undefined;
+  const activeThreshold = normalizeThreshold(Number(thresholdDraft));
+  const overlayUrl = overlay &&
+    overlay.rootPath === activeRootPath &&
+    overlay.imageId === activeCompleteImage?.id &&
+    overlay.threshold === activeThreshold
+    ? overlay.url
+    : null;
+  const inferenceRunning = job?.status === "running";
+
+  const confirmActiveRoot = useCallback((nextRoot) => {
+    const rootChanged = activeRootPathRef.current !== null && activeRootPathRef.current !== nextRoot;
+    activeRootPathRef.current = nextRoot;
+    setActiveRootPath(nextRoot);
+    if (!rootChanged) return false;
+
+    reviewRequestIdRef.current += 1;
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    pollTimerRef.current = null;
+    setImages([]);
+    setActiveImageId(null);
+    setReview(null);
+    setSelectedRoiByImage({});
+    setThresholdDraft("0.500");
+    setRawImage(null);
+    setOverlay(null);
+    setJob(null);
+    setJobMessage("");
+    setActionMessage("");
+    return true;
+  }, []);
 
   const loadImages = useCallback(async () => {
     const payload = await readJsonResponse(
@@ -85,7 +122,9 @@ export default function InferencePage() {
     );
     if (!mountedRef.current) return payload;
     const nextImages = Array.isArray(payload.images) ? payload.images : [];
-    setRootPath(typeof payload.rootPath === "string" ? payload.rootPath : "");
+    const nextRoot = typeof payload.rootPath === "string" ? payload.rootPath : "";
+    confirmActiveRoot(nextRoot);
+    setRootPath(nextRoot);
     setImages(nextImages);
     setActiveImageId((currentId) => {
       if (nextImages.some((image) => image.id === currentId && image.status === "complete")) {
@@ -94,7 +133,7 @@ export default function InferencePage() {
       return nextImages.find((image) => image.status === "complete")?.id ?? null;
     });
     return payload;
-  }, []);
+  }, [confirmActiveRoot]);
 
   const loadReview = useCallback(async (imageId, roiGroupId) => {
     const requestId = reviewRequestIdRef.current + 1;
@@ -107,7 +146,7 @@ export default function InferencePage() {
       return payload;
     }
     setReview(payload);
-    setThresholdDraft(Number(payload.threshold).toFixed(3));
+    setThresholdDraft((normalizeThreshold(Number(payload.threshold)) ?? 0.5).toFixed(3));
     setSelectedRoiByImage((current) => {
       if (Object.prototype.hasOwnProperty.call(current, imageId)) return current;
       const groups = Array.isArray(payload.groups) ? payload.groups : [];
@@ -191,21 +230,22 @@ export default function InferencePage() {
   }, [rawImage]);
 
   useEffect(() => {
-    const threshold = Number(thresholdDraft);
-    if (!activeCompleteImage || !validThreshold(threshold)) {
-      setOverlayUrl(null);
+    const threshold = normalizeThreshold(Number(thresholdDraft));
+    setOverlay(null);
+    if (!activeCompleteImage || threshold === null) {
       return undefined;
     }
 
     let alive = true;
     let objectUrl = null;
+    const source = { rootPath: activeRootPath, imageId: activeCompleteImage.id, threshold };
     fetch(`/api/inference/images/${encodeURIComponent(activeCompleteImage.id)}/overlay?threshold=${threshold.toFixed(3)}`)
       .then(async (response) => {
         if (!response.ok) throw new Error("Unable to load the binary mask overlay.");
         const blob = await response.blob();
         if (!alive) return;
         objectUrl = URL.createObjectURL(blob);
-        setOverlayUrl(objectUrl);
+        setOverlay({ ...source, url: objectUrl });
       })
       .catch((loadError) => {
         if (alive) setError(loadError.message);
@@ -215,17 +255,21 @@ export default function InferencePage() {
       alive = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [activeCompleteImage, thresholdDraft]);
+  }, [activeCompleteImage, activeRootPath, thresholdDraft]);
 
   async function applyRoot(endpoint, body) {
     setLoadingRoot(true);
     setError("");
     try {
-      await readJsonResponse(await fetch(endpoint, {
+      const payload = await readJsonResponse(await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         ...(body ? { body: JSON.stringify(body) } : {}),
       }), "Unable to set inference root.");
+      if (typeof payload.rootPath === "string") {
+        confirmActiveRoot(payload.rootPath);
+        setRootPath(payload.rootPath);
+      }
       await loadImages();
     } catch (rootError) {
       setError(rootError.message);
@@ -272,14 +316,14 @@ export default function InferencePage() {
 
   function persistThreshold({ showMessage = true } = {}) {
     if (!activeCompleteImage) return Promise.resolve(false);
-    const threshold = Number(thresholdDraft);
-    if (!validThreshold(threshold)) {
-      setThresholdDraft(Number(review?.threshold ?? 0.5).toFixed(3));
+    const threshold = normalizeThreshold(Number(thresholdDraft));
+    if (threshold === null) {
+      setThresholdDraft((normalizeThreshold(Number(review?.threshold)) ?? 0.5).toFixed(3));
       setError("Threshold must be between 0 and 1.");
       return Promise.resolve(false);
     }
     if (thresholdSaveRef.current) return thresholdSaveRef.current;
-    if (threshold === Number(review?.threshold)) {
+    if (threshold === normalizeThreshold(Number(review?.threshold))) {
       setThresholdDraft(threshold.toFixed(3));
       return Promise.resolve(true);
     }
@@ -348,6 +392,7 @@ export default function InferencePage() {
     setError("");
     setActionMessage("");
     try {
+      if (!await persistThreshold({ showMessage: false })) return;
       const payload = await readJsonResponse(await fetch("/api/inference/generate-masks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -364,6 +409,7 @@ export default function InferencePage() {
     const nextImage = completeImages[activeCompleteIndex + offset];
     if (!nextImage) return;
     setActionMessage("");
+    setOverlay(null);
     setActiveImageId(nextImage.id);
   }
 
@@ -373,12 +419,12 @@ export default function InferencePage() {
         <h1>Inference mask setting</h1>
         <label>
           Root path
-          <input value={rootPath} onChange={(event) => setRootPath(event.target.value)} />
+          <input value={rootPath} disabled={inferenceRunning} onChange={(event) => setRootPath(event.target.value)} />
         </label>
-        <button type="button" onClick={() => applyRoot("/api/inference/root", { rootPath })} disabled={loadingRoot || !rootPath.trim()}>
+        <button type="button" onClick={() => applyRoot("/api/inference/root", { rootPath })} disabled={loadingRoot || inferenceRunning || !rootPath.trim()}>
           Set root
         </button>
-        <button type="button" onClick={() => applyRoot("/api/inference/root/select")} disabled={loadingRoot}>
+        <button type="button" onClick={() => applyRoot("/api/inference/root/select")} disabled={loadingRoot || inferenceRunning}>
           Find root
         </button>
         <label>
@@ -404,7 +450,10 @@ export default function InferencePage() {
                 type="button"
                 aria-current={image.id === activeImageId ? "true" : undefined}
                 disabled={image.status !== "complete"}
-                onClick={() => setActiveImageId(image.id)}
+                onClick={() => {
+                  setOverlay(null);
+                  setActiveImageId(image.id);
+                }}
               >
                 <span>{image.timestampFolder}</span>
                 <strong>{image.imageFile}</strong>
@@ -449,7 +498,10 @@ export default function InferencePage() {
             step="0.001"
             value={thresholdDraft}
             disabled={!activeCompleteImage || savingThreshold}
-            onChange={(event) => setThresholdDraft(event.target.value)}
+            onChange={(event) => {
+              setOverlay(null);
+              setThresholdDraft(event.target.value);
+            }}
             onBlur={commitThreshold}
             onKeyDown={(event) => {
               if (event.key === "Enter") event.currentTarget.blur();
