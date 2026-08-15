@@ -130,6 +130,19 @@ export default function InferencePage() {
   }, [loadImages]);
 
   useEffect(() => {
+    if (!images.some((image) => image.status === "sending") || job?.status === "running") {
+      return undefined;
+    }
+
+    const timer = setTimeout(() => {
+      loadImages().catch((loadError) => {
+        if (mountedRef.current) setError(loadError.message);
+      });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [images, job?.status, loadImages]);
+
+  useEffect(() => {
     if (!activeCompleteImage) {
       setReview(null);
       setRawImage(null);
@@ -146,7 +159,7 @@ export default function InferencePage() {
       if (alive) setError(loadError.message);
     });
 
-    fetch(`/api/images/${encodeURIComponent(image.timestampFolder)}/raw16`)
+    fetch(`/api/inference/images/${encodeURIComponent(image.id)}/raw16`)
       .then(async (response) => {
         if (!response.ok) throw new Error("Unable to read image pixels.");
         const buffer = await response.arrayBuffer();
@@ -405,8 +418,18 @@ export default function InferencePage() {
 
       <main className="inference-review">
         <section className="inference-stage" aria-label="Probability review stage">
-          <canvas ref={canvasRef} aria-label="Original source image" />
-          {overlayUrl ? <img src={overlayUrl} alt="Binary mask overlay" /> : null}
+          <div className="inference-stage-frame" aria-label="Composited source and binary mask">
+            <canvas ref={canvasRef} className="inference-source-canvas" aria-label="Original source image" />
+            {overlayUrl ? (
+              <img
+                className="inference-mask-overlay"
+                src={overlayUrl}
+                alt="Binary mask overlay"
+                width={rawImage?.width ?? review?.width}
+                height={rawImage?.height ?? review?.height}
+              />
+            ) : null}
+          </div>
           {!activeCompleteImage ? <p>No completed image is available for review.</p> : null}
         </section>
       </main>

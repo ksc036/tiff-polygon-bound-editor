@@ -1480,6 +1480,257 @@ input[type="range"] {
   border-bottom: 0;
 }
 
+.inference-page {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(260px, 320px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  color: #dce3ea;
+  background: #101317;
+}
+
+.inference-toolbar {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr) auto auto minmax(220px, 0.65fr) auto;
+  align-items: end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #27313c;
+  background: #171d24;
+}
+
+.inference-toolbar h1,
+.inference-status-panel h2,
+.inference-controls h2 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.inference-toolbar h1 {
+  align-self: center;
+  font-size: 1rem;
+}
+
+.inference-toolbar label,
+.inference-controls label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: #9faeba;
+  font-size: 0.78rem;
+}
+
+.inference-toolbar input,
+.inference-controls input,
+.inference-controls select {
+  width: 100%;
+  min-width: 0;
+}
+
+.inference-toolbar p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #9ee6b6;
+  font-size: 0.78rem;
+}
+
+.inference-status-panel,
+.inference-controls {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  background: #151a20;
+}
+
+.inference-status-panel {
+  border-right: 1px solid #27313c;
+}
+
+.inference-status-panel h2,
+.inference-controls h2 {
+  margin-bottom: 10px;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.inference-image-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.inference-image-list button {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.5fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 36px;
+  text-align: left;
+}
+
+.inference-image-list button[aria-current="true"] {
+  border-color: #6cb7ff;
+  background: #253442;
+}
+
+.inference-image-list button span,
+.inference-image-list button strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inference-image-list button span:last-child {
+  color: #b7c5d1;
+  font-size: 0.72rem;
+}
+
+.inference-image-list li > p {
+  margin: 4px 2px 8px;
+  color: #f6b9c2;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.inference-review {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #090d12;
+}
+
+.inference-stage {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 16px;
+}
+
+.inference-stage-frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.inference-source-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.inference-mask-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.inference-stage > p {
+  z-index: 3;
+  margin: 0;
+  color: #9faeba;
+}
+
+.inference-controls {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  border-left: 1px solid #27313c;
+}
+
+.inference-controls select {
+  min-height: 32px;
+  border: 1px solid #35404c;
+  border-radius: 5px;
+  padding: 0 9px;
+  color: #e8edf2;
+  background: #151b22;
+  font: inherit;
+}
+
+.inference-controls select:focus-visible {
+  outline: 2px solid #6cb7ff;
+  outline-offset: 2px;
+}
+
+.inference-controls dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.inference-controls dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #27313c;
+}
+
+.inference-controls dt {
+  color: #9faeba;
+}
+
+.inference-controls dd {
+  margin: 0;
+  color: #f3f7fa;
+  font-variant-numeric: tabular-nums;
+}
+
+.inference-controls p {
+  margin: 0;
+  color: #9ee6b6;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.inference-controls [role="alert"] {
+  color: #f6b9c2;
+}
+
+.inference-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-top: 1px solid #27313c;
+  background: #171d24;
+}
+
+.inference-footer nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inference-footer nav span {
+  min-width: 54px;
+  color: #9faeba;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1547,5 +1798,44 @@ input[type="range"] {
     grid-template-columns: 12px minmax(34px, 1fr);
     padding-right: 5px;
     padding-left: 8px;
+  }
+
+  .inference-page {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto minmax(420px, 60vh) max-content auto;
+    height: 100dvh;
+    overflow: auto;
+  }
+
+  .inference-toolbar,
+  .inference-footer {
+    grid-column: 1;
+  }
+
+  .inference-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+  }
+
+  .inference-toolbar h1,
+  .inference-toolbar label,
+  .inference-toolbar p {
+    grid-column: 1 / -1;
+  }
+
+  .inference-status-panel {
+    max-height: 220px;
+    border-right: 0;
+    border-bottom: 1px solid #27313c;
+  }
+
+  .inference-controls {
+    overflow: visible;
+    border-top: 1px solid #27313c;
+    border-left: 0;
+  }
+
+  .inference-footer {
+    flex-wrap: wrap;
   }
 }

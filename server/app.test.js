@@ -349,6 +349,26 @@ describe("createApp", () => {
     expect((await images.json()).images.every((image) => image.status === "complete")).toBe(true);
   });
 
+  test("returns raw16 bytes for the exact opaque inference image id", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "a.tif", [10, 20, 30, 40]);
+    await writeImage(imageRoot, "T01", "b.tif", [500, 600, 700, 800]);
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+    const listResponse = await request(app, "/api/inference/images");
+    const { images } = await listResponse.json();
+    const selected = images.find((image) => image.imageFile === "b.tif");
+
+    const response = await request(app, `/api/inference/images/${selected.id}/raw16`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/octet-stream");
+    expect(response.headers.get("x-image-width")).toBe("2");
+    expect(response.headers.get("x-image-height")).toBe("2");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    expect([...new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2)]).toEqual([500, 600, 700, 800]);
+  });
+
   test("uses the requested review ROI without changing its saved threshold settings", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();

@@ -95,11 +95,13 @@ function deferred() {
 
 function mockInferenceApi({
   images: initialImages = baseImages,
+  imageSnapshots = null,
   jobStatus = "complete",
   reviewDeferredById = {},
   thresholdSave,
 } = {}) {
   let images = clone(initialImages);
+  let imageSnapshotIndex = 0;
   const currentReviews = clone(reviews);
   let rootPath = "/data/inference";
 
@@ -107,6 +109,10 @@ function mockInferenceApi({
     const method = options.method ?? "GET";
 
     if (url === "/api/inference/images" && method === "GET") {
+      if (imageSnapshots?.length) {
+        images = clone(imageSnapshots[Math.min(imageSnapshotIndex, imageSnapshots.length - 1)]);
+        imageSnapshotIndex += 1;
+      }
       return jsonResponse({ rootPath, images: clone(images) });
     }
     if (url === "/api/inference/root" && method === "POST") {
@@ -149,6 +155,10 @@ function mockInferenceApi({
     }
     if (url.startsWith("/api/inference/images/") && url.includes("/overlay?") && method === "GET") {
       return overlayResponse();
+    }
+    if (url.startsWith("/api/inference/images/") && url.endsWith("/raw16") && method === "GET") {
+      const id = url.split("/")[4];
+      return id === "complete-b" ? raw16Response(3, 1) : raw16Response(2, 2);
     }
     if (url.startsWith("/api/images/") && url.endsWith("/raw16") && method === "GET") {
       const folder = url.split("/")[3];
@@ -218,6 +228,40 @@ test("shows every source status and selects the first completed image for review
   await waitFor(() => expect(screen.getByAltText("Binary mask overlay")).toHaveAttribute("src", "blob:mask-overlay"));
 });
 
+test("loads raw16 bytes by opaque image id when one timestamp has two TIFFs", async () => {
+  const { fetchMock } = mockInferenceApi({
+    images: [
+      { id: "complete-a", timestampFolder: "same-timestamp", imageFile: "a.tif", status: "complete" },
+      { id: "complete-b", timestampFolder: "same-timestamp", imageFile: "b.tif", status: "complete" },
+    ],
+  });
+  render(<InferencePage />);
+  const canvas = await screen.findByLabelText("Original source image");
+  await waitFor(() => expect(canvas).toHaveAttribute("width", "2"));
+
+  fireEvent.click(screen.getByRole("button", { name: "Next complete image" }));
+
+  await waitFor(() => expect(canvas).toHaveAttribute("width", "3"));
+  expect(fetchMock).toHaveBeenCalledWith("/api/inference/images/complete-b/raw16");
+  expect(fetchMock).not.toHaveBeenCalledWith("/api/images/same-timestamp/raw16");
+});
+
+test("composites the source canvas and binary mask in one stable stage frame", async () => {
+  mockInferenceApi();
+  render(<InferencePage />);
+  const stage = await screen.findByLabelText("Probability review stage");
+  const frame = within(stage).getByLabelText("Composited source and binary mask");
+  const canvas = within(frame).getByLabelText("Original source image");
+  const overlay = await within(frame).findByAltText("Binary mask overlay");
+
+  expect(stage).toHaveClass("inference-stage");
+  expect(frame).toHaveClass("inference-stage-frame");
+  expect(canvas).toHaveClass("inference-source-canvas");
+  expect(overlay).toHaveClass("inference-mask-overlay");
+  expect(overlay).toHaveAttribute("width", "2");
+  expect(overlay).toHaveAttribute("height", "2");
+});
+
 test("sets a typed root, supports folder selection, and reloads inference rows", async () => {
   const { fetchMock } = mockInferenceApi();
   render(<InferencePage />);
@@ -253,6 +297,24 @@ test("starts inference with the configured server and polls the job to completio
     body: JSON.stringify({ serverUrl: "http://model:8080" }),
   }));
   expect(fetchMock).toHaveBeenCalledWith("/api/inference/jobs/job-1", expect.objectContaining({ method: "GET" }));
+});
+
+test("resumes status polling when the initial image rows are already sending", async () => {
+  const { fetchMock } = mockInferenceApi({
+    imageSnapshots: [
+      [{ id: "complete-a", timestampFolder: "002", imageFile: "reference.tif", status: "sending" }],
+      [{ id: "complete-a", timestampFolder: "002", imageFile: "reference.tif", status: "complete" }],
+    ],
+  });
+  render(<InferencePage />);
+
+  expect(await screen.findByText("Sending")).toBeInTheDocument();
+  await waitFor(() => expect(fetchMock.mock.calls.filter(
+    ([url]) => url === "/api/inference/images",
+  ).length).toBeGreaterThanOrEqual(2), { timeout: 1500 });
+
+  expect(await screen.findByText("Complete")).toBeInTheDocument();
+  expect(fetchMock.mock.calls.some(([url]) => url === "/api/inference/jobs")).toBe(false);
 });
 
 test("commits a threshold only for the active source without implicit propagation", async () => {

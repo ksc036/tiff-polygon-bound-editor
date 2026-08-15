@@ -423,6 +423,24 @@ export function createApp({
   );
 
   app.get(
+    "/api/inference/images/:id/raw16",
+    asyncRoute(async (request, response) => {
+      const raw = await inferenceService.loadSourceRaw16(request.params.id);
+      response
+        .type("application/octet-stream")
+        .set({
+          "Cache-Control": "no-store",
+          "X-Image-Width": String(raw.width),
+          "X-Image-Height": String(raw.height),
+          "X-Display-Min": String(raw.min),
+          "X-Display-Max": String(raw.max),
+          "X-Pixel-Format": "uint16le",
+        })
+        .send(raw.buffer);
+    }),
+  );
+
+  app.get(
     "/api/inference/images/:id/review",
     asyncRoute(async (request, response) => {
       const { map, polygon, ...review } = await inferenceService.loadReview(request.params.id, {

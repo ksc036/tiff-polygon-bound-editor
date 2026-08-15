@@ -2,6 +2,32 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 
 describe("application layout CSS", () => {
+  test("stacks inference source and mask layers in one stable stage frame", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const frameRule = css.match(/\.inference-stage-frame\s*\{[^}]+\}/)?.[0] ?? "";
+    const canvasRule = css.match(/\.inference-source-canvas\s*\{[^}]+\}/)?.[0] ?? "";
+    const overlayRule = css.match(/\.inference-mask-overlay\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(frameRule).toContain("position: relative");
+    expect(frameRule).toContain("width: 100%");
+    expect(frameRule).toContain("height: 100%");
+    expect(canvasRule).toContain("position: absolute");
+    expect(canvasRule).toContain("inset: 0");
+    expect(canvasRule).toContain("object-fit: contain");
+    expect(overlayRule).toContain("position: absolute");
+    expect(overlayRule).toContain("inset: 0");
+    expect(overlayRule).toContain("z-index: 2");
+    expect(overlayRule).toContain("object-fit: contain");
+  });
+
+  test("lets mobile inference controls flow before the footer", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    expect(css).toContain("grid-template-rows: auto auto minmax(420px, 60vh) max-content auto");
+    expect(css).toContain(".inference-controls {\n    overflow: visible;");
+  });
+
   test("keeps the app shell fixed to the viewport so bottom panel resizing reclaims image space", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 

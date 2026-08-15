@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/p
 import path from "node:path";
 import sharp from "sharp";
 import { polygonSelfIntersects } from "./analysisGeometry.js";
-import { resolveMaxImagePixels } from "./imageProcessing.js";
+import { readGrey16RawFromImage, resolveMaxImagePixels } from "./imageProcessing.js";
 import {
   closestThreshold,
   createProbabilityOverlayPng,
@@ -211,6 +211,15 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       throw inferenceError("DIMENSION_MISMATCH", "Probability map dimensions do not match the source image.", 422);
     }
     return map;
+  }
+
+  async function loadSourceRaw16(id) {
+    const image = await imageFor(id);
+    try {
+      return await readGrey16RawFromImage(image.imagePath, { maxImagePixels });
+    } catch (error) {
+      throw inferenceError("INVALID_SOURCE", "Unable to read source image.", 422, error);
+    }
   }
 
   async function hasCompleteMap(image) {
@@ -499,6 +508,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     listImages,
     startJob,
     getJob,
+    loadSourceRaw16,
     loadReview,
     saveThreshold,
     applyReferenceThresholds,
