@@ -157,6 +157,30 @@ function jsonRequest(app, pathname, { method = "GET", body } = {}) {
   });
 }
 
+function npyFixture({ width, height, values }) {
+  const header = `{'descr': '<f4', 'fortran_order': False, 'shape': (${height}, ${width}), }`;
+  const prefixLength = 10;
+  const padding = (16 - ((prefixLength + header.length + 1) % 16)) % 16;
+  const encodedHeader = Buffer.from(`${header}${" ".repeat(padding)}\n`, "ascii");
+  const prefix = Buffer.from([0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59, 1, 0]);
+  const length = Buffer.alloc(2);
+  length.writeUInt16LE(encodedHeader.length);
+  const data = Buffer.alloc(values.length * 4);
+  values.forEach((value, index) => data.writeFloatLE(value, index * 4));
+  return Buffer.concat([prefix, length, encodedHeader, data]);
+}
+
+async function waitForInferenceJob(app, jobId) {
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    const response = await request(app, `/api/inference/jobs/${jobId}`);
+    if (response.status !== 200) throw new Error(`Inference job lookup failed with ${response.status}.`);
+    const { job } = await response.json();
+    if (job.status !== "running") return job;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Inference job did not finish.");
+}
+
 afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((rootDir) => rm(rootDir, { recursive: true, force: true })));
 });
@@ -299,6 +323,40 @@ describe("createApp", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");
+    await expect(response.text()).resolves.toContain("Built app");
+  });
+
+  test("starts a model job and exposes sending then complete inference rows", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    await writeImage(imageRoot, "T02", "frame002.tif");
+    const fetchImpl = vi.fn(async () => new Response(
+      npyFixture({ width: 2, height: 2, values: [0, 0.5, 0.75, 1] }),
+      { headers: { "content-type": "application/x-npy" } },
+    ));
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot, fetchImpl });
+
+    const start = await jsonRequest(app, "/api/inference/jobs", {
+      method: "POST",
+      body: { serverUrl: "http://model:8080" },
+    });
+
+    expect(start.status).toBe(202);
+    const job = await waitForInferenceJob(app, (await start.json()).job.id);
+    expect(job).toMatchObject({ status: "complete", total: 2, completed: 2, failed: 0 });
+    const images = await request(app, "/api/inference/images");
+    expect((await images.json()).images.every((image) => image.status === "complete")).toBe(true);
+  });
+
+  test("serves the built SPA entry for /inferencePage", async () => {
+    const appRoot = await createTempRoot();
+    await mkdir(path.join(appRoot, "dist"));
+    await writeFile(path.join(appRoot, "dist", "index.html"), "<!doctype html><h1>Built app</h1>");
+
+    const response = await request(createApp({ rootDir: appRoot }), "/inferencePage");
+
+    expect(response.status).toBe(200);
     await expect(response.text()).resolves.toContain("Built app");
   });
 

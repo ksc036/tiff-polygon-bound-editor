@@ -21,6 +21,7 @@ import {
   replaceAllSubimages,
   saveSubimage,
 } from "./subimageService.js";
+import { createInferenceService, InferenceError } from "./inferenceService.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 const SUBIMAGE_ERROR_MESSAGES = {
@@ -43,6 +44,27 @@ const SUBIMAGE_BATCH_FAILURE_MESSAGES = {
   ...SUBIMAGE_ERROR_MESSAGES,
   BATCH_SCAN_FAILED: "Unable to scan source images.",
   DIMENSION_MISMATCH: "Source dimensions do not match the template.",
+};
+const INFERENCE_ERROR_MESSAGES = {
+  ROOT_UNSET: "Storage root has not been set.",
+  INVALID_ROOT: "Invalid inference root.",
+  IMAGE_NOT_FOUND: "Inference image not found.",
+  INVALID_SERVER_URL: "Model server URL is invalid.",
+  INVALID_THRESHOLD: "Inference threshold is invalid.",
+  INVALID_ROI: "ROI group is invalid.",
+  INVALID_REFERENCE: "Reference image is invalid.",
+  INVALID_TARGET_FRACTION: "Target area fraction is invalid.",
+  MISSING_PROBABILITY_MAP: "Probability map does not exist.",
+  INVALID_PROBABILITY_MAP: "Probability map is invalid.",
+  INVALID_RESPONSE_TYPE: "Model response is invalid.",
+  DIMENSION_MISMATCH: "Probability map dimensions do not match the source image.",
+  INVALID_SETTINGS: "Saved threshold settings are invalid.",
+  INVALID_SOURCE: "Unable to read source image dimensions.",
+  SOURCE_READ_FAILED: "Unable to read source image.",
+  MODEL_REQUEST_FAILED: "Model inference failed.",
+  JOB_IN_PROGRESS: "Inference is already running.",
+  JOB_NOT_FOUND: "Inference job not found.",
+  MASK_WRITE_FAILED: "Unable to write mask image.",
 };
 
 function asyncRoute(handler) {
@@ -97,6 +119,16 @@ function safeErrorResponse(error) {
         error: SUBIMAGE_ERROR_MESSAGES[error.code] ?? "Unable to process subimage.",
         code: error.code,
         ...(Array.isArray(error.details?.failures) ? { failures: safeSubimageFailures(error.details.failures) } : {}),
+      },
+    };
+  }
+
+  if (error instanceof InferenceError) {
+    return {
+      status: error.status,
+      body: {
+        error: INFERENCE_ERROR_MESSAGES[error.code] ?? "Unable to process inference data.",
+        code: error.code,
       },
     };
   }
@@ -272,9 +304,11 @@ export function createApp({
   selectHeatmapRoot = null,
   dataDir = null,
   maxImagePixels,
+  fetchImpl = globalThis.fetch,
 } = {}) {
   const app = express();
   const imageStorage = storage ?? createStorage({ initialRoot, selectRoot, dataDir });
+  const inferenceService = createInferenceService({ storage: imageStorage, fetchImpl, maxImagePixels });
   const distDir = path.join(rootDir, "dist");
   const indexPath = path.join(distDir, "index.html");
 
@@ -292,7 +326,7 @@ export function createApp({
   );
 
   app.post(
-    "/api/root",
+    ["/api/root", "/api/inference/root"],
     asyncRoute(async (request, response) => {
       imageStorage.setRoot(request.body?.rootPath);
       response.json(await rootPayload(imageStorage));
@@ -300,7 +334,7 @@ export function createApp({
   );
 
   app.post(
-    "/api/root/select",
+    ["/api/root/select", "/api/inference/root/select"],
     asyncRoute(async (_request, response) => {
       try {
         await imageStorage.selectRootWithFinder();
@@ -353,6 +387,76 @@ export function createApp({
       }
 
       response.json({ images: await imageStorage.scanImages() });
+    }),
+  );
+
+  app.get(
+    "/api/inference/images",
+    asyncRoute(async (_request, response) => {
+      const images = await inferenceService.listImages();
+      response.json({
+        rootPath: imageStorage.getRoot(),
+        images: images.map(({ id, timestampFolder, imageFile, status, message }) => ({
+          id,
+          timestampFolder,
+          imageFile,
+          status,
+          ...(message ? { message } : {}),
+        })),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/inference/jobs",
+    asyncRoute(async (request, response) => {
+      response.status(202).json({ job: inferenceService.startJob({ serverUrl: request.body?.serverUrl }) });
+    }),
+  );
+
+  app.get(
+    "/api/inference/jobs/:jobId",
+    asyncRoute(async (request, response) => {
+      response.json({ job: inferenceService.getJob(request.params.jobId) });
+    }),
+  );
+
+  app.get(
+    "/api/inference/images/:id/review",
+    asyncRoute(async (request, response) => {
+      const { map, polygon, ...review } = await inferenceService.loadReview(request.params.id, {
+        roiGroupId: request.query.roiGroupId,
+      });
+      response.json(review);
+    }),
+  );
+
+  app.put(
+    "/api/inference/images/:id/threshold",
+    asyncRoute(async (request, response) => {
+      response.json(await inferenceService.saveThreshold(request.params.id, request.body));
+    }),
+  );
+
+  app.get(
+    "/api/inference/images/:id/overlay",
+    asyncRoute(async (request, response) => {
+      const overlay = await inferenceService.createOverlay(request.params.id, { threshold: Number(request.query.threshold) });
+      response.type("image/png").set({ "Cache-Control": "no-store" }).send(overlay);
+    }),
+  );
+
+  app.post(
+    "/api/inference/reference-thresholds",
+    asyncRoute(async (request, response) => {
+      response.json(await inferenceService.applyReferenceThresholds(request.body));
+    }),
+  );
+
+  app.post(
+    "/api/inference/generate-masks",
+    asyncRoute(async (_request, response) => {
+      response.json(await inferenceService.generateMasks());
     }),
   );
 
@@ -613,7 +717,7 @@ export function createApp({
 
   if (existsSync(indexPath)) {
     app.use(express.static(distDir));
-    app.get("/", (_request, response) => {
+    app.get("*", (_request, response) => {
       response.sendFile(indexPath);
     });
   }
