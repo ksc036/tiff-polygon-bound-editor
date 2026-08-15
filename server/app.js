@@ -312,6 +312,7 @@ export function createApp({
   const distDir = path.join(rootDir, "dist");
   const indexPath = path.join(distDir, "index.html");
 
+  app.use("/api/inference", express.json({ limit: "10mb", strict: false }));
   app.use(express.json({ limit: "10mb" }));
 
   app.get("/api/health", (_request, response) => {

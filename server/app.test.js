@@ -349,6 +349,71 @@ describe("createApp", () => {
     expect((await images.json()).images.every((image) => image.status === "complete")).toBe(true);
   });
 
+  test("uses the requested review ROI without changing its saved threshold settings", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: imageRoot });
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [{ id: "roi", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 2 }, { x: 0, y: 2 }] }],
+    });
+    const app = createApp({
+      rootDir: appRoot,
+      storage,
+      fetchImpl: vi.fn(async () => new Response(
+        npyFixture({ width: 2, height: 2, values: [1, 0, 0, 0] }),
+        { headers: { "content-type": "application/x-npy" } },
+      )),
+    });
+    const start = await jsonRequest(app, "/api/inference/jobs", {
+      method: "POST",
+      body: { serverUrl: "http://model:8080" },
+    });
+    const job = await waitForInferenceJob(app, (await start.json()).job.id);
+    expect(job.status).toBe("complete");
+    const { images } = await (await request(app, "/api/inference/images")).json();
+
+    const response = await request(app, `/api/inference/images/${images[0].id}/review?roiGroupId=roi`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      settings: { roiGroupId: null },
+      roi: { groupId: "roi", metrics: { areaFraction: 0.25 } },
+    });
+  });
+
+  test("maps null and non-object inference request bodies to stable validation errors", async () => {
+    const appRoot = await createTempRoot();
+    const app = createApp({ rootDir: appRoot });
+
+    const threshold = await jsonRequest(app, "/api/inference/images/missing/threshold", {
+      method: "PUT",
+      body: null,
+    });
+    const reference = await jsonRequest(app, "/api/inference/reference-thresholds", {
+      method: "POST",
+      body: 1,
+    });
+
+    expect(threshold.status).toBe(400);
+    await expect(threshold.json()).resolves.toEqual({ error: "Inference threshold is invalid.", code: "INVALID_THRESHOLD" });
+    expect(reference.status).toBe(400);
+    await expect(reference.json()).resolves.toEqual({ error: "Reference image is invalid.", code: "INVALID_REFERENCE" });
+  });
+
+  test("keeps strict JSON parsing for existing editor routes", async () => {
+    const appRoot = await createTempRoot();
+    const response = await jsonRequest(createApp({ rootDir: appRoot }), "/api/root", {
+      method: "POST",
+      body: null,
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Invalid JSON payload." });
+  });
+
   test("serves the built SPA entry for /inferencePage", async () => {
     const appRoot = await createTempRoot();
     await mkdir(path.join(appRoot, "dist"));

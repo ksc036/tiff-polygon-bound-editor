@@ -94,6 +94,10 @@ function validThreshold(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
+function objectPayload(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
 function safeMessage(error) {
   return error instanceof InferenceError ? error.message : "Unable to run model inference.";
 }
@@ -322,7 +326,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     }));
   }
 
-  async function saveThreshold(id, { threshold, referenceId, targetAreaFraction, roiGroupId } = {}) {
+  async function saveThreshold(id, payload = {}) {
+    const { threshold, referenceId, targetAreaFraction, roiGroupId } = objectPayload(payload);
     if (!validThreshold(threshold)) {
       throw inferenceError("INVALID_THRESHOLD", "Threshold must be between 0 and 1.", 400);
     }
@@ -346,11 +351,17 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     });
   }
 
-  async function loadReview(id) {
+  async function loadReview(id, options = {}) {
     const image = await imageFor(id);
     const map = await loadMap(image);
     const settings = await loadSettings(image, { persistDefault: true });
-    const polygon = await polygonForTimestamp(image.timestampFolder, settings.roiGroupId, map.width, map.height);
+    const { roiGroupId } = objectPayload(options);
+    const selectedRoiGroupId = roiGroupId === undefined
+      ? settings.roiGroupId
+      : typeof roiGroupId === "string"
+        ? roiGroupId
+        : null;
+    const polygon = await polygonForTimestamp(image.timestampFolder, selectedRoiGroupId, map.width, map.height);
     const wholeImage = probabilityMetrics({ probabilityMap: map, threshold: settings.threshold });
     return {
       id: image.id,
@@ -365,12 +376,13 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       groups: await selectableGroups(image.timestampFolder, map.width, map.height),
       polygon,
       roi: polygon
-        ? { groupId: settings.roiGroupId, metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon }) }
+        ? { groupId: selectedRoiGroupId, metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon }) }
         : null,
     };
   }
 
-  async function applyReferenceThresholds({ referenceId, roiGroupId = null } = {}) {
+  async function applyReferenceThresholds(payload = {}) {
+    const { referenceId, roiGroupId = null } = objectPayload(payload);
     if (typeof referenceId !== "string" || (roiGroupId !== null && typeof roiGroupId !== "string")) {
       throw inferenceError("INVALID_REFERENCE", "Reference image is invalid.", 400);
     }

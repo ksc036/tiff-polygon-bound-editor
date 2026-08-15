@@ -306,6 +306,33 @@ describe("createInferenceService", () => {
     await expect(access(image.settingsPath)).resolves.toBeUndefined();
   });
 
+  test("uses a requested valid ROI for review metrics without changing saved settings", async () => {
+    const { storage, service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+    await writeProbabilityMap(image, [1, 0, 0, 0]);
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [
+        { id: "saved", points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }] },
+        { id: "requested", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 2 }, { x: 0, y: 2 }] },
+        { id: "invalid", points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] },
+      ],
+    });
+    await service.saveThreshold(image.id, { threshold: 0.5, roiGroupId: "saved" });
+
+    const saved = await service.loadReview(image.id);
+    const requested = await service.loadReview(image.id, { roiGroupId: "requested" });
+    const missing = await service.loadReview(image.id, { roiGroupId: "missing" });
+    const invalid = await service.loadReview(image.id, { roiGroupId: "invalid" });
+
+    expect(saved.roi).toMatchObject({ groupId: "saved", metrics: { areaFraction: 0.25 } });
+    expect(requested.roi).toMatchObject({ groupId: "requested", metrics: { areaFraction: 0.25 } });
+    expect(requested.settings.roiGroupId).toBe("saved");
+    expect(missing.roi).toBeNull();
+    expect(invalid.roi).toBeNull();
+  });
+
   test("surfaces malformed saved settings without replacing the file with defaults", async () => {
     const { service } = await setupService({ timestamps: ["T01"] });
     const [image] = await service.listImages();
@@ -345,5 +372,15 @@ describe("createInferenceService", () => {
       expect.objectContaining({ code: "INVALID_THRESHOLD", message: "Threshold must be between 0 and 1." }),
     );
     expect(InferenceError).toBeTypeOf("function");
+  });
+
+  test("rejects null and non-object threshold and reference payloads with inference validation errors", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+
+    await expect(service.saveThreshold(image.id, null)).rejects.toMatchObject({ code: "INVALID_THRESHOLD" });
+    await expect(service.saveThreshold(image.id, [])).rejects.toMatchObject({ code: "INVALID_THRESHOLD" });
+    await expect(service.applyReferenceThresholds(null)).rejects.toMatchObject({ code: "INVALID_REFERENCE" });
+    await expect(service.applyReferenceThresholds(1)).rejects.toMatchObject({ code: "INVALID_REFERENCE" });
   });
 });
