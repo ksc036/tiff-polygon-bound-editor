@@ -31,10 +31,6 @@ function isTiff(fileName) {
   return /\.tiff?$/i.test(fileName);
 }
 
-function imageStem(fileName) {
-  return fileName.replace(/\.tiff?$/i, "");
-}
-
 function compareNames(left, right) {
   return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
 }
@@ -78,7 +74,6 @@ export async function scanInferenceImages(rootPath) {
 
     for (const imageEntry of imageEntries.filter((candidate) => candidate.isFile() && isTiff(candidate.name)).sort((left, right) => compareNames(left.name, right.name))) {
       const imageFile = imageEntry.name;
-      const stem = imageStem(imageFile);
       const probabilityMapsDir = path.join(timestampPath, "probability-maps");
       images.push({
         id: inferenceId(timestampFolder, imageFile),
@@ -86,9 +81,9 @@ export async function scanInferenceImages(rootPath) {
         imageFile,
         imagePath: path.join(imageDir, imageFile),
         probabilityMapsDir,
-        mapPath: path.join(probabilityMapsDir, `${stem}.probability.npy`),
-        settingsPath: path.join(probabilityMapsDir, `${stem}.mask-setting.json`),
-        maskPath: path.join(timestampPath, "mask", `${stem}.png`),
+        mapPath: path.join(probabilityMapsDir, `${imageFile}.probability.npy`),
+        settingsPath: path.join(probabilityMapsDir, `${imageFile}.mask-setting.json`),
+        maskPath: path.join(timestampPath, "mask", `${imageFile}.png`),
       });
     }
   }
@@ -178,6 +173,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
 
   const jobs = new Map();
   const sourceStates = new Map();
+  let activeJobId = null;
 
   async function images() {
     const rootPath = storage.getRoot();
@@ -227,7 +223,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     try {
       parsed = JSON.parse(await readFile(image.settingsPath, "utf8"));
     } catch (error) {
-      if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+      if (error.code !== "ENOENT") {
         throw inferenceError("INVALID_SETTINGS", "Saved threshold settings are invalid.", 422, error);
       }
       const settings = cleanSettings(image);
@@ -283,11 +279,18 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     form.append("file", new Blob([sourceBytes], { type: "image/tiff" }), image.imageFile);
     let response;
     try {
-      response = await fetchImpl(new URL("/v1/inference/probability-map", serverUrl), { method: "POST", body: form });
+      response = await fetchImpl(new URL("/v1/inference/probability-map", serverUrl), {
+        method: "POST",
+        headers: { Accept: "application/x-npy" },
+        body: form,
+      });
     } catch (error) {
       throw inferenceError("MODEL_REQUEST_FAILED", "Model inference failed.", 502, error);
     }
     if (!response?.ok) throw inferenceError("MODEL_REQUEST_FAILED", "Model inference failed.", 502);
+    if (response.headers?.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/x-npy") {
+      throw inferenceError("INVALID_RESPONSE_TYPE", "Model response must be an NPY file.", 502);
+    }
 
     let bytes;
     let map;
@@ -445,6 +448,9 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
   }
 
   function startJob({ serverUrl } = {}) {
+    if (activeJobId) {
+      throw inferenceError("JOB_IN_PROGRESS", "Inference is already running.", 409);
+    }
     const normalizedUrl = normalizedServerUrl(serverUrl);
     const job = {
       id: randomUUID(),
@@ -456,6 +462,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       finishedAt: null,
     };
     jobs.set(job.id, job);
+    activeJobId = job.id;
     void images().then((scanned) => {
       job.total = scanned.length;
       return runJob(job, normalizedUrl);
@@ -464,6 +471,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       job.failed = Math.max(job.failed, 1);
       job.message = safeMessage(error);
       job.finishedAt = new Date().toISOString();
+    }).finally(() => {
+      if (activeJobId === job.id) activeJobId = null;
     });
     return publicJob(job);
   }

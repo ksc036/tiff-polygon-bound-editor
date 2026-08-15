@@ -34,6 +34,10 @@ function npyFixture({ width, height, values, descr = "<f4", fortranOrder = false
   return Buffer.concat([prefix, length, encodedHeader, data]);
 }
 
+function npyResponse(values) {
+  return new Response(npyFixture(values), { headers: { "content-type": "application/x-npy" } });
+}
+
 async function setupService({ fetchImpl = vi.fn(), timestamps = ["T01", "T02"] } = {}) {
   const rootDir = await createTempRoot();
   for (const timestamp of timestamps) {
@@ -53,6 +57,14 @@ async function waitForJob(service, id) {
   throw new Error("Inference job did not finish.");
 }
 
+async function waitFor(condition) {
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Condition did not become true.");
+}
+
 function imageByTimestamp(images, timestampFolder) {
   const image = images.find((candidate) => candidate.timestampFolder === timestampFolder);
   if (!image) throw new Error(`Missing ${timestampFolder}.`);
@@ -69,7 +81,7 @@ afterEach(async () => {
 });
 
 describe("scanInferenceImages", () => {
-  test("discovers every sorted TIFF with opaque ids and stem-derived output paths", async () => {
+  test("discovers every sorted TIFF with opaque ids and full-filename-derived output paths", async () => {
     const rootDir = await createTempRoot();
     await writeTiff(path.join(rootDir, "T10", "image", "z.tiff"));
     await writeTiff(path.join(rootDir, "T02", "image", "b.tif"));
@@ -86,10 +98,25 @@ describe("scanInferenceImages", () => {
     expect(images.map((image) => Buffer.from(image.id, "base64url").toString("utf8").startsWith("["))).toEqual([true, true, true]);
     expect(images[0]).toMatchObject({
       probabilityMapsDir: path.join(rootDir, "T02", "probability-maps"),
-      mapPath: path.join(rootDir, "T02", "probability-maps", "a.probability.npy"),
-      settingsPath: path.join(rootDir, "T02", "probability-maps", "a.mask-setting.json"),
-      maskPath: path.join(rootDir, "T02", "mask", "a.png"),
+      mapPath: path.join(rootDir, "T02", "probability-maps", "a.tif.probability.npy"),
+      settingsPath: path.join(rootDir, "T02", "probability-maps", "a.tif.mask-setting.json"),
+      maskPath: path.join(rootDir, "T02", "mask", "a.tif.png"),
     });
+  });
+
+  test("keeps .tif and .tiff artifacts distinct when their stems match", async () => {
+    const rootDir = await createTempRoot();
+    await writeTiff(path.join(rootDir, "T01", "image", "sample.tif"));
+    await writeTiff(path.join(rootDir, "T01", "image", "sample.tiff"));
+
+    const images = await scanInferenceImages(rootDir);
+
+    expect(images.map((image) => image.mapPath)).toEqual([
+      path.join(rootDir, "T01", "probability-maps", "sample.tif.probability.npy"),
+      path.join(rootDir, "T01", "probability-maps", "sample.tiff.probability.npy"),
+    ]);
+    expect(new Set(images.map((image) => image.settingsPath)).size).toBe(2);
+    expect(new Set(images.map((image) => image.maskPath)).size).toBe(2);
   });
 });
 
@@ -97,30 +124,64 @@ describe("createInferenceService", () => {
   test("runs model requests serially and saves validated maps under probability-maps", async () => {
     let activeRequests = 0;
     let maximumActiveRequests = 0;
-    const { service } = await setupService({
-      fetchImpl: vi.fn(async () => {
+    const fetchImpl = vi.fn(async () => {
         activeRequests += 1;
         maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
         await new Promise((resolve) => setTimeout(resolve, 10));
         activeRequests -= 1;
-        return new Response(npyFixture({ width: 2, height: 2, values: [0, 0.5, 0.75, 1] }));
-      }),
-    });
+        return npyResponse({ width: 2, height: 2, values: [0, 0.5, 0.75, 1] });
+      });
+    const { service } = await setupService({ fetchImpl });
 
     const job = service.startJob({ serverUrl: "http://model:8080" });
     await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "complete", completed: 2, failed: 0 });
     const images = await service.listImages();
 
     expect(maximumActiveRequests).toBe(1);
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ headers: { Accept: "application/x-npy" } });
     expect(images.map((image) => image.status)).toEqual(["complete", "complete"]);
     await expect(Promise.all(images.map((image) => access(image.mapPath)))).resolves.toHaveLength(2);
+  });
+
+  test("rejects a second start while the active job is still processing", async () => {
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    let releaseRequest;
+    const requestGate = new Promise((resolve) => {
+      releaseRequest = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      activeRequests += 1;
+      maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+      await requestGate;
+      activeRequests -= 1;
+      return npyResponse({ width: 2, height: 2, values: [0, 0, 1, 1] });
+    });
+    const { service } = await setupService({ fetchImpl });
+
+    const first = service.startJob({ serverUrl: "http://model:8080" });
+    await waitFor(() => fetchImpl.mock.calls.length === 1);
+    let secondJob;
+    let secondError;
+    try {
+      secondJob = service.startJob({ serverUrl: "http://model:8080" });
+    } catch (error) {
+      secondError = error;
+    }
+    releaseRequest();
+    await waitForJob(service, first.id);
+    if (secondJob) await waitForJob(service, secondJob.id);
+
+    expect(secondError).toMatchObject({ code: "JOB_IN_PROGRESS", message: "Inference is already running." });
+    expect(maximumActiveRequests).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   test("continues a job after an HTTP failure without saving the failed source", async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
-      .mockResolvedValueOnce(new Response(npyFixture({ width: 2, height: 2, values: [0, 0, 1, 1] })));
+      .mockResolvedValueOnce(npyResponse({ width: 2, height: 2, values: [0, 0, 1, 1] }));
     const { service } = await setupService({ fetchImpl });
 
     const job = service.startJob({ serverUrl: "http://model:8080" });
@@ -133,10 +194,25 @@ describe("createInferenceService", () => {
     await expect(access(images[0].mapPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("rejects a successful response whose Content-Type is not application/x-npy", async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      npyFixture({ width: 2, height: 2, values: [0, 0, 1, 1] }),
+      { headers: { "content-type": "application/octet-stream" } },
+    ));
+    const { service } = await setupService({ timestamps: ["T01"], fetchImpl });
+
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "partial", completed: 0, failed: 1 });
+
+    const [image] = await service.listImages();
+    expect(image).toMatchObject({ status: "failed", message: "Model response must be an NPY file." });
+    await expect(access(image.mapPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("rejects dimension-mismatched model maps and keeps a prior validated map", async () => {
     const { service } = await setupService({
       timestamps: ["T01"],
-      fetchImpl: vi.fn(async () => new Response(npyFixture({ width: 3, height: 2, values: [0, 0, 0, 1, 1, 1] }))),
+      fetchImpl: vi.fn(async () => npyResponse({ width: 3, height: 2, values: [0, 0, 0, 1, 1, 1] })),
     });
     const [image] = await service.listImages();
     const priorMap = npyFixture({ width: 2, height: 2, values: [0, 0.25, 0.5, 1] });
@@ -151,7 +227,7 @@ describe("createInferenceService", () => {
 
   test("derives complete status from valid persisted maps after a service restart", async () => {
     const { storage, service } = await setupService({
-      fetchImpl: vi.fn(async () => new Response(npyFixture({ width: 2, height: 2, values: [0, 0, 1, 1] }))),
+      fetchImpl: vi.fn(async () => npyResponse({ width: 2, height: 2, values: [0, 0, 1, 1] })),
     });
     const job = service.startJob({ serverUrl: "http://model:8080" });
     await waitForJob(service, job.id);
@@ -228,6 +304,21 @@ describe("createInferenceService", () => {
     const metadata = await sharp(overlay).metadata();
     expect(metadata).toMatchObject({ format: "png", width: 2, height: 2 });
     await expect(access(image.settingsPath)).resolves.toBeUndefined();
+  });
+
+  test("surfaces malformed saved settings without replacing the file with defaults", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+    await writeProbabilityMap(image, [0, 0.5, 0.75, 1]);
+    const malformedSettings = "{ not valid JSON";
+    await mkdir(image.probabilityMapsDir, { recursive: true });
+    await writeFile(image.settingsPath, malformedSettings);
+
+    await expect(service.loadReview(image.id)).rejects.toMatchObject({
+      code: "INVALID_SETTINGS",
+      message: "Saved threshold settings are invalid.",
+    });
+    await expect(readFile(image.settingsPath, "utf8")).resolves.toBe(malformedSettings);
   });
 
   test("writes one threshold mask for every complete source without changing probability maps", async () => {
