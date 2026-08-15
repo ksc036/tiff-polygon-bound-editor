@@ -207,6 +207,15 @@ test("routes the inference deep link to the focused review page", async () => {
   expect(await screen.findByRole("heading", { name: "Inference mask setting" })).toBeInTheDocument();
 });
 
+test("uses an independent inference layout with status list and review stage", async () => {
+  mockInferenceApi();
+
+  render(<InferencePage />);
+
+  expect(await screen.findByLabelText("Inference image list")).toHaveClass("inference-image-list");
+  expect(screen.getByLabelText("Probability review stage")).toHaveClass("inference-stage");
+});
+
 test("shows every source status and selects the first completed image for review", async () => {
   mockInferenceApi();
 

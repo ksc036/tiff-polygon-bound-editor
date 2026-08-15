@@ -55,6 +55,29 @@ npm run server
 Use `npm start` again after pulling code changes because it reinstalls locked
 dependencies and rebuilds the client before starting.
 
+## Inference Mask Setting
+
+Open [http://localhost:3000/inferencePage](http://localhost:3000/inferencePage)
+for the inference-specific review workflow. The existing polygon editor remains
+available at [http://localhost:3000/](http://localhost:3000/).
+
+Set the same timestamp-root folder used by the editor, enter the model server
+base URL, and select `Run inference`. The application processes source TIFFs
+sequentially and sends each original TIFF to this model endpoint:
+
+```text
+POST {model-server}/v1/inference/probability-map
+Content-Type: multipart/form-data
+Accept: application/x-npy
+
+file: <original TIFF bytes>
+```
+
+The model must return a successful `application/x-npy` response containing a
+two-dimensional, C-order `float32` NumPy array with shape `[height, width]`.
+Its dimensions must exactly match the source TIFF. The app rejects other media
+types, data layouts, element types, shapes, and mismatched dimensions.
+
 ## Optional Initial Root
 
 The image root can be chosen after startup with `Find root` or `Set root`. On
