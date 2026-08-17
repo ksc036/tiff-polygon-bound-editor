@@ -275,6 +275,16 @@ test("loads raw16 bytes by opaque image id when one timestamp has two TIFFs", as
   expect(fetchMock).not.toHaveBeenCalledWith("/api/images/same-timestamp/raw16");
 });
 
+test("renders a waiting source TIFF immediately after selection", async () => {
+  mockInferenceApi({
+    images: [{ id: "waiting-a", timestampFolder: "001", imageFile: "waiting.tif", status: "waiting" }],
+  });
+
+  render(<InferencePage />);
+
+  await waitFor(() => expect(screen.getByLabelText("Original source image")).toHaveAttribute("width", "2"));
+});
+
 test("composites the source canvas and binary mask in one stable stage frame", async () => {
   mockInferenceApi();
   render(<InferencePage />);
@@ -582,6 +592,18 @@ test("invalidates the mask overlay immediately when threshold or source identity
   )).toBe(true));
   nextImageOverlay.resolve();
   expect(await screen.findByAltText("Binary mask overlay")).toBeInTheDocument();
+});
+
+test("switches completed sources among original overlay and mask-only views", async () => {
+  mockInferenceApi({ images: [baseImages[1]] });
+
+  render(<InferencePage />);
+
+  await screen.findByAltText("Binary mask overlay");
+  fireEvent.click(screen.getByRole("button", { name: "Original" }));
+  expect(screen.queryByAltText("Binary mask overlay")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Mask" }));
+  expect(screen.getByAltText("Binary mask")).toBeInTheDocument();
 });
 
 test("resets review and completed-job state when roots reuse the same image id", async () => {

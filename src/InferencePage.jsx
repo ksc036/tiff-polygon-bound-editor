@@ -47,6 +47,7 @@ export default function InferencePage() {
   const [activeRootPath, setActiveRootPath] = useState("");
   const [images, setImages] = useState([]);
   const [activeImageId, setActiveImageId] = useState(null);
+  const [stageView, setStageView] = useState("overlay");
   const [review, setReview] = useState(null);
   const [selectedRoiByImage, setSelectedRoiByImage] = useState({});
   const [thresholdDraft, setThresholdDraft] = useState("0.500");
@@ -77,9 +78,13 @@ export default function InferencePage() {
     () => images.filter((image) => image.status === "complete"),
     [images],
   );
+  const activeImage = useMemo(
+    () => images.find((image) => image.id === activeImageId) ?? null,
+    [activeImageId, images],
+  );
   const activeCompleteImage = useMemo(
-    () => completeImages.find((image) => image.id === activeImageId) ?? null,
-    [activeImageId, completeImages],
+    () => activeImage?.status === "complete" ? activeImage : null,
+    [activeImage],
   );
   const activeCompleteIndex = activeCompleteImage
     ? completeImages.findIndex((image) => image.id === activeCompleteImage.id)
@@ -151,10 +156,10 @@ export default function InferencePage() {
     setRootPath(nextRoot);
     setImages(nextImages);
     setActiveImageId((currentId) => {
-      if (nextImages.some((image) => image.id === currentId && image.status === "complete")) {
+      if (nextImages.some((image) => image.id === currentId)) {
         return currentId;
       }
-      return nextImages.find((image) => image.status === "complete")?.id ?? null;
+      return nextImages.find((image) => image.status === "complete")?.id ?? nextImages[0]?.id ?? null;
     });
     return payload;
   }, [confirmActiveRoot]);
@@ -206,21 +211,15 @@ export default function InferencePage() {
   }, [images, job?.status, loadImages]);
 
   useEffect(() => {
-    if (!activeCompleteImage) {
-      setReview(null);
+    if (!activeImage) {
       setRawImage(null);
       return undefined;
     }
 
     let alive = true;
-    const image = activeCompleteImage;
-    setReview(null);
+    const image = activeImage;
     setRawImage(null);
     setError("");
-
-    loadReview(image.id, selectedRoiGroupId).catch((loadError) => {
-      if (alive) setError(loadError.message);
-    });
 
     fetch(`/api/inference/images/${encodeURIComponent(image.id)}/raw16`)
       .then(async (response) => {
@@ -242,6 +241,25 @@ export default function InferencePage() {
       .catch((loadError) => {
         if (alive) setError(loadError.message);
       });
+
+    return () => {
+      alive = false;
+    };
+  }, [activeImage]);
+
+  useEffect(() => {
+    if (!activeCompleteImage) {
+      setReview(null);
+      return undefined;
+    }
+
+    let alive = true;
+    setReview(null);
+    setError("");
+
+    loadReview(activeCompleteImage.id, selectedRoiGroupId).catch((loadError) => {
+      if (alive) setError(loadError.message);
+    });
 
     return () => {
       alive = false;
@@ -490,7 +508,6 @@ export default function InferencePage() {
               <button
                 type="button"
                 aria-current={image.id === activeImageId ? "true" : undefined}
-                disabled={image.status !== "complete"}
                 onClick={() => {
                   setOverlay(null);
                   setActiveImageId(image.id);
@@ -508,9 +525,16 @@ export default function InferencePage() {
 
       <main className="inference-review">
         <section className="inference-stage" aria-label="Probability review stage">
+          <div role="group" aria-label="Stage view">
+            <button type="button" onClick={() => setStageView("original")}>Original</button>
+            <button type="button" onClick={() => setStageView("overlay")}>Overlay</button>
+            <button type="button" onClick={() => setStageView("mask")}>Mask</button>
+          </div>
           <div className="inference-stage-frame" aria-label="Composited source and binary mask">
-            <canvas ref={canvasRef} className="inference-source-canvas" aria-label="Original source image" />
-            {overlayUrl ? (
+            {stageView !== "mask" ? (
+              <canvas ref={canvasRef} className="inference-source-canvas" aria-label="Original source image" />
+            ) : null}
+            {stageView === "overlay" && overlayUrl ? (
               <img
                 className="inference-mask-overlay"
                 src={overlayUrl}
@@ -519,8 +543,17 @@ export default function InferencePage() {
                 height={rawImage?.height ?? review?.height}
               />
             ) : null}
+            {stageView === "mask" && overlayUrl ? (
+              <img
+                className="inference-mask-overlay"
+                src={overlayUrl}
+                alt="Binary mask"
+                width={rawImage?.width ?? review?.width}
+                height={rawImage?.height ?? review?.height}
+              />
+            ) : null}
           </div>
-          {!activeCompleteImage ? <p>No completed image is available for review.</p> : null}
+          {stageView === "mask" && !activeCompleteImage ? <p>No completed image is available for review.</p> : null}
         </section>
       </main>
 
