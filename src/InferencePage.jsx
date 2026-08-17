@@ -92,8 +92,12 @@ export default function InferencePage() {
   const selectedRoiGroupId = activeCompleteImage
     ? selectedRoiByImage[activeCompleteImage.id]
     : undefined;
+  const reviewReady = Boolean(activeCompleteImage && review?.id === activeCompleteImage.id);
+  const rawImageMatchesActive = Boolean(
+    rawImage && rawImage.imageId === activeImage?.id && rawImage.rootPath === activeRootPath,
+  );
   const activeThreshold = normalizeThreshold(Number(thresholdDraft));
-  const overlayUrl = overlay &&
+  const overlayUrl = reviewReady && overlay &&
     overlay.rootPath === activeRootPath &&
     overlay.imageId === activeCompleteImage?.id &&
     overlay.threshold === activeThreshold
@@ -218,6 +222,7 @@ export default function InferencePage() {
 
     let alive = true;
     const image = activeImage;
+    const sourceRootPath = activeRootPath;
     setRawImage(null);
     setError("");
 
@@ -231,6 +236,8 @@ export default function InferencePage() {
         const min = Number(response.headers.get("x-display-min"));
         const max = Number(response.headers.get("x-display-max"));
         setRawImage({
+          imageId: image.id,
+          rootPath: sourceRootPath,
           pixels: new Uint16Array(buffer),
           width: Number.isInteger(width) && width > 0 ? width : 0,
           height: Number.isInteger(height) && height > 0 ? height : 0,
@@ -245,7 +252,7 @@ export default function InferencePage() {
     return () => {
       alive = false;
     };
-  }, [activeImage]);
+  }, [activeImage, activeRootPath]);
 
   useEffect(() => {
     if (!activeCompleteImage) {
@@ -267,14 +274,21 @@ export default function InferencePage() {
   }, [activeCompleteImage, loadReview, selectedRoiGroupId]);
 
   useEffect(() => {
-    if (!rawImage) return;
+    const canvas = canvasRef.current;
+    if (!rawImageMatchesActive) {
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      return;
+    }
     renderRaw16ToCanvas(canvasRef.current, rawImage);
-  }, [rawImage]);
+  }, [rawImage, rawImageMatchesActive, stageView]);
 
   useEffect(() => {
     const threshold = normalizeThreshold(Number(thresholdDraft));
     setOverlay(null);
-    if (!activeCompleteImage || threshold === null) {
+    if (!reviewReady || threshold === null) {
       return undefined;
     }
 
@@ -297,7 +311,7 @@ export default function InferencePage() {
       alive = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [activeCompleteImage, activeRootPath, thresholdDraft]);
+  }, [activeCompleteImage, activeRootPath, reviewReady, thresholdDraft]);
 
   async function applyRoot(endpoint, body) {
     rootChangePendingRef.current = true;
@@ -374,7 +388,7 @@ export default function InferencePage() {
   }
 
   function persistThreshold({ showMessage = true } = {}) {
-    if (!activeCompleteImage) return Promise.resolve(false);
+    if (!activeCompleteImage || !reviewReady) return Promise.resolve(false);
     const threshold = normalizeThreshold(Number(thresholdDraft));
     if (threshold === null) {
       setThresholdDraft((normalizeThreshold(Number(review?.threshold)) ?? 0.5).toFixed(3));
@@ -422,7 +436,7 @@ export default function InferencePage() {
   }
 
   async function handleSetOtherThresholds() {
-    if (!activeCompleteImage || propagating) return;
+    if (!activeCompleteImage || !reviewReady || propagating) return;
     setPropagating(true);
     setError("");
     setActionMessage("");
@@ -446,7 +460,7 @@ export default function InferencePage() {
   }
 
   async function handleGenerateMasks() {
-    if (!activeCompleteImage || generating) return;
+    if (!activeCompleteImage || !reviewReady || generating) return;
     setGenerating(true);
     setError("");
     setActionMessage("");
@@ -525,35 +539,25 @@ export default function InferencePage() {
 
       <main className="inference-review">
         <section className="inference-stage" aria-label="Probability review stage">
-          <div role="group" aria-label="Stage view">
-            <button type="button" onClick={() => setStageView("original")}>Original</button>
-            <button type="button" onClick={() => setStageView("overlay")}>Overlay</button>
-            <button type="button" onClick={() => setStageView("mask")}>Mask</button>
+          <div className="inference-stage-modes" role="group" aria-label="Stage view">
+            {[["original", "Original"], ["overlay", "Overlay"], ["mask", "Mask"]].map(([value, label]) => (
+              <button type="button" key={value} aria-pressed={stageView === value} onClick={() => setStageView(value)}>{label}</button>
+            ))}
           </div>
           <div className="inference-stage-frame" aria-label="Composited source and binary mask">
-            {stageView !== "mask" ? (
-              <canvas ref={canvasRef} className="inference-source-canvas" aria-label="Original source image" />
-            ) : null}
-            {stageView === "overlay" && overlayUrl ? (
+            <canvas ref={canvasRef} hidden={stageView === "mask"} className="inference-source-canvas" aria-label="Original source image" />
+            {stageView !== "original" && overlayUrl ? (
               <img
                 className="inference-mask-overlay"
                 src={overlayUrl}
-                alt="Binary mask overlay"
-                width={rawImage?.width ?? review?.width}
-                height={rawImage?.height ?? review?.height}
-              />
-            ) : null}
-            {stageView === "mask" && overlayUrl ? (
-              <img
-                className="inference-mask-overlay"
-                src={overlayUrl}
-                alt="Binary mask"
+                alt={stageView === "mask" ? "Binary mask" : "Binary mask overlay"}
                 width={rawImage?.width ?? review?.width}
                 height={rawImage?.height ?? review?.height}
               />
             ) : null}
           </div>
-          {stageView === "mask" && !activeCompleteImage ? <p>No completed image is available for review.</p> : null}
+          {stageView !== "original" && !activeCompleteImage ? <p>Probability map is unavailable for this image.</p> : null}
+          {stageView !== "original" && activeCompleteImage && !reviewReady ? <p>Loading probability map review.</p> : null}
         </section>
       </main>
 
@@ -571,7 +575,7 @@ export default function InferencePage() {
             max="1"
             step="0.001"
             value={thresholdDraft}
-            disabled={!activeCompleteImage || savingThreshold}
+            disabled={!reviewReady || savingThreshold}
             onChange={(event) => {
               setOverlay(null);
               setThresholdDraft(event.target.value);
@@ -596,7 +600,7 @@ export default function InferencePage() {
           ) : null}
         </dl>
 
-        {review?.groups?.length ? (
+        {reviewReady && review?.groups?.length ? (
           <label>
             Saved ROI group
             <select
@@ -617,7 +621,7 @@ export default function InferencePage() {
         <button
           type="button"
           onClick={handleSetOtherThresholds}
-          disabled={!activeCompleteImage || propagating}
+          disabled={!reviewReady || propagating}
         >
           Set other thresholds from reference
         </button>
@@ -645,7 +649,7 @@ export default function InferencePage() {
             Next
           </button>
         </nav>
-        <button type="button" onClick={handleGenerateMasks} disabled={!activeCompleteImage || generating}>
+        <button type="button" onClick={handleGenerateMasks} disabled={!reviewReady || generating}>
           Generate masks
         </button>
       </footer>

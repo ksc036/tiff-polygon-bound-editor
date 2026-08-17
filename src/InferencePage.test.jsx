@@ -647,6 +647,46 @@ test("switches completed sources among original overlay and mask-only views", as
   expect(screen.queryByAltText("Binary mask overlay")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Mask" }));
   expect(screen.getByAltText("Binary mask")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Original" }));
+  expect(screen.getByLabelText("Original source image")).toHaveAttribute("width", "2");
+  expect(screen.getByRole("button", { name: "Original" })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("keeps the source visible but explains unavailable probability maps in overlay mode", async () => {
+  mockInferenceApi({
+    images: [{ id: "waiting-a", timestampFolder: "001", imageFile: "waiting.tif", status: "waiting" }],
+  });
+  render(<InferencePage />);
+
+  await screen.findByLabelText("Original source image");
+  expect(screen.getByText("Probability map is unavailable for this image.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Mask" }));
+  expect(screen.queryByLabelText("Original source image")).toBeInTheDocument();
+  expect(screen.getByText("Probability map is unavailable for this image.")).toBeInTheDocument();
+});
+
+test("does not request a new complete image overlay until its review supplies the threshold", async () => {
+  const completeBReview = deferred();
+  const { fetchMock } = mockInferenceApi({
+    images: [baseImages[1], baseImages[3]],
+    reviewDeferredById: { "complete-b": completeBReview },
+  });
+  render(<InferencePage />);
+  await screen.findByAltText("Binary mask overlay");
+
+  fireEvent.click(screen.getByRole("button", { name: "Next complete image" }));
+  expect(screen.getByLabelText("Threshold")).toBeDisabled();
+  expect(fetchMock.mock.calls.some(
+    ([url]) => url === "/api/inference/images/complete-b/overlay?threshold=0.500",
+  )).toBe(false);
+
+  await act(async () => {
+    completeBReview.resolve();
+    await completeBReview.promise;
+  });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    "/api/inference/images/complete-b/overlay?threshold=0.610",
+  ));
 });
 
 test("resets review and completed-job state when roots reuse the same image id", async () => {

@@ -68,6 +68,8 @@ Clear that object synchronously in source and threshold change handlers. Effect 
 
 Normalize threshold values to the shared `0.001` grid before persistence or derived work. The normalized value must feed review metrics, overlays, and generated masks; formatting only the URL or input text leaves semantic divergence.
 
+Raw source previews need the same identity boundary. Store the source image id and root with decoded raw16 data, clear the canvas when that identity no longer matches the selection, and only paint a canvas when it matches. Keep the canvas mounted while changing display modes so a completed render is not lost when returning from mask-only view. A completed source is not review-ready until its own review payload arrives; until then, do not issue a thresholded overlay request or enable controls that persist or consume that threshold.
+
 ## Why This Works
 
 Mounted-state checks prevent updates after unmount but do not establish which in-flight request is authoritative. Identity and sequence guards encode that authority directly. Sharing the save promise also preserves the required ordering between persistence and propagation.
@@ -82,5 +84,6 @@ Mounted-state checks prevent updates after unmount but do not establish which in
 - Repeat stale-response tests with a delayed rejection; stale errors must be ignored while current-request errors retain their existing reporting path.
 - Hold a poll-triggered child refresh across a root switch, then release it and assert that the parent poll cannot publish a terminal message or schedule another iteration.
 - Store render identity beside object URLs and assert stale overlays disappear synchronously before replacement requests resolve.
+- Test mask-only to original mode changes, completed-to-completed selections with a deferred second review, and raw source transitions with deferred raw16 data.
 - Centralize numeric grid normalization at the service boundary and mirror it in UI requests; test one off-grid input through persistence and every derived artifact.
 - Use mounted checks for lifecycle safety and request identity checks for selection safety; they solve different races.
