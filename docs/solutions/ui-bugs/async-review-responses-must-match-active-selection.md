@@ -49,6 +49,8 @@ Store the active threshold-save promise in a ref. Blur, Enter, and explicit prop
 
 Treat the confirmed root as part of every transient inference identity. Reject root changes while a job is active, clear completed jobs and source status after a successful switch, and key source state with a root-derived path rather than a root-relative image id. In the UI, reset review, ROI, job, raw-image, and overlay state whenever the server-confirmed root changes, even when the next root returns the same image ids.
 
+Guard the image-list request that drives those states as well. Capture the confirmed root, root generation, and list request ID before fetching; apply the response only if all three are still current. Increment the generation and invalidate outstanding list requests when a root switch starts, not only after it succeeds, so an old polling response cannot re-confirm the prior root while the switch is in flight.
+
 An overlay also needs explicit render identity instead of a bare blob URL:
 
 ```jsx
@@ -72,6 +74,7 @@ Mounted-state checks prevent updates after unmount but do not establish which in
 - Test action dependencies with a deliberately pending mutation and assert the dependent request has not started.
 - Make every action that consumes persisted edits await the same save promise and abort when it resolves unsuccessfully.
 - Include the confirmed root in transient identities and test switches between roots that intentionally reuse timestamp folders, filenames, and opaque ids.
+- Hold an old-root list poll across a root switch and assert that releasing it cannot restore the old root or rows.
 - Store render identity beside object URLs and assert stale overlays disappear synchronously before replacement requests resolve.
 - Centralize numeric grid normalization at the service boundary and mirror it in UI requests; test one off-grid input through persistence and every derived artifact.
 - Use mounted checks for lifecycle safety and request identity checks for selection safety; they solve different races.

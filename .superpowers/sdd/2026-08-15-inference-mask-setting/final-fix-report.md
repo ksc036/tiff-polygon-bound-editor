@@ -96,3 +96,62 @@ Result: Vite production build succeeded with 41 modules transformed.
 ## Compound Fallback
 
 `ce-compound` was unavailable in the environment. Per the repository instruction fallback, the existing async inference review learning was updated with the reusable root identity, overlay identity, dependent-save, and threshold-normalization rules.
+
+## Residual Re-review Fix
+
+### Stale Image-list Response Guard
+
+The final scoped re-review found that an in-flight `GET /api/inference/images` could resolve after a root switch and call `confirmActiveRoot()` with the old payload root. That restored the prior root path, rows, and selection-driven review state despite the new root already being active.
+
+The page now:
+
+- Invalidates outstanding image-list requests when a root switch begins.
+- Rejects image-list responses while a root change is pending.
+- Captures the confirmed root, root generation, and monotonically increasing list request ID for every request.
+- Applies a response only when all captured identities still match and the payload root matches the captured confirmed root.
+- Invalidates concurrent requests again whenever the confirmed root identity changes.
+
+The regression holds the second, polling-driven old-root image-list response, switches to `/new/root`, confirms the new row, releases the old response, and verifies that neither `/data/inference` nor the old row returns.
+
+### Residual TDD Evidence
+
+Red result before implementation:
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 22 passed (23)
+```
+
+The failure showed the root input reverting from `/new/root` to `/data/inference` after releasing the held response.
+
+Final focused page result:
+
+```text
+Test Files  1 passed (1)
+Tests       23 passed (23)
+```
+
+Affected server result:
+
+```text
+Test Files  2 passed (2)
+Tests       83 passed (83)
+```
+
+Full verification:
+
+```text
+Test Files  30 passed (30)
+Tests       509 passed (509)
+```
+
+The Vite production build also succeeded with 41 modules transformed.
+
+### Residual Files Changed
+
+- `src/InferencePage.jsx`
+- `src/InferencePage.test.jsx`
+- `docs/solutions/ui-bugs/async-review-responses-must-match-active-selection.md`
+- `.superpowers/sdd/2026-08-15-inference-mask-setting/final-fix-report.md`
+
+`ce-compound` remained unavailable, so the existing async review learning was extended with the list-request generation rule and delayed old-root polling regression pattern.

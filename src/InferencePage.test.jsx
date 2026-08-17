@@ -95,6 +95,7 @@ function deferred() {
 
 function mockInferenceApi({
   images: initialImages = baseImages,
+  imageListDeferredByCall = {},
   imageSnapshots = null,
   jobStatus = "complete",
   jobDeferred,
@@ -104,6 +105,7 @@ function mockInferenceApi({
   thresholdSave,
 } = {}) {
   let images = clone(initialImages);
+  let imageListCallCount = 0;
   let imageSnapshotIndex = 0;
   const currentReviews = clone(reviews);
   let rootPath = "/data/inference";
@@ -112,13 +114,19 @@ function mockInferenceApi({
     const method = options.method ?? "GET";
 
     if (url === "/api/inference/images" && method === "GET") {
-      if (rootData?.[rootPath]) {
-        images = clone(rootData[rootPath].images);
+      imageListCallCount += 1;
+      const responseRoot = rootPath;
+      if (rootData?.[responseRoot]) {
+        images = clone(rootData[responseRoot].images);
       } else if (imageSnapshots?.length) {
         images = clone(imageSnapshots[Math.min(imageSnapshotIndex, imageSnapshots.length - 1)]);
         imageSnapshotIndex += 1;
       }
-      return jsonResponse({ rootPath, images: clone(images) });
+      const responseImages = clone(images);
+      if (imageListDeferredByCall[imageListCallCount]) {
+        await imageListDeferredByCall[imageListCallCount].promise;
+      }
+      return jsonResponse({ rootPath: responseRoot, images: responseImages });
     }
     if (url === "/api/inference/root" && method === "POST") {
       rootPath = JSON.parse(options.body).rootPath;
@@ -557,6 +565,42 @@ test("resets review and completed-job state when roots reuse the same image id",
   expect(screen.getByText("100.00%")).toBeInTheDocument();
   expect(screen.queryByText(/Inference complete:/)).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Saved ROI group")).not.toBeInTheDocument();
+});
+
+test("ignores an old-root image-list poll that resolves after a root switch", async () => {
+  const oldRootPoll = deferred();
+  const oldImages = [{ id: "old-sending", timestampFolder: "001", imageFile: "old.tif", status: "sending" }];
+  const newImages = [{ id: "new-complete", timestampFolder: "101", imageFile: "new.tif", status: "complete" }];
+  const { fetchMock } = mockInferenceApi({
+    images: oldImages,
+    imageListDeferredByCall: { 2: oldRootPoll },
+    rootData: {
+      "/data/inference": { images: oldImages, reviews: {} },
+      "/new/root": { images: newImages, reviews: {} },
+    },
+  });
+  render(<InferencePage />);
+  expect(await screen.findByText("old.tif")).toBeInTheDocument();
+  await waitFor(() => expect(fetchMock.mock.calls.filter(
+    ([url]) => url === "/api/inference/images",
+  )).toHaveLength(2), { timeout: 1500 });
+
+  const rootInput = screen.getByLabelText("Root path");
+  fireEvent.change(rootInput, { target: { value: "/new/root" } });
+  fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+
+  expect(await screen.findByText("new.tif")).toBeInTheDocument();
+  expect(screen.queryByText("old.tif")).not.toBeInTheDocument();
+
+  await act(async () => {
+    oldRootPoll.resolve();
+    await oldRootPoll.promise;
+    await Promise.resolve();
+  });
+
+  expect(screen.getByLabelText("Root path")).toHaveValue("/new/root");
+  expect(screen.getByText("new.tif")).toBeInTheDocument();
+  expect(screen.queryByText("old.tif")).not.toBeInTheDocument();
 });
 
 test("disables root changes while an inference job is active", async () => {

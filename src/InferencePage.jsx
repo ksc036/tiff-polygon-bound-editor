@@ -67,7 +67,10 @@ export default function InferencePage() {
   const thresholdSaveRef = useRef(null);
   const activeImageIdRef = useRef(activeImageId);
   const activeRootPathRef = useRef(null);
+  const imageListRequestIdRef = useRef(0);
   const reviewRequestIdRef = useRef(0);
+  const rootChangePendingRef = useRef(false);
+  const rootGenerationRef = useRef(0);
   activeImageIdRef.current = activeImageId;
 
   const completeImages = useMemo(
@@ -94,7 +97,12 @@ export default function InferencePage() {
   const inferenceRunning = job?.status === "running";
 
   const confirmActiveRoot = useCallback((nextRoot) => {
-    const rootChanged = activeRootPathRef.current !== null && activeRootPathRef.current !== nextRoot;
+    const previousRoot = activeRootPathRef.current;
+    const rootChanged = previousRoot !== null && previousRoot !== nextRoot;
+    if (previousRoot !== nextRoot) {
+      rootGenerationRef.current += 1;
+      imageListRequestIdRef.current += 1;
+    }
     activeRootPathRef.current = nextRoot;
     setActiveRootPath(nextRoot);
     if (!rootChanged) return false;
@@ -116,13 +124,22 @@ export default function InferencePage() {
   }, []);
 
   const loadImages = useCallback(async () => {
+    const requestId = imageListRequestIdRef.current + 1;
+    imageListRequestIdRef.current = requestId;
+    const requestGeneration = rootGenerationRef.current;
+    const requestRoot = activeRootPathRef.current;
     const payload = await readJsonResponse(
       await fetch("/api/inference/images"),
       "Unable to load inference images.",
     );
-    if (!mountedRef.current) return payload;
+    if (!mountedRef.current || rootChangePendingRef.current ||
+        imageListRequestIdRef.current !== requestId || rootGenerationRef.current !== requestGeneration ||
+        activeRootPathRef.current !== requestRoot) {
+      return payload;
+    }
     const nextImages = Array.isArray(payload.images) ? payload.images : [];
     const nextRoot = typeof payload.rootPath === "string" ? payload.rootPath : "";
+    if (requestRoot !== null && nextRoot !== requestRoot) return payload;
     confirmActiveRoot(nextRoot);
     setRootPath(nextRoot);
     setImages(nextImages);
@@ -258,6 +275,9 @@ export default function InferencePage() {
   }, [activeCompleteImage, activeRootPath, thresholdDraft]);
 
   async function applyRoot(endpoint, body) {
+    rootChangePendingRef.current = true;
+    rootGenerationRef.current += 1;
+    imageListRequestIdRef.current += 1;
     setLoadingRoot(true);
     setError("");
     try {
@@ -270,10 +290,13 @@ export default function InferencePage() {
         confirmActiveRoot(payload.rootPath);
         setRootPath(payload.rootPath);
       }
+      rootChangePendingRef.current = false;
       await loadImages();
     } catch (rootError) {
+      rootChangePendingRef.current = false;
       setError(rootError.message);
     } finally {
+      rootChangePendingRef.current = false;
       setLoadingRoot(false);
     }
   }
