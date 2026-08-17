@@ -285,6 +285,22 @@ test("renders a waiting source TIFF immediately after selection", async () => {
   await waitFor(() => expect(screen.getByLabelText("Original source image")).toHaveAttribute("width", "2"));
 });
 
+test("keeps threshold and mask actions unavailable for a selected waiting source", async () => {
+  mockInferenceApi({
+    images: [{ id: "waiting-a", timestampFolder: "001", imageFile: "waiting.tif", status: "waiting" }],
+  });
+
+  render(<InferencePage />);
+
+  await screen.findByLabelText("Original source image");
+  expect(screen.getByLabelText("Threshold")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Set other thresholds from reference" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Generate masks" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Previous complete image" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Next complete image" })).toBeDisabled();
+  expect(screen.queryByLabelText("Saved ROI group")).not.toBeInTheDocument();
+});
+
 test("composites the source canvas and binary mask in one stable stage frame", async () => {
   mockInferenceApi();
   render(<InferencePage />);
