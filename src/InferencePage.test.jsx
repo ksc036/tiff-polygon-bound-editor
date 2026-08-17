@@ -87,10 +87,12 @@ function clone(value) {
 
 function deferred() {
   let resolve;
-  const promise = new Promise((nextResolve) => {
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
     resolve = nextResolve;
+    reject = nextReject;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function mockInferenceApi({
@@ -601,6 +603,40 @@ test("ignores an old-root image-list poll that resolves after a root switch", as
   expect(screen.getByLabelText("Root path")).toHaveValue("/new/root");
   expect(screen.getByText("new.tif")).toBeInTheDocument();
   expect(screen.queryByText("old.tif")).not.toBeInTheDocument();
+});
+
+test("ignores an old-root image-list poll that rejects after a root switch", async () => {
+  const oldRootPoll = deferred();
+  const oldImages = [{ id: "old-sending", timestampFolder: "001", imageFile: "old.tif", status: "sending" }];
+  const newImages = [{ id: "new-complete", timestampFolder: "101", imageFile: "new.tif", status: "complete" }];
+  const { fetchMock } = mockInferenceApi({
+    images: oldImages,
+    imageListDeferredByCall: { 2: oldRootPoll },
+    rootData: {
+      "/data/inference": { images: oldImages, reviews: {} },
+      "/new/root": { images: newImages, reviews: {} },
+    },
+  });
+  render(<InferencePage />);
+  expect(await screen.findByText("old.tif")).toBeInTheDocument();
+  await waitFor(() => expect(fetchMock.mock.calls.filter(
+    ([url]) => url === "/api/inference/images",
+  )).toHaveLength(2), { timeout: 1500 });
+
+  const rootInput = screen.getByLabelText("Root path");
+  fireEvent.change(rootInput, { target: { value: "/new/root" } });
+  fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+  expect(await screen.findByText("new.tif")).toBeInTheDocument();
+
+  await act(async () => {
+    oldRootPoll.reject(new Error("Old root image list failed."));
+    await oldRootPoll.promise.catch(() => {});
+    await Promise.resolve();
+  });
+
+  expect(screen.getByLabelText("Root path")).toHaveValue("/new/root");
+  expect(screen.getByText("new.tif")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 test("disables root changes while an inference job is active", async () => {

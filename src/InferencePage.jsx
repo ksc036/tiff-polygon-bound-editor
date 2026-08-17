@@ -128,13 +128,20 @@ export default function InferencePage() {
     imageListRequestIdRef.current = requestId;
     const requestGeneration = rootGenerationRef.current;
     const requestRoot = activeRootPathRef.current;
-    const payload = await readJsonResponse(
-      await fetch("/api/inference/images"),
-      "Unable to load inference images.",
-    );
-    if (!mountedRef.current || rootChangePendingRef.current ||
-        imageListRequestIdRef.current !== requestId || rootGenerationRef.current !== requestGeneration ||
-        activeRootPathRef.current !== requestRoot) {
+    const requestIsCurrent = () => mountedRef.current && !rootChangePendingRef.current &&
+      imageListRequestIdRef.current === requestId && rootGenerationRef.current === requestGeneration &&
+      activeRootPathRef.current === requestRoot;
+    let payload;
+    try {
+      payload = await readJsonResponse(
+        await fetch("/api/inference/images"),
+        "Unable to load inference images.",
+      );
+    } catch (loadError) {
+      if (!requestIsCurrent()) return null;
+      throw loadError;
+    }
+    if (!requestIsCurrent()) {
       return payload;
     }
     const nextImages = Array.isArray(payload.images) ? payload.images : [];

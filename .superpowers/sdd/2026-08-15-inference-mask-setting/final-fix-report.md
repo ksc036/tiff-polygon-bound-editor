@@ -155,3 +155,53 @@ The Vite production build also succeeded with 41 modules transformed.
 - `.superpowers/sdd/2026-08-15-inference-mask-setting/final-fix-report.md`
 
 `ce-compound` remained unavailable, so the existing async review learning was extended with the list-request generation rule and delayed old-root polling regression pattern.
+
+## P2 Stale List-error Residual
+
+### Finding
+
+The fulfilled image-list path checked request and root identity, but `fetch()` or `readJsonResponse()` could reject before reaching that check. Initial and polling callers caught the stale rejection while mounted and rendered its message on the newly selected root.
+
+### Fix
+
+- Reused one request-authority predicate for both fulfilled and rejected image-list requests.
+- Stale failures now resolve as ignored before caller error handlers run.
+- Failures from the latest request for the current confirmed root are rethrown unchanged, preserving existing error behavior.
+
+The regression holds an old-root polling request, switches to `/new/root`, rejects the old request, and verifies that the new root and row remain active without an alert.
+
+### TDD Evidence
+
+Red result:
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 23 passed (24)
+```
+
+The failure rendered `Old root image list failed.` after the new root was active.
+
+Final page result:
+
+```text
+Test Files  1 passed (1)
+Tests       24 passed (24)
+```
+
+Full verification:
+
+```text
+Test Files  30 passed (30)
+Tests       510 passed (510)
+```
+
+The Vite production build succeeded with 41 modules transformed.
+
+### Files Changed
+
+- `src/InferencePage.jsx`
+- `src/InferencePage.test.jsx`
+- `docs/solutions/ui-bugs/async-review-responses-must-match-active-selection.md`
+- `.superpowers/sdd/2026-08-15-inference-mask-setting/final-fix-report.md`
+
+`ce-compound` remained unavailable, so the existing async review learning now records that request identity must guard both fulfilled payloads and rejected promises.

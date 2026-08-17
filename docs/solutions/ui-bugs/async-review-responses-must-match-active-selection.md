@@ -51,6 +51,8 @@ Treat the confirmed root as part of every transient inference identity. Reject r
 
 Guard the image-list request that drives those states as well. Capture the confirmed root, root generation, and list request ID before fetching; apply the response only if all three are still current. Increment the generation and invalidate outstanding list requests when a root switch starts, not only after it succeeds, so an old polling response cannot re-confirm the prior root while the switch is in flight.
 
+Apply that authority check to rejected requests too. Since fetch and response parsing throw before a fulfilled-payload guard runs, catch inside the guarded request boundary: ignore the error when its captured identity is stale, but rethrow it unchanged when the request is still current so normal error reporting remains intact.
+
 An overlay also needs explicit render identity instead of a bare blob URL:
 
 ```jsx
@@ -75,6 +77,7 @@ Mounted-state checks prevent updates after unmount but do not establish which in
 - Make every action that consumes persisted edits await the same save promise and abort when it resolves unsuccessfully.
 - Include the confirmed root in transient identities and test switches between roots that intentionally reuse timestamp folders, filenames, and opaque ids.
 - Hold an old-root list poll across a root switch and assert that releasing it cannot restore the old root or rows.
+- Repeat stale-response tests with a delayed rejection; stale errors must be ignored while current-request errors retain their existing reporting path.
 - Store render identity beside object URLs and assert stale overlays disappear synchronously before replacement requests resolve.
 - Centralize numeric grid normalization at the service boundary and mirror it in UI requests; test one off-grid input through persistence and every derived artifact.
 - Use mounted checks for lifecycle safety and request identity checks for selection safety; they solve different races.
