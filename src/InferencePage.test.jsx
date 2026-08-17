@@ -301,6 +301,33 @@ test("keeps threshold and mask actions unavailable for a selected waiting source
   expect(screen.queryByLabelText("Saved ROI group")).not.toBeInTheDocument();
 });
 
+test("clears completed-only review controls and stale overlay when switching from a completed source to waiting", async () => {
+  const { fetchMock } = mockInferenceApi({
+    images: [
+      { id: "complete-a", timestampFolder: "002", imageFile: "reference.tif", status: "complete" },
+      { id: "waiting-a", timestampFolder: "003", imageFile: "waiting.tif", status: "waiting" },
+    ],
+  });
+
+  render(<InferencePage />);
+
+  const overlay = await screen.findByAltText("Binary mask overlay");
+  expect(overlay).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByLabelText("Original source image")).toHaveAttribute("width", "2"));
+
+  fireEvent.click(screen.getByRole("button", { name: /waiting\.tif/i }));
+
+  await waitFor(() => expect(screen.getByLabelText("Original source image")).toHaveAttribute("width", "2"));
+  expect(screen.getByLabelText("Threshold")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Generate masks" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Set other thresholds from reference" })).toBeDisabled();
+  expect(screen.queryByLabelText("Saved ROI group")).not.toBeInTheDocument();
+  expect(screen.queryByAltText("Binary mask overlay")).not.toBeInTheDocument();
+  expect(fetchMock.mock.calls.some(
+    ([url]) => url === "/api/inference/images/waiting-a/overlay?threshold=0.500",
+  )).toBe(false);
+});
+
 test("composites the source canvas and binary mask in one stable stage frame", async () => {
   mockInferenceApi();
   render(<InferencePage />);

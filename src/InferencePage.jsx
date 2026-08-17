@@ -446,7 +446,7 @@ export default function InferencePage() {
   }
 
   async function handleGenerateMasks() {
-    if (!completeImages.length || generating) return;
+    if (!activeCompleteImage || generating) return;
     setGenerating(true);
     setError("");
     setActionMessage("");
@@ -645,7 +645,7 @@ export default function InferencePage() {
             Next
           </button>
         </nav>
-        <button type="button" onClick={handleGenerateMasks} disabled={!completeImages.length || generating}>
+        <button type="button" onClick={handleGenerateMasks} disabled={!activeCompleteImage || generating}>
           Generate masks
         </button>
       </footer>
