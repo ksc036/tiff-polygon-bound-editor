@@ -328,6 +328,53 @@ test("starts inference with the configured server and polls the job to completio
   expect(fetchMock).toHaveBeenCalledWith("/api/inference/jobs/job-1", expect.objectContaining({ method: "GET" }));
 });
 
+test("stops an old job poll continuation after switching roots", async () => {
+  const oldJobList = deferred();
+  const oldImages = [{ id: "waiting-a", timestampFolder: "001", imageFile: "old.tif", status: "waiting" }];
+  const newImages = [{ id: "new-complete", timestampFolder: "101", imageFile: "new.tif", status: "complete" }];
+  const { fetchMock } = mockInferenceApi({
+    images: oldImages,
+    jobStatus: "complete",
+    imageListDeferredByCall: { 3: oldJobList },
+    rootData: {
+      "/data/inference": { images: oldImages, reviews: {} },
+      "/new/root": { images: newImages, reviews: {} },
+    },
+  });
+  render(<InferencePage />);
+  expect(await screen.findByText("old.tif")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Run inference" }));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(
+    ([url]) => url === "/api/inference/images",
+  )).toHaveLength(3));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Set root" })).toBeEnabled());
+
+  const rootInput = screen.getByLabelText("Root path");
+  fireEvent.change(rootInput, { target: { value: "/new/root" } });
+  fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+  expect(await screen.findByText("new.tif")).toBeInTheDocument();
+
+  await act(async () => {
+    oldJobList.reject(new Error("Old job image list failed."));
+    await oldJobList.promise.catch(() => {});
+    await Promise.resolve();
+  });
+
+  expect(screen.getByLabelText("Root path")).toHaveValue("/new/root");
+  expect(screen.getByText("new.tif")).toBeInTheDocument();
+  expect(screen.queryByText(/Inference complete:/)).not.toBeInTheDocument();
+  const pollCount = fetchMock.mock.calls.filter(
+    ([url]) => url === "/api/inference/jobs/job-1",
+  ).length;
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+  expect(fetchMock.mock.calls.filter(
+    ([url]) => url === "/api/inference/jobs/job-1",
+  )).toHaveLength(pollCount);
+});
+
 test("resumes status polling when the initial image rows are already sending", async () => {
   const { fetchMock } = mockInferenceApi({
     imageSnapshots: [

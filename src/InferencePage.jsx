@@ -308,22 +308,33 @@ export default function InferencePage() {
     }
   }
 
-  const pollJob = useCallback(async (jobId) => {
+  const pollJob = useCallback(async (jobId, existingContext = null) => {
+    const pollContext = existingContext ?? {
+      rootGeneration: rootGenerationRef.current,
+      rootPath: activeRootPathRef.current,
+    };
+    const pollIsCurrent = () => mountedRef.current
+      && !rootChangePendingRef.current
+      && rootGenerationRef.current === pollContext.rootGeneration
+      && activeRootPathRef.current === pollContext.rootPath;
+    if (!pollIsCurrent()) return;
+
     try {
       const payload = await readJsonResponse(
         await fetch(`/api/inference/jobs/${encodeURIComponent(jobId)}`, { method: "GET" }),
         "Unable to poll inference job.",
       );
-      if (!mountedRef.current) return;
+      if (!pollIsCurrent()) return;
       setJob(payload.job);
       await loadImages();
+      if (!pollIsCurrent()) return;
       if (TERMINAL_JOB_STATES.has(payload.job.status)) {
         setJobMessage(`Inference ${payload.job.status}: ${payload.job.completed} complete, ${payload.job.failed} failed`);
         return;
       }
-      pollTimerRef.current = setTimeout(() => pollJob(jobId), 250);
+      pollTimerRef.current = setTimeout(() => pollJob(jobId, pollContext), 250);
     } catch (pollError) {
-      if (mountedRef.current) setError(pollError.message);
+      if (pollIsCurrent()) setError(pollError.message);
     }
   }, [loadImages]);
 

@@ -1,7 +1,7 @@
 ---
 title: Async Review Responses Must Match the Active Selection
 date: 2026-08-15
-last_updated: 2026-08-15
+last_updated: 2026-08-17
 category: ui-bugs
 module: Inference review UI
 problem_type: ui_bug
@@ -53,6 +53,8 @@ Guard the image-list request that drives those states as well. Capture the confi
 
 Apply that authority check to rejected requests too. Since fetch and response parsing throw before a fulfilled-payload guard runs, catch inside the guarded request boundary: ignore the error when its captured identity is stale, but rethrow it unchanged when the request is still current so normal error reporting remains intact.
 
+Bind multi-request polling workflows to one immutable root context for their entire lifetime. Recheck that context before polling, after each awaited response, before publishing job state or messages, in error handling, and before scheduling the next iteration. A guarded child request returning an ignored value does not make its parent continuation authoritative again.
+
 An overlay also needs explicit render identity instead of a bare blob URL:
 
 ```jsx
@@ -78,6 +80,7 @@ Mounted-state checks prevent updates after unmount but do not establish which in
 - Include the confirmed root in transient identities and test switches between roots that intentionally reuse timestamp folders, filenames, and opaque ids.
 - Hold an old-root list poll across a root switch and assert that releasing it cannot restore the old root or rows.
 - Repeat stale-response tests with a delayed rejection; stale errors must be ignored while current-request errors retain their existing reporting path.
+- Hold a poll-triggered child refresh across a root switch, then release it and assert that the parent poll cannot publish a terminal message or schedule another iteration.
 - Store render identity beside object URLs and assert stale overlays disappear synchronously before replacement requests resolve.
 - Centralize numeric grid normalization at the service boundary and mirror it in UI requests; test one off-grid input through persistence and every derived artifact.
 - Use mounted checks for lifecycle safety and request identity checks for selection safety; they solve different races.

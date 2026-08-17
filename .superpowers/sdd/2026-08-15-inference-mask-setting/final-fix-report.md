@@ -205,3 +205,54 @@ The Vite production build succeeded with 41 modules transformed.
 - `.superpowers/sdd/2026-08-15-inference-mask-setting/final-fix-report.md`
 
 `ce-compound` remained unavailable, so the existing async review learning now records that request identity must guard both fulfilled payloads and rejected promises.
+
+## P2 Stale Job-poll Continuation Residual
+
+### Finding
+
+An old-root `pollJob()` could receive a job response, publish that job, and then wait on its image-list refresh. If a root switch invalidated the refresh, `loadImages()` correctly returned an ignored result, but the parent poll continuation still published the old terminal message or scheduled another old-root poll.
+
+### Fix
+
+- Captured the confirmed root path and root generation once when a polling chain starts.
+- Rechecked that immutable polling context before fetching, after the job response, after the image refresh, in error handling, and before terminal messaging or recursive scheduling.
+- Passed the same context into every scheduled poll so a later root cannot adopt an earlier polling chain.
+- Preserved normal active-root polling behavior.
+
+The regression holds the image-list refresh initiated by a completed old-root job poll, switches to `/new/root`, rejects the held refresh, and verifies that no old terminal message appears and no further old-job poll is scheduled.
+
+### TDD Evidence
+
+Red result:
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 24 passed (25)
+```
+
+The failure showed `Inference complete: 1 complete, 0 failed` on the new root after releasing the held old-root refresh.
+
+Final page result:
+
+```text
+Test Files  1 passed (1)
+Tests       25 passed (25)
+```
+
+Full verification:
+
+```text
+Test Files  30 passed (30)
+Tests       511 passed (511)
+```
+
+The Vite production build succeeded with 41 modules transformed.
+
+### Files Changed
+
+- `src/InferencePage.jsx`
+- `src/InferencePage.test.jsx`
+- `docs/solutions/ui-bugs/async-review-responses-must-match-active-selection.md`
+- `.superpowers/sdd/2026-08-15-inference-mask-setting/final-fix-report.md`
+
+`ce-compound` remained unavailable, so the durable async review note now records that parent polling continuations must retain and recheck the same root authority after every awaited child operation.
