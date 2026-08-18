@@ -19,12 +19,14 @@ For every source TIFF, the application may create:
 ```text
 <root>/<timestamp>/
   image/<source>.tif                       # never modified
-  probability-maps/<source>.probability.npy
-  probability-maps/<source>.mask-setting.json
-  mask/<source>.png                        # generated only by Generate masks
+  probability-maps/<source-file>.probability.npy
+  probability-maps/<source-file>.mask-setting.json
+  mask/<source-file>.png                   # generated only by Generate masks
 ```
 
-`<source>` is the source file stem. A probability map is a NumPy `.npy` file
+`<source-file>` is the entire source filename, including `.tif` or `.tiff`.
+This avoids collisions when one folder contains files such as `sample.tif` and
+`sample.tiff`. A probability map is a NumPy `.npy` file
 containing one C-order `float32` array of shape `[imageHeight, imageWidth]`.
 Every value is normalized collagen probability in the inclusive range `[0, 1]`.
 

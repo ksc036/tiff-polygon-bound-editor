@@ -29,13 +29,13 @@ afterEach(async () => {
 });
 
 describe("createStorage", () => {
-  test("scans folders with image and mask directories in name order", async () => {
+  test("scans folders with image directories in name order", async () => {
     const rootDir = await createTempRoot();
     await writeImage(rootDir, "zeta", "zeta.tif");
     await writeImage(rootDir, "alpha sample", "alpha.tiff");
     await writeImage(rootDir, "middle", "middle.tif");
-    await mkdir(path.join(rootDir, "missing-mask", "image"), { recursive: true });
-    await writeFile(path.join(rootDir, "missing-mask", "image", "ignored.tif"), "tiff placeholder");
+    await mkdir(path.join(rootDir, "image-only", "image"), { recursive: true });
+    await writeFile(path.join(rootDir, "image-only", "image", "image-only.tif"), "tiff placeholder");
     await mkdir(path.join(rootDir, "not-a-tiff", "image"), { recursive: true });
     await mkdir(path.join(rootDir, "not-a-tiff", "mask"), { recursive: true });
     await writeFile(path.join(rootDir, "not-a-tiff", "image", "ignored.png"), "not a tif");
@@ -44,8 +44,19 @@ describe("createStorage", () => {
 
     await expect(storage.scanImages()).resolves.toMatchObject([
       { id: "alpha sample", imageFolder: "alpha sample", imageFile: "alpha.tiff" },
+      { id: "image-only", imageFolder: "image-only", imageFile: "image-only.tif" },
       { id: "middle", imageFolder: "middle", imageFile: "middle.tif" },
       { id: "zeta", imageFolder: "zeta", imageFile: "zeta.tif" },
+    ]);
+  });
+
+  test("scans an image-only timestamp folder before any mask exists", async () => {
+    const rootDir = await createTempRoot();
+    await mkdir(path.join(rootDir, "T01", "image"), { recursive: true });
+    await writeFile(path.join(rootDir, "T01", "image", "frame.tif"), "tiff placeholder");
+
+    await expect(createStorage({ initialRoot: rootDir }).scanImages()).resolves.toMatchObject([
+      { id: "T01", imageFile: "frame.tif" },
     ]);
   });
 
@@ -153,10 +164,10 @@ describe("createStorage", () => {
     });
   });
 
-  test("rejects roots with no folders containing image and mask directories", async () => {
+  test("rejects roots with no folders containing TIFF images", async () => {
     const rootDir = await createTempRoot();
     await mkdir(path.join(rootDir, "not-ready", "image"), { recursive: true });
-    await writeFile(path.join(rootDir, "not-ready", "image", "frame.tif"), "tiff placeholder");
+    await writeFile(path.join(rootDir, "not-ready", "image", "frame.png"), "not a tif");
     const storage = createStorage();
 
     expect(() => storage.setRoot(rootDir)).toThrow(/no image folders/i);

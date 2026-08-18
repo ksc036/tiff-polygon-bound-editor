@@ -1,0 +1,468 @@
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import sharp from "sharp";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { createInferenceService, InferenceError, scanInferenceImages } from "./inferenceService.js";
+import { createStorage } from "./storage.js";
+
+const tempRoots = [];
+
+async function createTempRoot() {
+  const rootDir = await mkdtemp(path.join(tmpdir(), "inference-service-"));
+  tempRoots.push(rootDir);
+  return rootDir;
+}
+
+async function writeTiff(filePath, { width = 2, height = 2 } = {}) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await sharp(Buffer.alloc(width * height), { raw: { width, height, channels: 1 } })
+    .tiff({ compression: "none" })
+    .toFile(filePath);
+}
+
+function npyFixture({ width, height, values, descr = "<f4", fortranOrder = false }) {
+  const header = `{'descr': '${descr}', 'fortran_order': ${fortranOrder ? "True" : "False"}, 'shape': (${height}, ${width}), }`;
+  const prefixLength = 10;
+  const padding = (16 - ((prefixLength + header.length + 1) % 16)) % 16;
+  const encodedHeader = Buffer.from(`${header}${" ".repeat(padding)}\n`, "ascii");
+  const prefix = Buffer.from([0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59, 1, 0]);
+  const length = Buffer.alloc(2);
+  length.writeUInt16LE(encodedHeader.length);
+  const data = Buffer.alloc(values.length * 4);
+  values.forEach((value, index) => data.writeFloatLE(value, index * 4));
+  return Buffer.concat([prefix, length, encodedHeader, data]);
+}
+
+function npyResponse(values) {
+  return new Response(npyFixture(values), { headers: { "content-type": "application/x-npy" } });
+}
+
+async function setupService({ fetchImpl = vi.fn(), timestamps = ["T01", "T02"] } = {}) {
+  const rootDir = await createTempRoot();
+  for (const timestamp of timestamps) {
+    await writeTiff(path.join(rootDir, timestamp, "image", "frame.tif"));
+  }
+  const storage = createStorage({ initialRoot: rootDir });
+  const service = createInferenceService({ storage, fetchImpl });
+  return { rootDir, storage, service };
+}
+
+async function waitForJob(service, id) {
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    const job = service.getJob(id);
+    if (job.status !== "running") return job;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Inference job did not finish.");
+}
+
+async function waitFor(condition) {
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Condition did not become true.");
+}
+
+function imageByTimestamp(images, timestampFolder) {
+  const image = images.find((candidate) => candidate.timestampFolder === timestampFolder);
+  if (!image) throw new Error(`Missing ${timestampFolder}.`);
+  return image;
+}
+
+async function writeProbabilityMap(image, values, { width = 2, height = 2 } = {}) {
+  await mkdir(image.probabilityMapsDir, { recursive: true });
+  await writeFile(image.mapPath, npyFixture({ width, height, values }));
+}
+
+afterEach(async () => {
+  await Promise.all(tempRoots.splice(0).map((rootDir) => rm(rootDir, { recursive: true, force: true })));
+});
+
+describe("scanInferenceImages", () => {
+  test("discovers every sorted TIFF with opaque ids and full-filename-derived output paths", async () => {
+    const rootDir = await createTempRoot();
+    await writeTiff(path.join(rootDir, "T10", "image", "z.tiff"));
+    await writeTiff(path.join(rootDir, "T02", "image", "b.tif"));
+    await writeTiff(path.join(rootDir, "T02", "image", "a.tif"));
+    await writeFile(path.join(rootDir, "T02", "image", "ignored.png"), "not a TIFF");
+
+    const images = await scanInferenceImages(rootDir);
+
+    expect(images.map(({ timestampFolder, imageFile }) => [timestampFolder, imageFile])).toEqual([
+      ["T02", "a.tif"],
+      ["T02", "b.tif"],
+      ["T10", "z.tiff"],
+    ]);
+    expect(images.map((image) => Buffer.from(image.id, "base64url").toString("utf8").startsWith("["))).toEqual([true, true, true]);
+    expect(images[0]).toMatchObject({
+      probabilityMapsDir: path.join(rootDir, "T02", "probability-maps"),
+      mapPath: path.join(rootDir, "T02", "probability-maps", "a.tif.probability.npy"),
+      settingsPath: path.join(rootDir, "T02", "probability-maps", "a.tif.mask-setting.json"),
+      maskPath: path.join(rootDir, "T02", "mask", "a.tif.png"),
+    });
+  });
+
+  test("keeps .tif and .tiff artifacts distinct when their stems match", async () => {
+    const rootDir = await createTempRoot();
+    await writeTiff(path.join(rootDir, "T01", "image", "sample.tif"));
+    await writeTiff(path.join(rootDir, "T01", "image", "sample.tiff"));
+
+    const images = await scanInferenceImages(rootDir);
+
+    expect(images.map((image) => image.mapPath)).toEqual([
+      path.join(rootDir, "T01", "probability-maps", "sample.tif.probability.npy"),
+      path.join(rootDir, "T01", "probability-maps", "sample.tiff.probability.npy"),
+    ]);
+    expect(new Set(images.map((image) => image.settingsPath)).size).toBe(2);
+    expect(new Set(images.map((image) => image.maskPath)).size).toBe(2);
+  });
+});
+
+describe("createInferenceService", () => {
+  test("runs model requests serially and saves validated maps under probability-maps", async () => {
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    const fetchImpl = vi.fn(async () => {
+        activeRequests += 1;
+        maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeRequests -= 1;
+        return npyResponse({ width: 2, height: 2, values: [0, 0.5, 0.75, 1] });
+      });
+    const { service } = await setupService({ fetchImpl });
+
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "complete", completed: 2, failed: 0 });
+    const images = await service.listImages();
+
+    expect(maximumActiveRequests).toBe(1);
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ headers: { Accept: "application/x-npy" } });
+    expect(images.map((image) => image.status)).toEqual(["complete", "complete"]);
+    await expect(Promise.all(images.map((image) => access(image.mapPath)))).resolves.toHaveLength(2);
+  });
+
+  test("rejects a second start while the active job is still processing", async () => {
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    let releaseRequest;
+    const requestGate = new Promise((resolve) => {
+      releaseRequest = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      activeRequests += 1;
+      maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+      await requestGate;
+      activeRequests -= 1;
+      return npyResponse({ width: 2, height: 2, values: [0, 0, 1, 1] });
+    });
+    const { service } = await setupService({ fetchImpl });
+
+    const first = service.startJob({ serverUrl: "http://model:8080" });
+    await waitFor(() => fetchImpl.mock.calls.length === 1);
+    let secondJob;
+    let secondError;
+    try {
+      secondJob = service.startJob({ serverUrl: "http://model:8080" });
+    } catch (error) {
+      secondError = error;
+    }
+    releaseRequest();
+    await waitForJob(service, first.id);
+    if (secondJob) await waitForJob(service, secondJob.id);
+
+    expect(secondError).toMatchObject({ code: "JOB_IN_PROGRESS", message: "Inference is already running." });
+    expect(maximumActiveRequests).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  test("rejects root changes during an active job and clears transient state after a root change", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeTiff(path.join(firstRoot, "T01", "image", "frame.tif"));
+    await writeTiff(path.join(secondRoot, "T01", "image", "frame.tif"));
+    let releaseRequest;
+    const requestGate = new Promise((resolve) => {
+      releaseRequest = resolve;
+    });
+    const storage = createStorage({ initialRoot: firstRoot });
+    const fetchImpl = vi.fn(async () => {
+      await requestGate;
+      return new Response("unavailable", { status: 503 });
+    });
+    const service = createInferenceService({
+      storage,
+      fetchImpl,
+    });
+
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await waitFor(() => fetchImpl.mock.calls.length === 1);
+
+    await expect(service.changeRoot(() => storage.setRoot(secondRoot))).rejects.toMatchObject({
+      code: "JOB_IN_PROGRESS",
+    });
+    expect(storage.getRoot()).toBe(firstRoot);
+
+    releaseRequest();
+    await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "partial", failed: 1 });
+    expect((await service.listImages())[0]).toMatchObject({ status: "failed" });
+
+    await service.changeRoot(() => storage.setRoot(secondRoot));
+
+    expect((await service.listImages())[0]).toMatchObject({ status: "waiting" });
+    expect((await service.listImages())[0].id).toBe((await scanInferenceImages(firstRoot))[0].id);
+    expect(() => service.getJob(job.id)).toThrow(expect.objectContaining({ code: "JOB_NOT_FOUND" }));
+  });
+
+  test("continues a job after an HTTP failure without saving the failed source", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
+      .mockResolvedValueOnce(npyResponse({ width: 2, height: 2, values: [0, 0, 1, 1] }));
+    const { service } = await setupService({ fetchImpl });
+
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "partial", completed: 1, failed: 1 });
+    const images = await service.listImages();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(images.map((image) => image.status)).toEqual(["failed", "complete"]);
+    expect(images[0].message).toBe("Model inference failed.");
+    await expect(access(images[0].mapPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("rejects a successful response whose Content-Type is not application/x-npy", async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      npyFixture({ width: 2, height: 2, values: [0, 0, 1, 1] }),
+      { headers: { "content-type": "application/octet-stream" } },
+    ));
+    const { service } = await setupService({ timestamps: ["T01"], fetchImpl });
+
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "partial", completed: 0, failed: 1 });
+
+    const [image] = await service.listImages();
+    expect(image).toMatchObject({ status: "failed", message: "Model response must be an NPY file." });
+    await expect(access(image.mapPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("rejects dimension-mismatched model maps and keeps a prior validated map", async () => {
+    const { service } = await setupService({
+      timestamps: ["T01"],
+      fetchImpl: vi.fn(async () => npyResponse({ width: 3, height: 2, values: [0, 0, 0, 1, 1, 1] })),
+    });
+    const [image] = await service.listImages();
+    const priorMap = npyFixture({ width: 2, height: 2, values: [0, 0.25, 0.5, 1] });
+    await writeProbabilityMap(image, [0, 0.25, 0.5, 1]);
+
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await expect(waitForJob(service, job.id)).resolves.toMatchObject({ status: "partial", failed: 1 });
+
+    await expect(readFile(image.mapPath)).resolves.toEqual(priorMap);
+    expect((await service.listImages())[0]).toMatchObject({ status: "failed", message: "Model probability map dimensions do not match the source image." });
+  });
+
+  test("derives complete status from valid persisted maps after a service restart", async () => {
+    const { storage, service } = await setupService({
+      fetchImpl: vi.fn(async () => npyResponse({ width: 2, height: 2, values: [0, 0, 1, 1] })),
+    });
+    const job = service.startJob({ serverUrl: "http://model:8080" });
+    await waitForJob(service, job.id);
+
+    const restartedService = createInferenceService({ storage, fetchImpl: vi.fn() });
+    expect((await restartedService.listImages()).map((image) => image.status)).toEqual(["complete", "complete"]);
+  });
+
+  test("saves only a local threshold edit after explicit reference propagation", async () => {
+    const { service } = await setupService();
+    const images = await service.listImages();
+    await Promise.all(images.map((image) => writeProbabilityMap(image, [0, 0.5, 0.75, 1])));
+    const reference = imageByTimestamp(images, "T01");
+    const target = imageByTimestamp(images, "T02");
+
+    await service.saveThreshold(reference.id, { threshold: 0.5 });
+    await service.saveThreshold(target.id, { threshold: 0.723 });
+    await service.applyReferenceThresholds({ referenceId: reference.id });
+    await service.saveThreshold(target.id, { threshold: 0.811 });
+
+    await expect(service.loadReview(target.id)).resolves.toMatchObject({ threshold: 0.811 });
+    await expect(service.loadReview(reference.id)).resolves.toMatchObject({ threshold: 0.5 });
+  });
+
+  test("uses a matching valid ROI and falls back to whole-image matching for invalid destination bounds", async () => {
+    const { storage, service } = await setupService();
+    const images = await service.listImages();
+    const reference = imageByTimestamp(images, "T01");
+    const target = imageByTimestamp(images, "T02");
+    await writeProbabilityMap(reference, [1, 0, 0, 0]);
+    await writeProbabilityMap(target, [1, 0, 1, 0]);
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [{ id: "roi", name: "ROI", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }] }],
+    });
+    await storage.saveBounds("T02", {
+      width: 3,
+      height: 2,
+      groups: [{ id: "roi", name: "ROI", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }] }],
+    });
+    await service.saveThreshold(reference.id, { threshold: 0.5, roiGroupId: "roi" });
+
+    await service.applyReferenceThresholds({ referenceId: reference.id, roiGroupId: "roi" });
+
+    const referenceReview = await service.loadReview(reference.id, { roiGroupId: "roi" });
+    const targetSettings = JSON.parse(await readFile(target.settingsPath, "utf8"));
+    expect(referenceReview.roi).toMatchObject({ groupId: "roi", metrics: { areaFraction: 0.25 } });
+    expect(targetSettings).toMatchObject({ referenceId: reference.id, targetAreaFraction: 0.25, roiGroupId: null });
+    expect(targetSettings.threshold).toBe(0.001);
+  });
+
+  test("returns default review settings, optional ROI metrics, and a threshold overlay", async () => {
+    const { storage, service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+    await writeProbabilityMap(image, [0, 0.5, 0.75, 1]);
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [{ id: "roi", name: "ROI", points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }] }],
+    });
+
+    const review = await service.loadReview(image.id);
+    const overlay = await service.createOverlay(image.id, { threshold: 0.75 });
+
+    expect(review).toMatchObject({
+      threshold: 0.5,
+      width: 2,
+      height: 2,
+      wholeImage: { areaFraction: 0.75 },
+      groups: [{ id: "roi", name: "ROI" }],
+    });
+    expect(review.roi).toBeNull();
+    const metadata = await sharp(overlay).metadata();
+    expect(metadata).toMatchObject({ format: "png", width: 2, height: 2 });
+    await expect(access(image.settingsPath)).resolves.toBeUndefined();
+  });
+
+  test("uses a requested valid ROI for review metrics without changing saved settings", async () => {
+    const { storage, service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+    await writeProbabilityMap(image, [1, 0, 0, 0]);
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [
+        { id: "saved", points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }] },
+        { id: "requested", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 2 }, { x: 0, y: 2 }] },
+        { id: "invalid", points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] },
+      ],
+    });
+    await service.saveThreshold(image.id, { threshold: 0.5, roiGroupId: "saved" });
+
+    const saved = await service.loadReview(image.id, { roiGroupId: "saved" });
+    const requested = await service.loadReview(image.id, { roiGroupId: "requested" });
+    const missing = await service.loadReview(image.id, { roiGroupId: "missing" });
+    const invalid = await service.loadReview(image.id, { roiGroupId: "invalid" });
+
+    expect(saved.roi).toMatchObject({ groupId: "saved", metrics: { areaFraction: 0.25 } });
+    expect(requested.roi).toMatchObject({ groupId: "requested", metrics: { areaFraction: 0.25 } });
+    expect(requested.settings.roiGroupId).toBe("saved");
+    expect(missing.roi).toBeNull();
+    expect(invalid.roi).toBeNull();
+  });
+
+  test("uses an inference rectangle without reading the saved boundary groups", async () => {
+    const { storage, service } = await setupService();
+    const images = await service.listImages();
+    const reference = imageByTimestamp(images, "T01");
+    const target = imageByTimestamp(images, "T02");
+    await writeProbabilityMap(reference, [1, 0, 0, 0]);
+    await writeProbabilityMap(target, [1, 0, 1, 0]);
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [{ id: "unrelated", points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }] }],
+    });
+
+    const roi = { x: 0, y: 0, width: 1, height: 2 };
+    await service.saveThreshold(reference.id, { threshold: 0.5 });
+    const review = await service.loadReview(reference.id, { roi });
+    await service.applyReferenceThresholds({ referenceId: reference.id, roi });
+
+    expect(review.roi).toMatchObject({ rectangle: roi, metrics: { areaFraction: 0.25 } });
+    await expect(service.loadReview(reference.id)).resolves.toMatchObject({ roi: null });
+    const targetSettings = JSON.parse(await readFile(target.settingsPath, "utf8"));
+    expect(targetSettings).toMatchObject({ referenceId: reference.id, targetAreaFraction: 0.25, roiGroupId: null });
+  });
+
+  test("surfaces malformed saved settings without replacing the file with defaults", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+    await writeProbabilityMap(image, [0, 0.5, 0.75, 1]);
+    const malformedSettings = "{ not valid JSON";
+    await mkdir(image.probabilityMapsDir, { recursive: true });
+    await writeFile(image.settingsPath, malformedSettings);
+
+    await expect(service.loadReview(image.id)).rejects.toMatchObject({
+      code: "INVALID_SETTINGS",
+      message: "Saved threshold settings are invalid.",
+    });
+    await expect(readFile(image.settingsPath, "utf8")).resolves.toBe(malformedSettings);
+  });
+
+  test("writes one threshold mask for every complete source without changing probability maps", async () => {
+    const { service } = await setupService();
+    const images = await service.listImages();
+    await Promise.all(images.map((image) => writeProbabilityMap(image, [0, 0.5, 0.75, 1])));
+    const before = await Promise.all(images.map((image) => readFile(image.mapPath)));
+    await service.saveThreshold(images[0].id, { threshold: 0.75 });
+
+    await expect(service.generateMasks()).resolves.toEqual({ completed: 2, failed: 0 });
+    const after = await Promise.all(images.map((image) => readFile(image.mapPath)));
+    const firstMask = await sharp(images[0].maskPath).greyscale().raw().toBuffer({ resolveWithObject: true });
+
+    expect(after).toEqual(before);
+    expect([...firstMask.data]).toEqual([0, 0, 255, 255]);
+    await expect(access(images[1].maskPath)).resolves.toBeUndefined();
+  });
+
+  test("normalizes off-grid thresholds consistently for persistence, review, overlays, and masks", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+    await writeProbabilityMap(image, [0.1238, 0.1242, 0.5, 1]);
+
+    const saved = await service.saveThreshold(image.id, { threshold: 0.1236 });
+    const review = await service.loadReview(image.id);
+    const overlay = await service.createOverlay(image.id, { threshold: 0.1236 });
+    await service.generateMasks();
+
+    const persisted = JSON.parse(await readFile(image.settingsPath, "utf8"));
+    const overlayPixels = await sharp(overlay).ensureAlpha().raw().toBuffer();
+    const maskPixels = await sharp(image.maskPath).greyscale().raw().toBuffer();
+    expect(saved.threshold).toBe(0.124);
+    expect(persisted.threshold).toBe(0.124);
+    expect(review).toMatchObject({ threshold: 0.124, wholeImage: { pixelCount: 3 } });
+    expect([overlayPixels[3], overlayPixels[7], overlayPixels[11], overlayPixels[15]]).toEqual([0, 255, 255, 255]);
+    expect([...maskPixels]).toEqual([0, 255, 255, 255]);
+  });
+
+  test("rejects malformed threshold requests with a safe service error", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+
+    await expect(service.saveThreshold(image.id, { threshold: 2 })).rejects.toEqual(
+      expect.objectContaining({ code: "INVALID_THRESHOLD", message: "Threshold must be between 0 and 1." }),
+    );
+    expect(InferenceError).toBeTypeOf("function");
+  });
+
+  test("rejects null and non-object threshold and reference payloads with inference validation errors", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+
+    await expect(service.saveThreshold(image.id, null)).rejects.toMatchObject({ code: "INVALID_THRESHOLD" });
+    await expect(service.saveThreshold(image.id, [])).rejects.toMatchObject({ code: "INVALID_THRESHOLD" });
+    await expect(service.applyReferenceThresholds(null)).rejects.toMatchObject({ code: "INVALID_REFERENCE" });
+    await expect(service.applyReferenceThresholds(1)).rejects.toMatchObject({ code: "INVALID_REFERENCE" });
+  });
+});

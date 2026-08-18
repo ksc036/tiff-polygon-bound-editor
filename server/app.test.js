@@ -157,6 +157,30 @@ function jsonRequest(app, pathname, { method = "GET", body } = {}) {
   });
 }
 
+function npyFixture({ width, height, values }) {
+  const header = `{'descr': '<f4', 'fortran_order': False, 'shape': (${height}, ${width}), }`;
+  const prefixLength = 10;
+  const padding = (16 - ((prefixLength + header.length + 1) % 16)) % 16;
+  const encodedHeader = Buffer.from(`${header}${" ".repeat(padding)}\n`, "ascii");
+  const prefix = Buffer.from([0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59, 1, 0]);
+  const length = Buffer.alloc(2);
+  length.writeUInt16LE(encodedHeader.length);
+  const data = Buffer.alloc(values.length * 4);
+  values.forEach((value, index) => data.writeFloatLE(value, index * 4));
+  return Buffer.concat([prefix, length, encodedHeader, data]);
+}
+
+async function waitForInferenceJob(app, jobId) {
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    const response = await request(app, `/api/inference/jobs/${jobId}`);
+    if (response.status !== 200) throw new Error(`Inference job lookup failed with ${response.status}.`);
+    const { job } = await response.json();
+    if (job.status !== "running") return job;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Inference job did not finish.");
+}
+
 afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((rootDir) => rm(rootDir, { recursive: true, force: true })));
 });
@@ -299,6 +323,178 @@ describe("createApp", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");
+    await expect(response.text()).resolves.toContain("Built app");
+  });
+
+  test("starts a model job and exposes sending then complete inference rows", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    await writeImage(imageRoot, "T02", "frame002.tif");
+    const fetchImpl = vi.fn(async () => new Response(
+      npyFixture({ width: 2, height: 2, values: [0, 0.5, 0.75, 1] }),
+      { headers: { "content-type": "application/x-npy" } },
+    ));
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot, fetchImpl });
+
+    const start = await jsonRequest(app, "/api/inference/jobs", {
+      method: "POST",
+      body: { serverUrl: "http://model:8080" },
+    });
+
+    expect(start.status).toBe(202);
+    const job = await waitForInferenceJob(app, (await start.json()).job.id);
+    expect(job).toMatchObject({ status: "complete", total: 2, completed: 2, failed: 0 });
+    const images = await request(app, "/api/inference/images");
+    expect((await images.json()).images.every((image) => image.status === "complete")).toBe(true);
+  });
+
+  test.each([
+    ["/api/root", false],
+    ["/api/inference/root", false],
+    ["/api/root/select", true],
+    ["/api/inference/root/select", true],
+  ])("rejects %s root changes while inference is running", async (endpoint, usesPicker) => {
+    const appRoot = await createTempRoot();
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeImage(firstRoot, "T01", "frame001.tif");
+    await writeImage(secondRoot, "T01", "frame001.tif");
+    let releaseRequest;
+    const requestGate = new Promise((resolve) => {
+      releaseRequest = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await requestGate;
+      return new Response(
+        npyFixture({ width: 2, height: 2, values: [0, 0.5, 0.75, 1] }),
+        { headers: { "content-type": "application/x-npy" } },
+      );
+    });
+    const app = createApp({
+      rootDir: appRoot,
+      initialRoot: firstRoot,
+      fetchImpl,
+      ...(usesPicker ? { selectRoot: async () => secondRoot } : {}),
+    });
+    const start = await jsonRequest(app, "/api/inference/jobs", {
+      method: "POST",
+      body: { serverUrl: "http://model:8080" },
+    });
+    const jobId = (await start.json()).job.id;
+    for (let attempts = 0; attempts < 100 && fetchImpl.mock.calls.length === 0; attempts += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const rootChange = await jsonRequest(app, endpoint, {
+      method: "POST",
+      ...(usesPicker ? {} : { body: { rootPath: secondRoot } }),
+    });
+
+    expect(rootChange.status).toBe(409);
+    await expect(rootChange.json()).resolves.toEqual({
+      error: "Inference is already running.",
+      code: "JOB_IN_PROGRESS",
+    });
+    await expect((await request(app, "/api/inference/images")).json()).resolves.toMatchObject({ rootPath: firstRoot });
+
+    releaseRequest();
+    await waitForInferenceJob(app, jobId);
+  });
+
+  test("returns raw16 bytes for the exact opaque inference image id", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "a.tif", [10, 20, 30, 40]);
+    await writeImage(imageRoot, "T01", "b.tif", [500, 600, 700, 800]);
+    const app = createApp({ rootDir: appRoot, initialRoot: imageRoot });
+    const listResponse = await request(app, "/api/inference/images");
+    const { images } = await listResponse.json();
+    const selected = images.find((image) => image.imageFile === "b.tif");
+
+    const response = await request(app, `/api/inference/images/${selected.id}/raw16`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/octet-stream");
+    expect(response.headers.get("x-image-width")).toBe("2");
+    expect(response.headers.get("x-image-height")).toBe("2");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    expect([...new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2)]).toEqual([500, 600, 700, 800]);
+  });
+
+  test("uses the requested review ROI without changing its saved threshold settings", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: imageRoot });
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [{ id: "roi", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 2 }, { x: 0, y: 2 }] }],
+    });
+    const app = createApp({
+      rootDir: appRoot,
+      storage,
+      fetchImpl: vi.fn(async () => new Response(
+        npyFixture({ width: 2, height: 2, values: [1, 0, 0, 0] }),
+        { headers: { "content-type": "application/x-npy" } },
+      )),
+    });
+    const start = await jsonRequest(app, "/api/inference/jobs", {
+      method: "POST",
+      body: { serverUrl: "http://model:8080" },
+    });
+    const job = await waitForInferenceJob(app, (await start.json()).job.id);
+    expect(job.status).toBe("complete");
+    const { images } = await (await request(app, "/api/inference/images")).json();
+
+    const response = await request(app, `/api/inference/images/${images[0].id}/review?roiGroupId=roi`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      settings: { roiGroupId: null },
+      roi: { groupId: "roi", metrics: { areaFraction: 0.25 } },
+    });
+  });
+
+  test("maps null and non-object inference request bodies to stable validation errors", async () => {
+    const appRoot = await createTempRoot();
+    const app = createApp({ rootDir: appRoot });
+
+    const threshold = await jsonRequest(app, "/api/inference/images/missing/threshold", {
+      method: "PUT",
+      body: null,
+    });
+    const reference = await jsonRequest(app, "/api/inference/reference-thresholds", {
+      method: "POST",
+      body: 1,
+    });
+
+    expect(threshold.status).toBe(400);
+    await expect(threshold.json()).resolves.toEqual({ error: "Inference threshold is invalid.", code: "INVALID_THRESHOLD" });
+    expect(reference.status).toBe(400);
+    await expect(reference.json()).resolves.toEqual({ error: "Reference image is invalid.", code: "INVALID_REFERENCE" });
+  });
+
+  test("keeps strict JSON parsing for existing editor routes", async () => {
+    const appRoot = await createTempRoot();
+    const response = await jsonRequest(createApp({ rootDir: appRoot }), "/api/root", {
+      method: "POST",
+      body: null,
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Invalid JSON payload." });
+  });
+
+  test("serves the built SPA entry for /inferencePage", async () => {
+    const appRoot = await createTempRoot();
+    await mkdir(path.join(appRoot, "dist"));
+    await writeFile(path.join(appRoot, "dist", "index.html"), "<!doctype html><h1>Built app</h1>");
+
+    const response = await request(createApp({ rootDir: appRoot }), "/inferencePage");
+
+    expect(response.status).toBe(200);
     await expect(response.text()).resolves.toContain("Built app");
   });
 
