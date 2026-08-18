@@ -37,9 +37,18 @@ function normalizeThreshold(value) {
   return validThreshold(value) ? Math.round(value * THRESHOLD_GRID) / THRESHOLD_GRID : null;
 }
 
-function reviewUrl(imageId, roiGroupId) {
+function reviewUrl(imageId, roi) {
   const base = `/api/inference/images/${encodeURIComponent(imageId)}/review`;
-  return roiGroupId === undefined ? base : `${base}?roiGroupId=${encodeURIComponent(roiGroupId)}`;
+  return roi ? `${base}?roi=${encodeURIComponent(JSON.stringify(roi))}` : base;
+}
+
+function rectangleFromPoints(start, end) {
+  const left = Math.min(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  const right = Math.max(start.x, end.x);
+  const bottom = Math.max(start.y, end.y);
+  if (right <= left || bottom <= top) return null;
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 export default function InferencePage() {
@@ -49,7 +58,8 @@ export default function InferencePage() {
   const [activeImageId, setActiveImageId] = useState(null);
   const [stageView, setStageView] = useState("overlay");
   const [review, setReview] = useState(null);
-  const [selectedRoiByImage, setSelectedRoiByImage] = useState({});
+  const [inferenceRoi, setInferenceRoi] = useState(null);
+  const [draftInferenceRoi, setDraftInferenceRoi] = useState(null);
   const [thresholdDraft, setThresholdDraft] = useState("0.500");
   const [rawImage, setRawImage] = useState(null);
   const [overlay, setOverlay] = useState(null);
@@ -72,6 +82,7 @@ export default function InferencePage() {
   const reviewRequestIdRef = useRef(0);
   const rootChangePendingRef = useRef(false);
   const rootGenerationRef = useRef(0);
+  const roiDragStartRef = useRef(null);
   activeImageIdRef.current = activeImageId;
 
   const completeImages = useMemo(
@@ -89,9 +100,6 @@ export default function InferencePage() {
   const activeCompleteIndex = activeCompleteImage
     ? completeImages.findIndex((image) => image.id === activeCompleteImage.id)
     : -1;
-  const selectedRoiGroupId = activeCompleteImage
-    ? selectedRoiByImage[activeCompleteImage.id]
-    : undefined;
   const reviewReady = Boolean(activeCompleteImage && review?.id === activeCompleteImage.id);
   const rawImageMatchesActive = Boolean(
     rawImage && rawImage.imageId === activeImage?.id && rawImage.rootPath === activeRootPath,
@@ -104,6 +112,7 @@ export default function InferencePage() {
     ? overlay.url
     : null;
   const inferenceRunning = job?.status === "running";
+  const visibleInferenceRoi = draftInferenceRoi ?? inferenceRoi;
 
   const confirmActiveRoot = useCallback((nextRoot) => {
     const previousRoot = activeRootPathRef.current;
@@ -122,7 +131,8 @@ export default function InferencePage() {
     setImages([]);
     setActiveImageId(null);
     setReview(null);
-    setSelectedRoiByImage({});
+    setInferenceRoi(null);
+    setDraftInferenceRoi(null);
     setThresholdDraft("0.500");
     setRawImage(null);
     setOverlay(null);
@@ -168,11 +178,11 @@ export default function InferencePage() {
     return payload;
   }, [confirmActiveRoot]);
 
-  const loadReview = useCallback(async (imageId, roiGroupId) => {
+  const loadReview = useCallback(async (imageId, roi) => {
     const requestId = reviewRequestIdRef.current + 1;
     reviewRequestIdRef.current = requestId;
     const payload = await readJsonResponse(
-      await fetch(reviewUrl(imageId, roiGroupId)),
+      await fetch(reviewUrl(imageId, roi)),
       "Unable to load inference review.",
     );
     if (!mountedRef.current || activeImageIdRef.current !== imageId || reviewRequestIdRef.current !== requestId) {
@@ -180,13 +190,6 @@ export default function InferencePage() {
     }
     setReview(payload);
     setThresholdDraft((normalizeThreshold(Number(payload.threshold)) ?? 0.5).toFixed(3));
-    setSelectedRoiByImage((current) => {
-      if (Object.prototype.hasOwnProperty.call(current, imageId)) return current;
-      const groups = Array.isArray(payload.groups) ? payload.groups : [];
-      const savedGroupId = payload.settings?.roiGroupId;
-      const selected = groups.some((group) => group.id === savedGroupId) ? savedGroupId : "";
-      return { ...current, [imageId]: selected };
-    });
     return payload;
   }, []);
 
@@ -264,14 +267,14 @@ export default function InferencePage() {
     setReview(null);
     setError("");
 
-    loadReview(activeCompleteImage.id, selectedRoiGroupId).catch((loadError) => {
+    loadReview(activeCompleteImage.id, inferenceRoi).catch((loadError) => {
       if (alive) setError(loadError.message);
     });
 
     return () => {
       alive = false;
     };
-  }, [activeCompleteImage, loadReview, selectedRoiGroupId]);
+  }, [activeCompleteImage, inferenceRoi, loadReview]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -402,8 +405,6 @@ export default function InferencePage() {
     }
 
     const imageId = activeCompleteImage.id;
-    const roiGroupId = selectedRoiGroupId;
-
     setSavingThreshold(true);
     setError("");
     const savePromise = (async () => {
@@ -416,7 +417,7 @@ export default function InferencePage() {
             body: JSON.stringify({ threshold }),
           },
         ), "Unable to save threshold.");
-        await loadReview(imageId, roiGroupId);
+        await loadReview(imageId, inferenceRoi);
         if (showMessage) setActionMessage("Threshold saved for this image");
         return true;
       } catch (saveError) {
@@ -447,7 +448,7 @@ export default function InferencePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           referenceId: activeCompleteImage.id,
-          roiGroupId: selectedRoiGroupId || null,
+          roi: inferenceRoi,
         }),
       }), "Unable to propagate reference threshold.");
       setActionMessage(`Updated ${payload.updated} other threshold${payload.updated === 1 ? "" : "s"}`);
@@ -484,6 +485,44 @@ export default function InferencePage() {
     setActionMessage("");
     setOverlay(null);
     setActiveImageId(nextImage.id);
+  }
+
+  function stagePixelPoint(event) {
+    if (!rawImageMatchesActive || !rawImage?.width || !rawImage?.height) return null;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (!bounds.width || !bounds.height || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return null;
+    return {
+      x: Math.max(0, Math.min(rawImage.width, Math.round(((event.clientX - bounds.left) / bounds.width) * rawImage.width))),
+      y: Math.max(0, Math.min(rawImage.height, Math.round(((event.clientY - bounds.top) / bounds.height) * rawImage.height))),
+    };
+  }
+
+  function handleRoiPointerDown(event) {
+    if (stageView === "mask") return;
+    const point = stagePixelPoint(event);
+    if (!point) return;
+    roiDragStartRef.current = point;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setDraftInferenceRoi({ x: point.x, y: point.y, width: 0, height: 0 });
+  }
+
+  function handleRoiPointerMove(event) {
+    const start = roiDragStartRef.current;
+    if (!start) return;
+    const point = stagePixelPoint(event);
+    if (!point) return;
+    setDraftInferenceRoi(rectangleFromPoints(start, point) ?? { x: start.x, y: start.y, width: 0, height: 0 });
+  }
+
+  function commitRoiPointer(event) {
+    const start = roiDragStartRef.current;
+    if (!start) return;
+    roiDragStartRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    const point = stagePixelPoint(event);
+    const nextRoi = point ? rectangleFromPoints(start, point) : null;
+    setDraftInferenceRoi(null);
+    if (nextRoi) setInferenceRoi(nextRoi);
   }
 
   return (
@@ -544,7 +583,14 @@ export default function InferencePage() {
               <button type="button" key={value} aria-pressed={stageView === value} onClick={() => setStageView(value)}>{label}</button>
             ))}
           </div>
-          <div className="inference-stage-frame" aria-label="Composited source and binary mask">
+          <div
+            className="inference-stage-frame"
+            aria-label="Composited source and binary mask"
+            onPointerDown={handleRoiPointerDown}
+            onPointerMove={handleRoiPointerMove}
+            onPointerUp={commitRoiPointer}
+            onPointerCancel={commitRoiPointer}
+          >
             <canvas ref={canvasRef} hidden={stageView === "mask"} className="inference-source-canvas" aria-label="Original source image" />
             {stageView !== "original" && overlayUrl ? (
               <img
@@ -553,6 +599,18 @@ export default function InferencePage() {
                 alt={stageView === "mask" ? "Binary mask" : "Binary mask overlay"}
                 width={rawImage?.width ?? review?.width}
                 height={rawImage?.height ?? review?.height}
+              />
+            ) : null}
+            {visibleInferenceRoi && rawImageMatchesActive ? (
+              <div
+                className="inference-roi-rectangle"
+                aria-label="Common inference ROI"
+                style={{
+                  left: `${(visibleInferenceRoi.x / rawImage.width) * 100}%`,
+                  top: `${(visibleInferenceRoi.y / rawImage.height) * 100}%`,
+                  width: `${(visibleInferenceRoi.width / rawImage.width) * 100}%`,
+                  height: `${(visibleInferenceRoi.height / rawImage.height) * 100}%`,
+                }}
               />
             ) : null}
           </div>
@@ -600,23 +658,14 @@ export default function InferencePage() {
           ) : null}
         </dl>
 
-        {reviewReady && review?.groups?.length ? (
-          <label>
-            Saved ROI group
-            <select
-              value={selectedRoiGroupId ?? ""}
-              onChange={(event) => setSelectedRoiByImage((current) => ({
-                ...current,
-                [activeCompleteImage.id]: event.target.value,
-              }))}
-            >
-              <option value="">Whole image (no ROI)</option>
-              {review.groups.map((group) => (
-                <option value={group.id} key={group.id}>{group.name || group.id}</option>
-              ))}
-            </select>
-          </label>
-        ) : null}
+        <div className="inference-roi-status">
+          <span>{inferenceRoi ? "Common rectangle ROI" : "Whole image"}</span>
+          {inferenceRoi ? (
+            <button type="button" onClick={() => setInferenceRoi(null)}>
+              Clear ROI
+            </button>
+          ) : null}
+        </div>
 
         <button
           type="button"

@@ -155,9 +155,11 @@ function mockInferenceApi({
       const id = url.split("/")[4];
       if (reviewDeferredById[id]) await reviewDeferredById[id].promise;
       const review = clone(rootData?.[rootPath]?.reviews?.[id] ?? currentReviews[id] ?? reviews["complete-a"]);
-      const roiGroupId = new URLSearchParams(url.split("?")[1] ?? "").get("roiGroupId");
-      if (roiGroupId === "roi-b") {
-        review.roi = { groupId: "roi-b", metrics: { areaFraction: 0.75 } };
+      const roi = new URLSearchParams(url.split("?")[1] ?? "").get("roi");
+      if (roi) {
+        review.roi = { rectangle: JSON.parse(roi), metrics: { areaFraction: 0.75 } };
+      } else {
+        review.roi = null;
       }
       return jsonResponse(review);
     }
@@ -244,8 +246,7 @@ test("shows every source status and selects the first completed image for review
   expect(await screen.findByDisplayValue("0.500")).toBeInTheDocument();
   expect(screen.getByText("Whole image area fraction")).toBeInTheDocument();
   expect(await screen.findByText("25.00%")).toBeInTheDocument();
-  expect(await screen.findByText("ROI area fraction")).toBeInTheDocument();
-  expect(await screen.findByText("50.00%")).toBeInTheDocument();
+  expect(screen.queryByText("ROI area fraction")).not.toBeInTheDocument();
   for (const status of ["Waiting", "Sending", "Complete", "Failed"]) {
     expect(screen.getAllByText(status).length).toBeGreaterThan(0);
   }
@@ -480,7 +481,7 @@ test("normalizes off-grid threshold edits for overlay requests and persistence",
   expect(await screen.findByDisplayValue("0.724")).toBeInTheDocument();
 });
 
-test("propagates from the active image and selected ROI only on the explicit action", async () => {
+test("propagates from the active image using the whole image when no rectangle is set", async () => {
   const { fetchMock } = mockInferenceApi();
   render(<InferencePage />);
   await screen.findByDisplayValue("0.500");
@@ -490,7 +491,7 @@ test("propagates from the active image and selected ROI only on the explicit act
   await screen.findByText("Updated 1 other threshold");
   const propagationCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/inference/reference-thresholds");
   expect(propagationCalls).toHaveLength(1);
-  expect(requestBody(propagationCalls[0])).toEqual({ referenceId: "complete-a", roiGroupId: "roi-a" });
+  expect(requestBody(propagationCalls[0])).toEqual({ referenceId: "complete-a", roi: null });
 });
 
 test("waits for an edited reference threshold to persist before propagation", async () => {
@@ -512,17 +513,25 @@ test("waits for an edited reference threshold to persist before propagation", as
   )).toBe(true));
 });
 
-test("lets the user select a valid saved ROI without exposing editing controls", async () => {
+test("uses a dragged common rectangle for review and propagation", async () => {
   const { fetchMock } = mockInferenceApi();
   render(<InferencePage />);
-  const roiSelect = await screen.findByLabelText("Saved ROI group");
+  await screen.findByDisplayValue("0.500");
+  const frame = screen.getByLabelText("Composited source and binary mask");
+  vi.spyOn(frame, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 200 });
 
-  fireEvent.change(roiSelect, { target: { value: "roi-b" } });
+  fireEvent(frame, new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+  fireEvent(frame, new MouseEvent("pointermove", { bubbles: true, clientX: 100, clientY: 100 }));
+  fireEvent(frame, new MouseEvent("pointerup", { bubbles: true, clientX: 100, clientY: 100 }));
 
   await screen.findByText("75.00%");
-  expect(fetchMock.mock.calls.some(([url]) => url === "/api/inference/images/complete-a/review?roiGroupId=roi-b")).toBe(true);
-  expect(screen.queryByRole("button", { name: /add point/i })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: /edit ROI/i })).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Common inference ROI")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Set other thresholds from reference" }));
+  await screen.findByText("Updated 1 other threshold");
+  const propagationCall = fetchMock.mock.calls.find(([url]) => url === "/api/inference/reference-thresholds");
+  expect(requestBody(propagationCall)).toEqual({ referenceId: "complete-a", roi: { x: 0, y: 0, width: 1, height: 1 } });
+  fireEvent.click(screen.getByRole("button", { name: "Clear ROI" }));
+  expect(screen.getByText("Whole image")).toBeInTheDocument();
 });
 
 test("keeps the active image review when the previous request finishes later", async () => {

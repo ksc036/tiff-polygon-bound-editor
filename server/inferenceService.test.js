@@ -311,7 +311,7 @@ describe("createInferenceService", () => {
 
     await service.applyReferenceThresholds({ referenceId: reference.id, roiGroupId: "roi" });
 
-    const referenceReview = await service.loadReview(reference.id);
+    const referenceReview = await service.loadReview(reference.id, { roiGroupId: "roi" });
     const targetSettings = JSON.parse(await readFile(target.settingsPath, "utf8"));
     expect(referenceReview.roi).toMatchObject({ groupId: "roi", metrics: { areaFraction: 0.25 } });
     expect(targetSettings).toMatchObject({ referenceId: reference.id, targetAreaFraction: 0.25, roiGroupId: null });
@@ -359,7 +359,7 @@ describe("createInferenceService", () => {
     });
     await service.saveThreshold(image.id, { threshold: 0.5, roiGroupId: "saved" });
 
-    const saved = await service.loadReview(image.id);
+    const saved = await service.loadReview(image.id, { roiGroupId: "saved" });
     const requested = await service.loadReview(image.id, { roiGroupId: "requested" });
     const missing = await service.loadReview(image.id, { roiGroupId: "missing" });
     const invalid = await service.loadReview(image.id, { roiGroupId: "invalid" });
@@ -369,6 +369,30 @@ describe("createInferenceService", () => {
     expect(requested.settings.roiGroupId).toBe("saved");
     expect(missing.roi).toBeNull();
     expect(invalid.roi).toBeNull();
+  });
+
+  test("uses an inference rectangle without reading the saved boundary groups", async () => {
+    const { storage, service } = await setupService();
+    const images = await service.listImages();
+    const reference = imageByTimestamp(images, "T01");
+    const target = imageByTimestamp(images, "T02");
+    await writeProbabilityMap(reference, [1, 0, 0, 0]);
+    await writeProbabilityMap(target, [1, 0, 1, 0]);
+    await storage.saveBounds("T01", {
+      width: 2,
+      height: 2,
+      groups: [{ id: "unrelated", points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }] }],
+    });
+
+    const roi = { x: 0, y: 0, width: 1, height: 2 };
+    await service.saveThreshold(reference.id, { threshold: 0.5 });
+    const review = await service.loadReview(reference.id, { roi });
+    await service.applyReferenceThresholds({ referenceId: reference.id, roi });
+
+    expect(review.roi).toMatchObject({ rectangle: roi, metrics: { areaFraction: 0.25 } });
+    await expect(service.loadReview(reference.id)).resolves.toMatchObject({ roi: null });
+    const targetSettings = JSON.parse(await readFile(target.settingsPath, "utf8"));
+    expect(targetSettings).toMatchObject({ referenceId: reference.id, targetAreaFraction: 0.25, roiGroupId: null });
   });
 
   test("surfaces malformed saved settings without replacing the file with defaults", async () => {

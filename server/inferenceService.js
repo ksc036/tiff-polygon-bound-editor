@@ -147,6 +147,26 @@ function validPolygon(group, width, height) {
   return group.points.map(({ x, y }) => ({ x, y }));
 }
 
+function validRectangle(rectangle, width, height) {
+  if (!rectangle || typeof rectangle !== "object") return null;
+  const { x, y, width: rectangleWidth, height: rectangleHeight } = rectangle;
+  if (![x, y, rectangleWidth, rectangleHeight].every(Number.isInteger) ||
+      x < 0 || y < 0 || rectangleWidth <= 0 || rectangleHeight <= 0 ||
+      x + rectangleWidth > width || y + rectangleHeight > height) {
+    return null;
+  }
+  return { x, y, width: rectangleWidth, height: rectangleHeight };
+}
+
+function polygonForRectangle({ x, y, width, height }) {
+  return [
+    { x, y },
+    { x: x + width, y },
+    { x: x + width, y: y + height },
+    { x, y: y + height },
+  ];
+}
+
 function sourceDimensions(imagePath, maxImagePixels) {
   return sharp(imagePath, { limitInputPixels: resolveMaxImagePixels(maxImagePixels) })
     .metadata()
@@ -370,13 +390,19 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     const image = await imageFor(id);
     const map = await loadMap(image);
     const settings = await loadSettings(image, { persistDefault: true });
-    const { roiGroupId } = objectPayload(options);
-    const selectedRoiGroupId = roiGroupId === undefined
-      ? settings.roiGroupId
-      : typeof roiGroupId === "string"
-        ? roiGroupId
-        : null;
-    const polygon = await polygonForTimestamp(image.timestampFolder, selectedRoiGroupId, map.width, map.height);
+    const requestOptions = objectPayload(options);
+    const { roiGroupId } = requestOptions;
+    const hasRectangle = Object.prototype.hasOwnProperty.call(requestOptions, "roi");
+    const rectangle = hasRectangle ? validRectangle(requestOptions.roi, map.width, map.height) : null;
+    if (hasRectangle && requestOptions.roi !== null && !rectangle) {
+      throw inferenceError("INVALID_ROI", "ROI rectangle must be inside the image.", 400);
+    }
+    // Inference uses only its own common rectangle. Legacy group support remains
+    // available to direct API callers that explicitly pass roiGroupId.
+    const selectedRoiGroupId = !hasRectangle && typeof roiGroupId === "string" ? roiGroupId : null;
+    const polygon = rectangle
+      ? polygonForRectangle(rectangle)
+      : await polygonForTimestamp(image.timestampFolder, selectedRoiGroupId, map.width, map.height);
     const wholeImage = probabilityMetrics({ probabilityMap: map, threshold: settings.threshold });
     return {
       id: image.id,
@@ -391,20 +417,31 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       groups: await selectableGroups(image.timestampFolder, map.width, map.height),
       polygon,
       roi: polygon
-        ? { groupId: selectedRoiGroupId, metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon }) }
+        ? {
+          ...(rectangle ? { rectangle } : { groupId: selectedRoiGroupId }),
+          metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon }),
+        }
         : null,
     };
   }
 
   async function applyReferenceThresholds(payload = {}) {
-    const { referenceId, roiGroupId = null } = objectPayload(payload);
+    const requestPayload = objectPayload(payload);
+    const { referenceId, roiGroupId = null } = requestPayload;
     if (typeof referenceId !== "string" || (roiGroupId !== null && typeof roiGroupId !== "string")) {
       throw inferenceError("INVALID_REFERENCE", "Reference image is invalid.", 400);
     }
     const referenceImage = await imageFor(referenceId);
     const referenceMap = await loadMap(referenceImage);
     const referenceSettings = await loadSettings(referenceImage, { persistDefault: true });
-    const referencePolygon = await polygonForTimestamp(referenceImage.timestampFolder, roiGroupId, referenceMap.width, referenceMap.height);
+    const hasRectangle = Object.prototype.hasOwnProperty.call(requestPayload, "roi");
+    const rectangle = hasRectangle ? validRectangle(requestPayload.roi, referenceMap.width, referenceMap.height) : null;
+    if (hasRectangle && requestPayload.roi !== null && !rectangle) {
+      throw inferenceError("INVALID_ROI", "ROI rectangle must be inside the image.", 400);
+    }
+    const referencePolygon = rectangle
+      ? polygonForRectangle(rectangle)
+      : await polygonForTimestamp(referenceImage.timestampFolder, hasRectangle ? null : roiGroupId, referenceMap.width, referenceMap.height);
     const targetAreaFraction = probabilityMetrics({
       probabilityMap: referenceMap,
       threshold: referenceSettings.threshold,
@@ -414,17 +451,27 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     for (const image of await listImages()) {
       if (image.id === referenceId || image.status !== "complete") continue;
       const map = await loadMap(image);
-      const polygon = await polygonForTimestamp(image.timestampFolder, roiGroupId, map.width, map.height);
+      const targetRectangle = rectangle ? validRectangle(rectangle, map.width, map.height) : null;
+      if (rectangle && !targetRectangle) {
+        throw inferenceError("INVALID_ROI", "ROI rectangle does not fit every image.", 400);
+      }
+      const polygon = targetRectangle
+        ? polygonForRectangle(targetRectangle)
+        : await polygonForTimestamp(image.timestampFolder, hasRectangle ? null : roiGroupId, map.width, map.height);
       const { threshold } = closestThreshold({ probabilityMap: map, targetFraction: targetAreaFraction, polygon });
       await saveThreshold(image.id, {
         threshold,
         referenceId,
         targetAreaFraction,
-        roiGroupId: polygon ? roiGroupId : null,
+        roiGroupId: hasRectangle ? null : polygon ? roiGroupId : null,
       });
       updated += 1;
     }
-    return { updated, targetAreaFraction, roiGroupId: referencePolygon ? roiGroupId : null };
+    return {
+      updated,
+      targetAreaFraction,
+      ...(rectangle ? { roi: rectangle } : { roiGroupId: referencePolygon ? roiGroupId : null }),
+    };
   }
 
   async function createOverlay(id, { threshold } = {}) {

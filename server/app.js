@@ -51,7 +51,7 @@ const INFERENCE_ERROR_MESSAGES = {
   IMAGE_NOT_FOUND: "Inference image not found.",
   INVALID_SERVER_URL: "Model server URL is invalid.",
   INVALID_THRESHOLD: "Inference threshold is invalid.",
-  INVALID_ROI: "ROI group is invalid.",
+  INVALID_ROI: "ROI rectangle is invalid.",
   INVALID_REFERENCE: "Reference image is invalid.",
   INVALID_TARGET_FRACTION: "Target area fraction is invalid.",
   MISSING_PROBABILITY_MAP: "Probability map does not exist.",
@@ -444,9 +444,18 @@ export function createApp({
   app.get(
     "/api/inference/images/:id/review",
     asyncRoute(async (request, response) => {
-      const { map, polygon, ...review } = await inferenceService.loadReview(request.params.id, {
-        roiGroupId: request.query.roiGroupId,
-      });
+      let roi;
+      if (request.query.roi !== undefined) {
+        try {
+          roi = JSON.parse(request.query.roi);
+        } catch (error) {
+          throw new InferenceError("INVALID_ROI", "ROI rectangle must be valid JSON.", { status: 400, cause: error });
+        }
+      }
+      const options = request.query.roi !== undefined
+        ? { roi }
+        : { roiGroupId: request.query.roiGroupId };
+      const { map, polygon, ...review } = await inferenceService.loadReview(request.params.id, options);
       response.json(review);
     }),
   );
