@@ -84,6 +84,7 @@ export async function scanInferenceImages(rootPath) {
         probabilityMapsDir,
         mapPath: path.join(probabilityMapsDir, `${imageFile}.probability.npy`),
         settingsPath: path.join(probabilityMapsDir, `${imageFile}.mask-setting.json`),
+        cellBoundariesPath: path.join(timestampPath, "cell boundary", `${imageFile}.cell-boundaries.json`),
         maskPath: path.join(timestampPath, "mask", `${imageFile}.png`),
       });
     }
@@ -156,6 +157,54 @@ function validRectangle(rectangle, width, height) {
     return null;
   }
   return { x, y, width: rectangleWidth, height: rectangleHeight };
+}
+
+function emptyCellBoundaries(width, height) {
+  return {
+    schemaVersion: 1,
+    width,
+    height,
+    connectionMode: "input-order-cycle",
+    groups: [],
+  };
+}
+
+function cleanCellBoundaries(value, width, height) {
+  const payload = objectPayload(value);
+  if (!Array.isArray(payload.groups)) {
+    throw inferenceError("INVALID_CELL_BOUNDARIES", "Cell boundaries must include groups.", 400);
+  }
+
+  const ids = new Set();
+  const groups = payload.groups.map((group, index) => {
+    if (!group || typeof group !== "object" || typeof group.id !== "string" || !group.id || ids.has(group.id) ||
+        !Array.isArray(group.points)) {
+      throw inferenceError("INVALID_CELL_BOUNDARIES", "Cell boundary groups are invalid.", 400);
+    }
+    ids.add(group.id);
+    const pointIds = new Set();
+    const points = group.points.map((point) => {
+      if (!point || typeof point.id !== "string" || !point.id || pointIds.has(point.id) || !validPoint(point) ||
+          point.x < 0 || point.y < 0 || point.x > width || point.y > height) {
+        throw inferenceError("INVALID_CELL_BOUNDARIES", "Cell boundary points are invalid.", 400);
+      }
+      pointIds.add(point.id);
+      return { id: point.id, x: point.x, y: point.y };
+    });
+    return {
+      id: group.id,
+      name: typeof group.name === "string" && group.name.trim() ? group.name : `Boundary ${index + 1}`,
+      color: typeof group.color === "string" ? group.color : "#e11d48",
+      visible: group.visible !== false,
+      points,
+    };
+  });
+
+  return { ...emptyCellBoundaries(width, height), groups };
+}
+
+function cellBoundaryPolygons(bounds, width, height) {
+  return (bounds?.groups ?? []).map((group) => validPolygon(group, width, height)).filter(Boolean);
 }
 
 function polygonForRectangle({ x, y, width, height }) {
@@ -386,6 +435,38 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     });
   }
 
+  async function loadCellBoundariesForImage(image, width, height) {
+    let saved;
+    try {
+      saved = JSON.parse(await readFile(image.cellBoundariesPath, "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return emptyCellBoundaries(width, height);
+      throw inferenceError("INVALID_CELL_BOUNDARIES", "Saved cell boundaries are invalid.", 422, error);
+    }
+    try {
+      return cleanCellBoundaries(saved, width, height);
+    } catch (error) {
+      if (error instanceof InferenceError) {
+        throw inferenceError("INVALID_CELL_BOUNDARIES", "Saved cell boundaries are invalid.", 422, error);
+      }
+      throw error;
+    }
+  }
+
+  async function loadCellBoundaries(id) {
+    const image = await imageFor(id);
+    const dimensions = await sourceDimensions(image.imagePath, maxImagePixels);
+    return loadCellBoundariesForImage(image, dimensions.width, dimensions.height);
+  }
+
+  async function saveCellBoundaries(id, payload) {
+    const image = await imageFor(id);
+    const dimensions = await sourceDimensions(image.imagePath, maxImagePixels);
+    const bounds = cleanCellBoundaries(payload, dimensions.width, dimensions.height);
+    await writeAtomically(image.cellBoundariesPath, `${JSON.stringify(bounds, null, 2)}\n`);
+    return bounds;
+  }
+
   async function loadReview(id, options = {}) {
     const image = await imageFor(id);
     const map = await loadMap(image);
@@ -403,7 +484,9 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     const polygon = rectangle
       ? polygonForRectangle(rectangle)
       : await polygonForTimestamp(image.timestampFolder, selectedRoiGroupId, map.width, map.height);
-    const wholeImage = probabilityMetrics({ probabilityMap: map, threshold: settings.threshold });
+    const cellBoundaries = await loadCellBoundariesForImage(image, map.width, map.height);
+    const excludedPolygons = cellBoundaryPolygons(cellBoundaries, map.width, map.height);
+    const wholeImage = probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, excludedPolygons });
     return {
       id: image.id,
       timestampFolder: image.timestampFolder,
@@ -414,12 +497,13 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       settings,
       map,
       wholeImage,
+      cellBoundaries,
       groups: await selectableGroups(image.timestampFolder, map.width, map.height),
       polygon,
       roi: polygon
         ? {
           ...(rectangle ? { rectangle } : { groupId: selectedRoiGroupId }),
-          metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon, rectangle }),
+          metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon, rectangle, excludedPolygons }),
         }
         : null,
     };
@@ -442,11 +526,14 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     const referencePolygon = rectangle
       ? polygonForRectangle(rectangle)
       : await polygonForTimestamp(referenceImage.timestampFolder, hasRectangle ? null : roiGroupId, referenceMap.width, referenceMap.height);
+    const referenceCellBounds = await loadCellBoundariesForImage(referenceImage, referenceMap.width, referenceMap.height);
+    const referenceExcludedPolygons = cellBoundaryPolygons(referenceCellBounds, referenceMap.width, referenceMap.height);
     const targetAreaFraction = probabilityMetrics({
       probabilityMap: referenceMap,
       threshold: referenceSettings.threshold,
       polygon: referencePolygon,
       rectangle,
+      excludedPolygons: referenceExcludedPolygons,
     }).areaFraction;
     let updated = 0;
     for (const image of await listImages()) {
@@ -459,11 +546,13 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       const polygon = targetRectangle
         ? polygonForRectangle(targetRectangle)
         : await polygonForTimestamp(image.timestampFolder, hasRectangle ? null : roiGroupId, map.width, map.height);
+      const cellBounds = await loadCellBoundariesForImage(image, map.width, map.height);
       const { threshold } = closestThreshold({
         probabilityMap: map,
         targetFraction: targetAreaFraction,
         polygon,
         rectangle: targetRectangle,
+        excludedPolygons: cellBoundaryPolygons(cellBounds, map.width, map.height),
       });
       await saveThreshold(image.id, {
         threshold,
@@ -485,7 +574,14 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     if (normalizedThreshold === null) {
       throw inferenceError("INVALID_THRESHOLD", "Threshold must be between 0 and 1.", 400);
     }
-    return createProbabilityOverlayPng({ probabilityMap: await loadMap(await imageFor(id)), threshold: normalizedThreshold });
+    const image = await imageFor(id);
+    const map = await loadMap(image);
+    const cellBounds = await loadCellBoundariesForImage(image, map.width, map.height);
+    return createProbabilityOverlayPng({
+      probabilityMap: map,
+      threshold: normalizedThreshold,
+      excludedPolygons: cellBoundaryPolygons(cellBounds, map.width, map.height),
+    });
   }
 
   async function generateMasks() {
@@ -498,7 +594,12 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
           loadSettings(image, { persistDefault: true }),
         ]);
         await mkdir(path.dirname(image.maskPath), { recursive: true });
-        await writeThresholdMaskPng(image.maskPath, { probabilityMap: map, threshold: settings.threshold });
+        const cellBounds = await loadCellBoundariesForImage(image, map.width, map.height);
+        await writeThresholdMaskPng(image.maskPath, {
+          probabilityMap: map,
+          threshold: settings.threshold,
+          excludedPolygons: cellBoundaryPolygons(cellBounds, map.width, map.height),
+        });
         result.completed += 1;
       } catch {
         result.failed += 1;
@@ -590,6 +691,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     getJob,
     loadSourceRaw16,
     loadReview,
+    loadCellBoundaries,
+    saveCellBoundaries,
     saveThreshold,
     applyReferenceThresholds,
     createOverlay,

@@ -100,6 +100,7 @@ describe("scanInferenceImages", () => {
       probabilityMapsDir: path.join(rootDir, "T02", "probability-maps"),
       mapPath: path.join(rootDir, "T02", "probability-maps", "a.tif.probability.npy"),
       settingsPath: path.join(rootDir, "T02", "probability-maps", "a.tif.mask-setting.json"),
+      cellBoundariesPath: path.join(rootDir, "T02", "cell boundary", "a.tif.cell-boundaries.json"),
       maskPath: path.join(rootDir, "T02", "mask", "a.tif.png"),
     });
   });
@@ -121,6 +122,29 @@ describe("scanInferenceImages", () => {
 });
 
 describe("createInferenceService", () => {
+  test("loads missing cell boundaries and saves them only in the image cell boundary folder", async () => {
+    const { service } = await setupService({ timestamps: ["T01"] });
+    const [image] = await service.listImages();
+
+    await expect(service.loadCellBoundaries(image.id)).resolves.toMatchObject({ width: 2, height: 2, groups: [] });
+    const saved = await service.saveCellBoundaries(image.id, {
+      schemaVersion: 1,
+      width: 2,
+      height: 2,
+      connectionMode: "input-order-cycle",
+      groups: [{
+        id: "group-1",
+        name: "Boundary 1",
+        color: "#e11d48",
+        visible: true,
+        points: [{ id: "point-1", x: 1, y: 1 }],
+      }],
+    });
+
+    await expect(readFile(image.cellBoundariesPath, "utf8")).resolves.toContain("Boundary 1");
+    expect(saved.groups[0]).toMatchObject({ id: "group-1", visible: true });
+  });
+
   test("runs model requests serially and saves validated maps under probability-maps", async () => {
     let activeRequests = 0;
     let maximumActiveRequests = 0;

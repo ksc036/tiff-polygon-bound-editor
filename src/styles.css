@@ -1638,6 +1638,18 @@ input[type="range"] {
   background: #151b22;
 }
 
+.inference-stage-tools {
+  position: absolute;
+  z-index: 4;
+  top: 24px;
+  right: 24px;
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #35404c;
+  border-radius: 5px;
+  background: #151b22;
+}
+
 .inference-stage-modes button {
   min-width: 64px;
   min-height: 30px;
@@ -1654,6 +1666,25 @@ input[type="range"] {
 }
 
 .inference-stage-modes button[aria-pressed="true"] {
+  background: #2e5f8b;
+  color: #f5f9fc;
+}
+
+.inference-stage-tools button {
+  min-height: 30px;
+  border: 0;
+  border-right: 1px solid #35404c;
+  border-radius: 0;
+  background: transparent;
+  color: #b7c5d1;
+  font-size: 0.76rem;
+}
+
+.inference-stage-tools button:last-child {
+  border-right: 0;
+}
+
+.inference-stage-tools button[aria-pressed="true"] {
   background: #2e5f8b;
   color: #f5f9fc;
 }
@@ -1688,6 +1719,24 @@ input[type="range"] {
   border: 2px solid #64d6ff;
   background: rgb(100 214 255 / 12%);
   pointer-events: none;
+}
+
+.inference-cell-boundary-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.inference-cell-boundary-overlay circle {
+  pointer-events: all;
+  cursor: grab;
+}
+
+.inference-cell-boundary-overlay circle:active {
+  cursor: grabbing;
 }
 
 .inference-stage > p {
@@ -1856,6 +1905,108 @@ input[type="range"] {
   gap: 8px;
   color: #9faeba;
   font-size: 0.78rem;
+}
+
+.inference-cell-boundaries {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid #27313c;
+}
+
+.inference-cell-boundary-heading,
+.inference-cell-boundary-row,
+.inference-cell-point-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.inference-cell-boundary-heading {
+  justify-content: space-between;
+}
+
+.inference-cell-boundary-heading h3,
+.inference-cell-point-order strong {
+  margin: 0;
+  color: #cbd7e1;
+  font-size: 0.78rem;
+}
+
+.inference-cell-boundary-heading label,
+.inference-cell-boundary-row label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #9faeba;
+  font-size: 0.72rem;
+}
+
+.inference-cell-boundary-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.inference-cell-boundary-list,
+.inference-cell-point-order {
+  display: grid;
+  gap: 5px;
+}
+
+.inference-cell-boundary-row {
+  min-width: 0;
+}
+
+.inference-cell-boundary-row.active {
+  border-left: 2px solid #64d6ff;
+  padding-left: 5px;
+}
+
+.inference-cell-boundary-row > button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.inference-cell-boundary-color {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.inference-cell-point-row {
+  min-height: 27px;
+  padding: 2px 0;
+}
+
+.inference-cell-point-row.active {
+  background: #22303c;
+}
+
+.inference-cell-point-row span {
+  min-width: 22px;
+  color: #cbd7e1;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.inference-cell-point-row button {
+  min-width: 27px;
+  min-height: 24px;
+  padding: 0 6px;
+}
+
+.inference-cell-point-delete {
+  flex: 1;
+  color: #f0b9c2;
 }
 
 .inference-footer {

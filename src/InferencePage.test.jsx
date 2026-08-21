@@ -165,6 +165,22 @@ function mockInferenceApi({
       }
       return jsonResponse(review);
     }
+    if (url.startsWith("/api/inference/images/") && url.endsWith("/cell-boundaries") && method === "GET") {
+      const id = url.split("/")[4];
+      const review = currentReviews[id] ?? reviews["complete-a"];
+      return jsonResponse({
+        bounds: {
+          schemaVersion: 1,
+          width: review.width,
+          height: review.height,
+          connectionMode: "input-order-cycle",
+          groups: [],
+        },
+      });
+    }
+    if (url.startsWith("/api/inference/images/") && url.endsWith("/cell-boundaries") && method === "PUT") {
+      return jsonResponse({ bounds: JSON.parse(options.body) });
+    }
     if (url.startsWith("/api/inference/images/") && url.endsWith("/threshold") && method === "PUT") {
       const id = url.split("/")[4];
       const threshold = JSON.parse(options.body).threshold;
@@ -240,6 +256,29 @@ test("uses an independent inference layout with status list and review stage", a
   expect(screen.getByLabelText("Probability review stage")).toHaveClass("inference-stage");
 });
 
+test("edits and saves independent cell boundaries without changing the inference ROI", async () => {
+  const { fetchMock } = mockInferenceApi();
+  render(<InferencePage />);
+
+  const stage = await screen.findByLabelText("Composited source and binary mask");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Add boundary" })).toBeEnabled());
+  vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 100, height: 100 });
+  fireEvent.click(screen.getByRole("button", { name: "Add boundary" }));
+  expect(screen.getByRole("button", { name: "Boundary 1" })).toBeInTheDocument();
+
+  fireEvent.pointerMove(stage, { clientX: 20, clientY: 30 });
+  fireEvent.keyDown(window, { code: "KeyP" });
+  expect(await screen.findByText("Boundary 1 point order")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save cell boundaries" })).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Save cell boundaries" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    "/api/inference/images/complete-a/cell-boundaries",
+    expect.objectContaining({ method: "PUT" }),
+  ));
+  expect(screen.queryByText("ROI area fraction")).not.toBeInTheDocument();
+});
+
 test("shows every source status and selects the first completed image for review", async () => {
   mockInferenceApi();
 
@@ -247,7 +286,7 @@ test("shows every source status and selects the first completed image for review
 
   expect(await screen.findByDisplayValue("0.500")).toBeInTheDocument();
   expect(screen.getByText("Whole image area fraction")).toBeInTheDocument();
-  expect(await screen.findByText("25.00%")).toBeInTheDocument();
+  expect(await screen.findByText("75.00%")).toBeInTheDocument();
   expect(screen.queryByText("ROI area fraction")).not.toBeInTheDocument();
   for (const status of ["Waiting", "Sending", "Complete", "Failed"]) {
     expect(screen.getAllByText(status).length).toBeGreaterThan(0);
@@ -529,7 +568,7 @@ test("waits for an edited reference threshold to persist before propagation", as
   const { fetchMock } = mockInferenceApi({ thresholdSave });
   render(<InferencePage />);
   const threshold = await screen.findByLabelText("Threshold");
-  await screen.findByText("25.00%");
+  await screen.findByText("75.00%");
 
   fireEvent.change(threshold, { target: { value: "0.723" } });
   fireEvent.blur(threshold);
@@ -581,7 +620,7 @@ test("keeps the active image review when the previous request finishes later", a
 
   expect(screen.getByDisplayValue("0.610")).toBeInTheDocument();
   expect(screen.getByText("66.67%")).toBeInTheDocument();
-  expect(screen.queryByText("25.00%")).not.toBeInTheDocument();
+  expect(screen.queryByText("75.00%")).not.toBeInTheDocument();
 });
 
 test("navigates previous and next across completed images only and permits a manual override", async () => {
@@ -755,7 +794,7 @@ test("resets review and completed-job state when roots reuse the same image id",
   fireEvent.click(screen.getByRole("button", { name: "Set root" }));
 
   expect(await screen.findByDisplayValue("0.800")).toBeInTheDocument();
-  expect(screen.getByText("100.00%")).toBeInTheDocument();
+  expect(screen.getByText("50.00%")).toBeInTheDocument();
   expect(screen.queryByText(/Inference complete:/)).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Saved ROI group")).not.toBeInTheDocument();
 });

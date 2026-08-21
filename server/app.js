@@ -57,6 +57,7 @@ const INFERENCE_ERROR_MESSAGES = {
   MISSING_PROBABILITY_MAP: "Probability map does not exist.",
   INVALID_PROBABILITY_MAP: "Probability map is invalid.",
   INVALID_RESPONSE_TYPE: "Model response is invalid.",
+  INVALID_CELL_BOUNDARIES: "Cell boundaries are invalid.",
   DIMENSION_MISMATCH: "Probability map dimensions do not match the source image.",
   INVALID_SETTINGS: "Saved threshold settings are invalid.",
   INVALID_SOURCE: "Unable to read source image dimensions.",
@@ -438,6 +439,20 @@ export function createApp({
           "X-Pixel-Format": "uint16le",
         })
         .send(raw.buffer);
+    }),
+  );
+
+  app.get(
+    "/api/inference/images/:id/cell-boundaries",
+    asyncRoute(async (request, response) => {
+      response.json({ bounds: await inferenceService.loadCellBoundaries(request.params.id) });
+    }),
+  );
+
+  app.put(
+    "/api/inference/images/:id/cell-boundaries",
+    asyncRoute(async (request, response) => {
+      response.json({ bounds: await inferenceService.saveCellBoundaries(request.params.id, request.body) });
     }),
   );
 

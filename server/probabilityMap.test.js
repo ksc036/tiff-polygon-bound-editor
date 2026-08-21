@@ -100,6 +100,17 @@ describe("probability map computations", () => {
       areaFraction: 0,
     });
   });
+
+  test("excludes cell-boundary polygons from area and threshold calculations", () => {
+    const excludedPolygons = [square(0, 0, 1, 1)];
+    expect(probabilityMetrics({ probabilityMap: fixtureMap(), threshold: 0.5, excludedPolygons })).toEqual({
+      pixelCount: 1,
+      areaPx: 2,
+      areaFraction: 0.5,
+    });
+    expect(closestThreshold({ probabilityMap: fixtureMap(), targetFraction: 0.5, excludedPolygons }))
+      .toMatchObject({ threshold: 0.001, areaFraction: 0.5 });
+  });
 });
 
 describe("probability PNG output", () => {
@@ -125,5 +136,19 @@ describe("probability PNG output", () => {
       255, 0, 0, 255,
       0, 0, 0, 0,
     ]);
+  });
+
+  test("leaves excluded cell-boundary pixels transparent in overlays and zero in masks", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "probability-map-"));
+    tempRoots.push(root);
+    const outputPath = path.join(root, "mask.png");
+    const excludedPolygons = [square(0, 0, 1, 1)];
+    const png = await createProbabilityOverlayPng({ probabilityMap: fixtureMap(), threshold: 0.5, excludedPolygons });
+    await writeThresholdMaskPng(outputPath, { probabilityMap: fixtureMap(), threshold: 0.5, excludedPolygons });
+    const overlay = await sharp(png).ensureAlpha().raw().toBuffer();
+    const mask = await sharp(outputPath).greyscale().raw().toBuffer();
+
+    expect([overlay[3], overlay[7], overlay[11], overlay[15], overlay[19], overlay[23]]).toEqual([0, 0, 255, 0, 0, 0]);
+    expect([...mask]).toEqual([0, 0, 255, 0, 0, 0]);
   });
 });

@@ -1,9 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  addGroup,
+  addPoint,
+  clampBoundsToImage,
+  createEmptyBounds,
+  deleteGroup,
+  deleteNearestPoint,
+  deletePoint,
+  moveNearestPoint,
+  movePoint,
+  movePointOrder,
+  renameGroup,
+} from "./lib/editorState.js";
+import { findNearestSegment } from "./lib/geometry.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
 
 const DEFAULT_SERVER_URL = "http://localhost:8000";
 const TERMINAL_JOB_STATES = new Set(["complete", "partial", "failed"]);
 const THRESHOLD_GRID = 1000;
+const CELL_BOUNDARY_POINT_OPACITY_KEY = "inference-cell-boundary-point-opacity";
+const SEGMENT_INSERT_SCREEN_THRESHOLD = 8;
+const SEGMENT_INSERT_IMAGE_THRESHOLD = 8;
+const DEFAULT_POINT_OPACITY = 0.85;
 
 async function readJsonResponse(response, fallbackMessage) {
   if (!response.ok) {
@@ -51,7 +69,24 @@ function rectangleFromPoints(start, end) {
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
-function probabilityHistogram(probabilityMap, rectangle = null) {
+function cellBoundaryVisible(group) {
+  return group.visible !== false;
+}
+
+function pointInPolygon(point, polygon) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return false;
+  let inside = false;
+  for (let index = 0, previousIndex = polygon.length - 1; index < polygon.length; previousIndex = index, index += 1) {
+    const current = polygon[index];
+    const previous = polygon[previousIndex];
+    const intersects = current.y > point.y !== previous.y > point.y &&
+      point.x < ((previous.x - current.x) * (point.y - current.y)) / (previous.y - current.y) + current.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function probabilityHistogram(probabilityMap, rectangle = null, excludedPolygons = []) {
   const { width, height, data } = probabilityMap ?? {};
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 ||
       !Array.isArray(data) || data.length !== width * height) {
@@ -63,6 +98,7 @@ function probabilityHistogram(probabilityMap, rectangle = null) {
     for (let x = 0; x < width; x += 1) {
       if (rectangle && (x < rectangle.x || x >= rectangle.x + rectangle.width ||
           y < rectangle.y || y >= rectangle.y + rectangle.height)) continue;
+      if (excludedPolygons.some((polygon) => pointInPolygon({ x, y }, polygon))) continue;
       const value = data[y * width + x];
       if (!Number.isFinite(value) || value < 0 || value > 1) return null;
       bins[Math.min(1000, Math.floor(value * 1000 + 1e-9))] += 1;
@@ -70,6 +106,16 @@ function probabilityHistogram(probabilityMap, rectangle = null) {
     }
   }
   return { bins, areaPx };
+}
+
+function histogramMetrics(histogram, threshold) {
+  if (!histogram || !Number.isFinite(threshold) || histogram.areaPx <= 0) return null;
+  const startBin = Math.max(0, Math.min(1000, Math.ceil(threshold * 1000 - 1e-9)));
+  let pixelCount = 0;
+  for (let index = startBin; index < histogram.bins.length; index += 1) {
+    pixelCount += histogram.bins[index];
+  }
+  return { pixelCount, areaPx: histogram.areaPx, areaFraction: pixelCount / histogram.areaPx };
 }
 
 function ProbabilityHistogram({ label, histogram, threshold, disabled, onThresholdChange, onThresholdCommit }) {
@@ -121,6 +167,19 @@ export default function InferencePage() {
   const [review, setReview] = useState(null);
   const [inferenceRoi, setInferenceRoi] = useState(null);
   const [draftInferenceRoi, setDraftInferenceRoi] = useState(null);
+  const [cellBounds, setCellBounds] = useState(null);
+  const [activeCellBoundaryId, setActiveCellBoundaryId] = useState(null);
+  const [stageTool, setStageTool] = useState("roi");
+  const [showCellBoundaries, setShowCellBoundaries] = useState(true);
+  const [cellBoundaryPointOpacity, setCellBoundaryPointOpacity] = useState(() => {
+    const stored = Number(localStorage.getItem(CELL_BOUNDARY_POINT_OPACITY_KEY));
+    return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_POINT_OPACITY;
+  });
+  const [dragCellPoint, setDragCellPoint] = useState(null);
+  const [hoverCellPointId, setHoverCellPointId] = useState(null);
+  const [savingCellBoundaries, setSavingCellBoundaries] = useState(false);
+  const [cellBoundaryDirty, setCellBoundaryDirty] = useState(false);
+  const [overlayRevision, setOverlayRevision] = useState(0);
   const [thresholdDraft, setThresholdDraft] = useState("0.500");
   const [rawImage, setRawImage] = useState(null);
   const [overlay, setOverlay] = useState(null);
@@ -144,6 +203,7 @@ export default function InferencePage() {
   const rootChangePendingRef = useRef(false);
   const rootGenerationRef = useRef(0);
   const roiDragStartRef = useRef(null);
+  const cellPointerRef = useRef(null);
   activeImageIdRef.current = activeImageId;
 
   const completeImages = useMemo(
@@ -166,10 +226,18 @@ export default function InferencePage() {
     rawImage && rawImage.imageId === activeImage?.id && rawImage.rootPath === activeRootPath,
   );
   const activeThreshold = normalizeThreshold(Number(thresholdDraft));
+  const cellBoundaryPolygons = useMemo(
+    () => (cellBounds?.groups ?? []).filter((group) => group.points.length >= 3).map((group) => group.points),
+    [cellBounds],
+  );
   const clientHistograms = useMemo(() => ({
-    wholeImage: probabilityHistogram(review?.probabilityMap),
-    roi: inferenceRoi ? probabilityHistogram(review?.probabilityMap, inferenceRoi) : null,
-  }), [inferenceRoi, review?.probabilityMap]);
+    wholeImage: probabilityHistogram(review?.probabilityMap, null, cellBoundaryPolygons),
+    roi: inferenceRoi ? probabilityHistogram(review?.probabilityMap, inferenceRoi, cellBoundaryPolygons) : null,
+  }), [cellBoundaryPolygons, inferenceRoi, review?.probabilityMap]);
+  const clientAreaMetrics = useMemo(() => ({
+    wholeImage: histogramMetrics(clientHistograms.wholeImage, activeThreshold),
+    roi: histogramMetrics(clientHistograms.roi, activeThreshold),
+  }), [activeThreshold, clientHistograms]);
   const overlayUrl = reviewReady && overlay &&
     overlay.rootPath === activeRootPath &&
     overlay.imageId === activeCompleteImage?.id &&
@@ -178,6 +246,10 @@ export default function InferencePage() {
     : null;
   const inferenceRunning = job?.status === "running";
   const visibleInferenceRoi = draftInferenceRoi ?? inferenceRoi;
+  const activeCellBoundary = cellBounds?.groups.find((group) => group.id === activeCellBoundaryId) ?? null;
+  const visibleCellBoundaries = showCellBoundaries
+    ? (cellBounds?.groups ?? []).filter(cellBoundaryVisible)
+    : [];
 
   const confirmActiveRoot = useCallback((nextRoot) => {
     const previousRoot = activeRootPathRef.current;
@@ -198,6 +270,11 @@ export default function InferencePage() {
     setReview(null);
     setInferenceRoi(null);
     setDraftInferenceRoi(null);
+    setCellBounds(null);
+    setActiveCellBoundaryId(null);
+    setCellBoundaryDirty(false);
+    setDragCellPoint(null);
+    setHoverCellPointId(null);
     setThresholdDraft("0.500");
     setRawImage(null);
     setOverlay(null);
@@ -323,6 +400,37 @@ export default function InferencePage() {
   }, [activeImage, activeRootPath]);
 
   useEffect(() => {
+    if (!activeImage) {
+      setCellBounds(null);
+      setActiveCellBoundaryId(null);
+      setCellBoundaryDirty(false);
+      return undefined;
+    }
+
+    let alive = true;
+    setCellBounds(null);
+    setActiveCellBoundaryId(null);
+    setCellBoundaryDirty(false);
+    setDragCellPoint(null);
+    setHoverCellPointId(null);
+    fetch(`/api/inference/images/${encodeURIComponent(activeImage.id)}/cell-boundaries`)
+      .then((response) => readJsonResponse(response, "Unable to load cell boundaries."))
+      .then((payload) => {
+        if (!alive || !payload?.bounds) return;
+        const bounds = payload.bounds;
+        setCellBounds(clampBoundsToImage(bounds, bounds.width, bounds.height));
+        setActiveCellBoundaryId(bounds.groups?.[0]?.id ?? null);
+      })
+      .catch((loadError) => {
+        if (alive) setError(loadError.message);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [activeImage, activeRootPath]);
+
+  useEffect(() => {
     if (!activeCompleteImage) {
       setReview(null);
       return undefined;
@@ -379,7 +487,7 @@ export default function InferencePage() {
       alive = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [activeCompleteImage, activeRootPath, reviewReady, thresholdDraft]);
+  }, [activeCompleteImage, activeRootPath, overlayRevision, reviewReady, thresholdDraft]);
 
   async function applyRoot(endpoint, body) {
     rootChangePendingRef.current = true;
@@ -518,6 +626,7 @@ export default function InferencePage() {
     setError("");
     setActionMessage("");
     try {
+      if (cellBoundaryDirty && !await saveCellBoundaries()) return;
       if (!await persistThreshold({ showMessage: false })) return;
       const payload = await readJsonResponse(await fetch("/api/inference/reference-thresholds", {
         method: "POST",
@@ -542,6 +651,7 @@ export default function InferencePage() {
     setError("");
     setActionMessage("");
     try {
+      if (cellBoundaryDirty && !await saveCellBoundaries()) return;
       if (!await persistThreshold({ showMessage: false })) return;
       const payload = await readJsonResponse(await fetch("/api/inference/generate-masks", {
         method: "POST",
@@ -563,34 +673,163 @@ export default function InferencePage() {
     setActiveImageId(nextImage.id);
   }
 
+  useEffect(() => {
+    localStorage.setItem(CELL_BOUNDARY_POINT_OPACITY_KEY, String(cellBoundaryPointOpacity));
+  }, [cellBoundaryPointOpacity]);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.target instanceof HTMLElement && (event.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName))) {
+        return;
+      }
+      if (event.code === "KeyP") {
+        event.preventDefault();
+        addCellBoundaryPoint();
+      } else if (event.code === "KeyD") {
+        event.preventDefault();
+        mutateCellBounds((current) => deleteNearestPoint(current, activeCellBoundaryId, cellPointerRef.current));
+      } else if (event.code === "KeyM") {
+        event.preventDefault();
+        mutateCellBounds((current) => moveNearestPoint(current, activeCellBoundaryId, cellPointerRef.current));
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  });
+
+  function mutateCellBounds(mutator) {
+    setCellBounds((current) => {
+      if (!current) return current;
+      const next = mutator(current);
+      if (next !== current) setCellBoundaryDirty(true);
+      return next;
+    });
+  }
+
+  function addCellBoundary() {
+    mutateCellBounds((current) => {
+      const next = addGroup(current);
+      const group = next.groups[next.groups.length - 1];
+      setActiveCellBoundaryId(group.id);
+      return renameGroup(next, group.id, `Boundary ${next.groups.length}`);
+    });
+    setStageTool("boundary");
+  }
+
+  function deleteCellBoundary() {
+    if (!activeCellBoundaryId) return;
+    mutateCellBounds((current) => {
+      const next = deleteGroup(current, activeCellBoundaryId);
+      setActiveCellBoundaryId(next.groups[0]?.id ?? null);
+      return next;
+    });
+    setHoverCellPointId(null);
+  }
+
+  function addCellBoundaryPoint(point = cellPointerRef.current) {
+    if (!point || !cellBounds) return;
+    mutateCellBounds((current) => {
+      let next = current;
+      let groupId = activeCellBoundaryId;
+      if (!groupId) {
+        next = addGroup(current);
+        const group = next.groups[next.groups.length - 1];
+        groupId = group.id;
+        next = renameGroup(next, groupId, `Boundary ${next.groups.length}`);
+        setActiveCellBoundaryId(groupId);
+      }
+      const group = next.groups.find((candidate) => candidate.id === groupId);
+      const insertIndex = group?.points.length >= 2
+        ? findNearestSegment(group.points, point, cellSegmentInsertThresholdSquared())?.insertIndex ?? null
+        : null;
+      return addPoint(next, groupId, point, { insertIndex });
+    });
+  }
+
+  function cellSegmentInsertThresholdSquared() {
+    const rect = canvasRef.current?.getBoundingClientRect?.();
+    if (!rawImage || !rect?.width || !rect?.height) {
+      return SEGMENT_INSERT_IMAGE_THRESHOLD ** 2;
+    }
+    const unitsPerScreenPixel = Math.max(rawImage.width / rect.width, rawImage.height / rect.height);
+    return (SEGMENT_INSERT_SCREEN_THRESHOLD * unitsPerScreenPixel) ** 2;
+  }
+
+  async function saveCellBoundaries() {
+    if (!activeImage || !cellBounds || savingCellBoundaries) return false;
+    setSavingCellBoundaries(true);
+    setError("");
+    try {
+      const payload = await readJsonResponse(await fetch(
+        `/api/inference/images/${encodeURIComponent(activeImage.id)}/cell-boundaries`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cellBounds),
+        },
+      ), "Unable to save cell boundaries.");
+      setCellBounds(payload.bounds);
+      setCellBoundaryDirty(false);
+      setOverlay(null);
+      setOverlayRevision((current) => current + 1);
+      if (activeCompleteImage?.id === activeImage.id) await loadReview(activeImage.id, inferenceRoi);
+      setActionMessage("Cell boundaries saved for this image");
+      return true;
+    } catch (saveError) {
+      setError(saveError.message);
+      return false;
+    } finally {
+      setSavingCellBoundaries(false);
+    }
+  }
+
   function stagePixelPoint(event) {
     if (!rawImageMatchesActive || !rawImage?.width || !rawImage?.height) return null;
     const bounds = event.currentTarget.getBoundingClientRect();
     if (!bounds.width || !bounds.height || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return null;
+    const scale = Math.min(bounds.width / rawImage.width, bounds.height / rawImage.height);
+    const renderedWidth = rawImage.width * scale;
+    const renderedHeight = rawImage.height * scale;
+    const left = bounds.left + (bounds.width - renderedWidth) / 2;
+    const top = bounds.top + (bounds.height - renderedHeight) / 2;
     return {
-      x: Math.max(0, Math.min(rawImage.width, Math.round(((event.clientX - bounds.left) / bounds.width) * rawImage.width))),
-      y: Math.max(0, Math.min(rawImage.height, Math.round(((event.clientY - bounds.top) / bounds.height) * rawImage.height))),
+      x: Math.max(0, Math.min(rawImage.width, Math.round(((event.clientX - left) / renderedWidth) * rawImage.width))),
+      y: Math.max(0, Math.min(rawImage.height, Math.round(((event.clientY - top) / renderedHeight) * rawImage.height))),
     };
   }
 
   function handleRoiPointerDown(event) {
-    if (stageView === "mask") return;
+    if (stageView === "mask" && stageTool !== "boundary") return;
     const point = stagePixelPoint(event);
     if (!point) return;
+    cellPointerRef.current = point;
+    if (stageTool === "boundary") return;
     roiDragStartRef.current = point;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setDraftInferenceRoi({ x: point.x, y: point.y, width: 0, height: 0 });
   }
 
   function handleRoiPointerMove(event) {
+    const point = stagePixelPoint(event);
+    if (point) cellPointerRef.current = point;
+    if (dragCellPoint && point) {
+      mutateCellBounds((current) => movePoint(current, dragCellPoint.groupId, dragCellPoint.pointId, point));
+      return;
+    }
+    if (stageTool === "boundary") return;
     const start = roiDragStartRef.current;
     if (!start) return;
-    const point = stagePixelPoint(event);
     if (!point) return;
     setDraftInferenceRoi(rectangleFromPoints(start, point) ?? { x: start.x, y: start.y, width: 0, height: 0 });
   }
 
   function commitRoiPointer(event) {
+    if (dragCellPoint) {
+      setDragCellPoint(null);
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      return;
+    }
+    if (stageTool === "boundary") return;
     const start = roiDragStartRef.current;
     if (!start) return;
     roiDragStartRef.current = null;
@@ -659,6 +898,10 @@ export default function InferencePage() {
               <button type="button" key={value} aria-pressed={stageView === value} onClick={() => setStageView(value)}>{label}</button>
             ))}
           </div>
+          <div className="inference-stage-tools" role="group" aria-label="Stage tool">
+            <button type="button" aria-pressed={stageTool === "roi"} onClick={() => setStageTool("roi")}>ROI</button>
+            <button type="button" aria-pressed={stageTool === "boundary"} onClick={() => setStageTool("boundary")}>Cell boundary</button>
+          </div>
           <div
             className="inference-stage-frame"
             aria-label="Composited source and binary mask"
@@ -688,6 +931,48 @@ export default function InferencePage() {
                   height: `${(visibleInferenceRoi.height / rawImage.height) * 100}%`,
                 }}
               />
+            ) : null}
+            {rawImageMatchesActive && visibleCellBoundaries.length ? (
+              <svg
+                className="inference-cell-boundary-overlay"
+                viewBox={`0 0 ${rawImage.width} ${rawImage.height}`}
+                role="img"
+                aria-label="Cell boundary overlay"
+              >
+                {visibleCellBoundaries.map((boundary) => {
+                  const pointString = boundary.points.map((point) => `${point.x},${point.y}`).join(" ");
+                  return (
+                    <g key={boundary.id} opacity={cellBoundaryPointOpacity}>
+                      {boundary.points.length >= 3 ? (
+                        <polygon points={pointString} fill={boundary.color} fillOpacity="0.12" stroke={boundary.color} strokeWidth="1.5" />
+                      ) : (
+                        <polyline points={pointString} fill="none" stroke={boundary.color} strokeWidth="1.5" />
+                      )}
+                      {boundary.points.map((point) => (
+                        <circle
+                          key={point.id}
+                          aria-label={`Cell boundary vertex ${point.id}`}
+                          className={hoverCellPointId === point.id ? "highlighted" : undefined}
+                          cx={point.x}
+                          cy={point.y}
+                          r={hoverCellPointId === point.id ? "5" : "3"}
+                          fill={boundary.color}
+                          stroke="#ffffff"
+                          strokeWidth={hoverCellPointId === point.id ? "2" : "1"}
+                          onPointerDown={(event) => {
+                            event.stopPropagation();
+                            event.preventDefault();
+                            event.currentTarget.setPointerCapture?.(event.pointerId);
+                            setActiveCellBoundaryId(boundary.id);
+                            setStageTool("boundary");
+                            setDragCellPoint({ groupId: boundary.id, pointId: point.id });
+                          }}
+                        />
+                      ))}
+                    </g>
+                  );
+                })}
+              </svg>
             ) : null}
           </div>
           {stageView !== "original" && !activeCompleteImage ? <p>Probability map is unavailable for this image.</p> : null}
@@ -745,12 +1030,12 @@ export default function InferencePage() {
         <dl>
           <div>
             <dt>Whole image area fraction</dt>
-            <dd>{fractionLabel(review?.wholeImage?.areaFraction)}</dd>
+            <dd>{fractionLabel(clientAreaMetrics.wholeImage?.areaFraction ?? review?.wholeImage?.areaFraction)}</dd>
           </div>
           {review?.roi ? (
             <div>
               <dt>ROI area fraction</dt>
-              <dd>{fractionLabel(review.roi.metrics?.areaFraction)}</dd>
+              <dd>{fractionLabel(clientAreaMetrics.roi?.areaFraction ?? review.roi.metrics?.areaFraction)}</dd>
             </div>
           ) : null}
         </dl>
@@ -763,6 +1048,65 @@ export default function InferencePage() {
             </button>
           ) : null}
         </div>
+
+        <section className="inference-cell-boundaries" aria-label="Cell boundaries">
+          <div className="inference-cell-boundary-heading">
+            <h3>Cell boundaries</h3>
+            <label>
+              <input type="checkbox" checked={showCellBoundaries} onChange={(event) => setShowCellBoundaries(event.target.checked)} />
+              Show all
+            </label>
+          </div>
+          <div className="inference-cell-boundary-actions">
+            <button type="button" onClick={addCellBoundary} disabled={!cellBounds}>Add boundary</button>
+            <button type="button" onClick={saveCellBoundaries} disabled={!cellBounds || !cellBoundaryDirty || savingCellBoundaries}>
+              {savingCellBoundaries ? "Saving" : "Save cell boundaries"}
+            </button>
+          </div>
+          <div className="inference-cell-boundary-list">
+            {cellBounds?.groups.map((boundary) => (
+              <div className={boundary.id === activeCellBoundaryId ? "inference-cell-boundary-row active" : "inference-cell-boundary-row"} key={boundary.id}>
+                <button type="button" onClick={() => { setActiveCellBoundaryId(boundary.id); setStageTool("boundary"); }}>
+                  <span className="inference-cell-boundary-color" style={{ background: boundary.color }} />
+                  {boundary.name}
+                </button>
+                <label title="Show this boundary">
+                  <input
+                    type="checkbox"
+                    checked={cellBoundaryVisible(boundary)}
+                    onChange={(event) => mutateCellBounds((current) => ({
+                      ...current,
+                      groups: current.groups.map((group) => group.id === boundary.id ? { ...group, visible: event.target.checked } : group),
+                    }))}
+                  />
+                </label>
+              </div>
+            ))}
+          </div>
+          <label>
+            Point opacity
+            <input type="range" min="0.1" max="1" step="0.05" value={cellBoundaryPointOpacity} onChange={(event) => setCellBoundaryPointOpacity(Number(event.target.value))} />
+          </label>
+          {activeCellBoundary ? (
+            <div className="inference-cell-point-order" aria-label="Cell boundary point order">
+              <strong>{activeCellBoundary.name} point order</strong>
+              {activeCellBoundary.points.map((point, index) => (
+                <div
+                  className={hoverCellPointId === point.id ? "inference-cell-point-row active" : "inference-cell-point-row"}
+                  key={point.id}
+                  onMouseEnter={() => setHoverCellPointId(point.id)}
+                  onMouseLeave={() => setHoverCellPointId(null)}
+                >
+                  <button type="button" aria-label={`Move ${point.id} left`} disabled={index === 0} onClick={() => mutateCellBounds((current) => movePointOrder(current, activeCellBoundary.id, point.id, "left"))}>{"<"}</button>
+                  <span>{index + 1}</span>
+                  <button type="button" className="inference-cell-point-delete" aria-label={`Delete ${point.id}`} onClick={() => mutateCellBounds((current) => deletePoint(current, activeCellBoundary.id, point.id))}>Delete</button>
+                  <button type="button" aria-label={`Move ${point.id} right`} disabled={index === activeCellBoundary.points.length - 1} onClick={() => mutateCellBounds((current) => movePointOrder(current, activeCellBoundary.id, point.id, "right"))}>{">"}</button>
+                </div>
+              ))}
+              <button type="button" className="danger" onClick={deleteCellBoundary}>Delete boundary</button>
+            </div>
+          ) : null}
+        </section>
 
         <button
           type="button"

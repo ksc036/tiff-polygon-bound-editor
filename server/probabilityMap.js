@@ -56,7 +56,7 @@ export function parseProbabilityNpy(buffer) {
   return { width, height, data: Float32Array.from(view) };
 }
 
-export function probabilityMetrics({ probabilityMap, threshold, polygon, rectangle }) {
+export function probabilityMetrics({ probabilityMap, threshold, polygon, rectangle, excludedPolygons }) {
   assertProbabilityMap(probabilityMap);
   assertThreshold(threshold);
   const { width, height, data } = probabilityMap;
@@ -65,7 +65,7 @@ export function probabilityMetrics({ probabilityMap, threshold, polygon, rectang
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      if (!regionIncludesPixel({ x, y }, { polygon, rectangle })) continue;
+      if (!regionIncludesPixel({ x, y }, { polygon, rectangle, excludedPolygons })) continue;
       areaPx += 1;
       if (data[y * width + x] >= threshold) pixelCount += 1;
     }
@@ -74,7 +74,7 @@ export function probabilityMetrics({ probabilityMap, threshold, polygon, rectang
   return { pixelCount, areaPx, areaFraction: areaPx === 0 ? 0 : pixelCount / areaPx };
 }
 
-export function closestThreshold({ probabilityMap, targetFraction, polygon, rectangle }) {
+export function closestThreshold({ probabilityMap, targetFraction, polygon, rectangle, excludedPolygons }) {
   assertProbabilityMap(probabilityMap);
   if (typeof targetFraction !== "number" || !Number.isFinite(targetFraction) || targetFraction < 0 || targetFraction > 1) {
     throw new ProbabilityMapError("INVALID_TARGET_FRACTION", "Target fraction must be between 0 and 1.");
@@ -84,7 +84,7 @@ export function closestThreshold({ probabilityMap, targetFraction, polygon, rect
   let areaPx = 0;
   for (let y = 0; y < probabilityMap.height; y += 1) {
     for (let x = 0; x < probabilityMap.width; x += 1) {
-      if (!regionIncludesPixel({ x, y }, { polygon, rectangle })) continue;
+      if (!regionIncludesPixel({ x, y }, { polygon, rectangle, excludedPolygons })) continue;
       const bin = Math.floor(probabilityMap.data[y * probabilityMap.width + x] * 1000 + 1e-9);
       histogram[bin] += 1;
       areaPx += 1;
@@ -110,11 +110,14 @@ export function closestThreshold({ probabilityMap, targetFraction, polygon, rect
   return { threshold: bestThreshold, areaFraction: bestFraction };
 }
 
-export async function createProbabilityOverlayPng({ probabilityMap, threshold }) {
+export async function createProbabilityOverlayPng({ probabilityMap, threshold, excludedPolygons }) {
   assertProbabilityMap(probabilityMap);
   assertThreshold(threshold);
   const rgba = Buffer.alloc(probabilityMap.width * probabilityMap.height * 4);
   for (let index = 0; index < probabilityMap.data.length; index += 1) {
+    const x = index % probabilityMap.width;
+    const y = Math.floor(index / probabilityMap.width);
+    if (isExcluded({ x, y }, excludedPolygons)) continue;
     if (probabilityMap.data[index] < threshold) continue;
     const offset = index * 4;
     rgba[offset] = 255;
@@ -123,11 +126,14 @@ export async function createProbabilityOverlayPng({ probabilityMap, threshold })
   return sharp(rgba, { raw: { width: probabilityMap.width, height: probabilityMap.height, channels: 4 } }).png().toBuffer();
 }
 
-export async function writeThresholdMaskPng(outputPath, { probabilityMap, threshold }) {
+export async function writeThresholdMaskPng(outputPath, { probabilityMap, threshold, excludedPolygons }) {
   assertProbabilityMap(probabilityMap);
   assertThreshold(threshold);
   const mask = Buffer.alloc(probabilityMap.width * probabilityMap.height);
   for (let index = 0; index < probabilityMap.data.length; index += 1) {
+    const x = index % probabilityMap.width;
+    const y = Math.floor(index / probabilityMap.width);
+    if (isExcluded({ x, y }, excludedPolygons)) continue;
     mask[index] = probabilityMap.data[index] >= threshold ? 255 : 0;
   }
   await sharp(mask, { raw: { width: probabilityMap.width, height: probabilityMap.height, channels: 1 } })
@@ -170,12 +176,17 @@ function assertThreshold(threshold) {
   }
 }
 
-function regionIncludesPixel({ x, y }, { polygon, rectangle }) {
+function regionIncludesPixel({ x, y }, { polygon, rectangle, excludedPolygons }) {
+  if (isExcluded({ x, y }, excludedPolygons)) return false;
   if (rectangle) {
     return x >= rectangle.x && x < rectangle.x + rectangle.width &&
       y >= rectangle.y && y < rectangle.y + rectangle.height;
   }
   return !polygon || pointInPolygon({ x, y }, polygon);
+}
+
+function isExcluded(point, polygons) {
+  return Array.isArray(polygons) && polygons.some((polygon) => pointInPolygon(point, polygon));
 }
 
 function invalidMap(message) {
