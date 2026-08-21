@@ -56,7 +56,7 @@ export function parseProbabilityNpy(buffer) {
   return { width, height, data: Float32Array.from(view) };
 }
 
-export function probabilityMetrics({ probabilityMap, threshold, polygon }) {
+export function probabilityMetrics({ probabilityMap, threshold, polygon, rectangle }) {
   assertProbabilityMap(probabilityMap);
   assertThreshold(threshold);
   const { width, height, data } = probabilityMap;
@@ -65,7 +65,7 @@ export function probabilityMetrics({ probabilityMap, threshold, polygon }) {
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      if (polygon && !pointInPolygon({ x, y }, polygon)) continue;
+      if (!regionIncludesPixel({ x, y }, { polygon, rectangle })) continue;
       areaPx += 1;
       if (data[y * width + x] >= threshold) pixelCount += 1;
     }
@@ -74,7 +74,7 @@ export function probabilityMetrics({ probabilityMap, threshold, polygon }) {
   return { pixelCount, areaPx, areaFraction: areaPx === 0 ? 0 : pixelCount / areaPx };
 }
 
-export function closestThreshold({ probabilityMap, targetFraction, polygon }) {
+export function closestThreshold({ probabilityMap, targetFraction, polygon, rectangle }) {
   assertProbabilityMap(probabilityMap);
   if (typeof targetFraction !== "number" || !Number.isFinite(targetFraction) || targetFraction < 0 || targetFraction > 1) {
     throw new ProbabilityMapError("INVALID_TARGET_FRACTION", "Target fraction must be between 0 and 1.");
@@ -84,7 +84,7 @@ export function closestThreshold({ probabilityMap, targetFraction, polygon }) {
   let areaPx = 0;
   for (let y = 0; y < probabilityMap.height; y += 1) {
     for (let x = 0; x < probabilityMap.width; x += 1) {
-      if (polygon && !pointInPolygon({ x, y }, polygon)) continue;
+      if (!regionIncludesPixel({ x, y }, { polygon, rectangle })) continue;
       const bin = Math.floor(probabilityMap.data[y * probabilityMap.width + x] * 1000 + 1e-9);
       histogram[bin] += 1;
       areaPx += 1;
@@ -168,6 +168,14 @@ function assertThreshold(threshold) {
   if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
     throw new ProbabilityMapError("INVALID_THRESHOLD", "Threshold must be between 0 and 1.");
   }
+}
+
+function regionIncludesPixel({ x, y }, { polygon, rectangle }) {
+  if (rectangle) {
+    return x >= rectangle.x && x < rectangle.x + rectangle.width &&
+      y >= rectangle.y && y < rectangle.y + rectangle.height;
+  }
+  return !polygon || pointInPolygon({ x, y }, polygon);
 }
 
 function invalidMap(message) {

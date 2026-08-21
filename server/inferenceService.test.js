@@ -389,10 +389,10 @@ describe("createInferenceService", () => {
     const review = await service.loadReview(reference.id, { roi });
     await service.applyReferenceThresholds({ referenceId: reference.id, roi });
 
-    expect(review.roi).toMatchObject({ rectangle: roi, metrics: { areaFraction: 0.25 } });
+    expect(review.roi).toMatchObject({ rectangle: roi, metrics: { areaFraction: 0.5 } });
     await expect(service.loadReview(reference.id)).resolves.toMatchObject({ roi: null });
     const targetSettings = JSON.parse(await readFile(target.settingsPath, "utf8"));
-    expect(targetSettings).toMatchObject({ referenceId: reference.id, targetAreaFraction: 0.25, roiGroupId: null });
+    expect(targetSettings).toMatchObject({ referenceId: reference.id, targetAreaFraction: 0.5, roiGroupId: null });
   });
 
   test("surfaces malformed saved settings without replacing the file with defaults", async () => {

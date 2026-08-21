@@ -1721,6 +1721,99 @@ input[type="range"] {
   outline-offset: 2px;
 }
 
+.inference-histograms {
+  display: grid;
+  gap: 10px;
+}
+
+.inference-histogram {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.inference-histogram-heading,
+.inference-histogram-axis {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.inference-histogram-heading h3 {
+  margin: 0;
+  color: #cbd7e1;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.inference-histogram-heading span,
+.inference-histogram-axis {
+  color: #7f909e;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.inference-histogram-chart {
+  position: relative;
+  height: 92px;
+  border: 1px solid #35404c;
+  background: #11171d;
+}
+
+.inference-histogram-chart svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.inference-histogram-chart rect {
+  fill: #6e8291;
+}
+
+.inference-histogram-chart line {
+  stroke: #64d6ff;
+  stroke-width: 0.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.inference-histogram-slider {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: ew-resize;
+  appearance: none;
+  background: transparent;
+}
+
+.inference-histogram-slider::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+
+.inference-histogram-slider::-webkit-slider-thumb {
+  width: 3px;
+  height: 100%;
+  appearance: none;
+  border: 0;
+  background: transparent;
+}
+
+.inference-histogram-slider::-moz-range-track {
+  height: 100%;
+  background: transparent;
+}
+
+.inference-histogram-slider::-moz-range-thumb {
+  width: 3px;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
 .inference-controls dl {
   display: grid;
   gap: 8px;

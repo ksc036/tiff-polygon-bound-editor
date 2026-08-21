@@ -51,6 +51,67 @@ function rectangleFromPoints(start, end) {
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
+function probabilityHistogram(probabilityMap, rectangle = null) {
+  const { width, height, data } = probabilityMap ?? {};
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 ||
+      !Array.isArray(data) || data.length !== width * height) {
+    return null;
+  }
+  const bins = new Array(1001).fill(0);
+  let areaPx = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (rectangle && (x < rectangle.x || x >= rectangle.x + rectangle.width ||
+          y < rectangle.y || y >= rectangle.y + rectangle.height)) continue;
+      const value = data[y * width + x];
+      if (!Number.isFinite(value) || value < 0 || value > 1) return null;
+      bins[Math.min(1000, Math.floor(value * 1000 + 1e-9))] += 1;
+      areaPx += 1;
+    }
+  }
+  return { bins, areaPx };
+}
+
+function ProbabilityHistogram({ label, histogram, threshold, disabled, onThresholdChange, onThresholdCommit }) {
+  const bins = Array.isArray(histogram?.bins) ? histogram.bins : [];
+  if (bins.length !== 1001) return null;
+  const maximum = Math.max(...bins, 1);
+  const normalizedThreshold = normalizeThreshold(threshold) ?? 0.5;
+  const binWidth = 100 / bins.length;
+
+  return (
+    <section className="inference-histogram">
+      <div className="inference-histogram-heading">
+        <h3>{label}</h3>
+        <span>{histogram.areaPx.toLocaleString()} px</span>
+      </div>
+      <div className="inference-histogram-chart">
+        <svg viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label={`${label} probability histogram`}>
+          {bins.map((count, index) => {
+            const height = (count / maximum) * 38;
+            return <rect key={index} x={index * binWidth} y={40 - height} width={Math.max(binWidth * 0.82, 0.02)} height={height} />;
+          })}
+          <line x1={normalizedThreshold * 100} x2={normalizedThreshold * 100} y1="0" y2="40" />
+        </svg>
+        <input
+          className="inference-histogram-slider"
+          type="range"
+          min="0"
+          max="1"
+          step="0.001"
+          value={normalizedThreshold}
+          disabled={disabled}
+          aria-label={`${label} probability threshold`}
+          onChange={(event) => onThresholdChange(Number(event.target.value))}
+          onPointerUp={(event) => onThresholdCommit(Number(event.currentTarget.value))}
+          onBlur={(event) => onThresholdCommit(Number(event.currentTarget.value))}
+        />
+      </div>
+      <div className="inference-histogram-axis" aria-hidden="true"><span>0.00</span><span>0.50</span><span>1.00</span></div>
+    </section>
+  );
+}
+
 export default function InferencePage() {
   const [rootPath, setRootPath] = useState("");
   const [activeRootPath, setActiveRootPath] = useState("");
@@ -105,6 +166,10 @@ export default function InferencePage() {
     rawImage && rawImage.imageId === activeImage?.id && rawImage.rootPath === activeRootPath,
   );
   const activeThreshold = normalizeThreshold(Number(thresholdDraft));
+  const clientHistograms = useMemo(() => ({
+    wholeImage: probabilityHistogram(review?.probabilityMap),
+    roi: inferenceRoi ? probabilityHistogram(review?.probabilityMap, inferenceRoi) : null,
+  }), [inferenceRoi, review?.probabilityMap]);
   const overlayUrl = reviewReady && overlay &&
     overlay.rootPath === activeRootPath &&
     overlay.imageId === activeCompleteImage?.id &&
@@ -390,9 +455,9 @@ export default function InferencePage() {
     }
   }
 
-  function persistThreshold({ showMessage = true } = {}) {
+  function persistThreshold({ showMessage = true, thresholdValue } = {}) {
     if (!activeCompleteImage || !reviewReady) return Promise.resolve(false);
-    const threshold = normalizeThreshold(Number(thresholdDraft));
+    const threshold = normalizeThreshold(thresholdValue ?? Number(thresholdDraft));
     if (threshold === null) {
       setThresholdDraft((normalizeThreshold(Number(review?.threshold)) ?? 0.5).toFixed(3));
       setError("Threshold must be between 0 and 1.");
@@ -434,6 +499,17 @@ export default function InferencePage() {
 
   function commitThreshold() {
     void persistThreshold();
+  }
+
+  function handleHistogramThresholdChange(value) {
+    const threshold = normalizeThreshold(value);
+    if (threshold === null) return;
+    setOverlay(null);
+    setThresholdDraft(threshold.toFixed(3));
+  }
+
+  function commitHistogramThreshold(value) {
+    void persistThreshold({ thresholdValue: value });
   }
 
   async function handleSetOtherThresholds() {
@@ -644,6 +720,27 @@ export default function InferencePage() {
             }}
           />
         </label>
+
+        <div className="inference-histograms">
+          <ProbabilityHistogram
+            label="Whole image"
+            histogram={clientHistograms.wholeImage}
+            threshold={activeThreshold}
+            disabled={!reviewReady || savingThreshold}
+            onThresholdChange={handleHistogramThresholdChange}
+            onThresholdCommit={commitHistogramThreshold}
+          />
+          {review?.roi ? (
+            <ProbabilityHistogram
+              label="ROI"
+              histogram={clientHistograms.roi}
+              threshold={activeThreshold}
+              disabled={!reviewReady || savingThreshold}
+              onThresholdChange={handleHistogramThresholdChange}
+              onThresholdCommit={commitHistogramThreshold}
+            />
+          ) : null}
+        </div>
 
         <dl>
           <div>

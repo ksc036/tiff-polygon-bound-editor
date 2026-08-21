@@ -456,7 +456,10 @@ export function createApp({
         ? { roi }
         : { roiGroupId: request.query.roiGroupId };
       const { map, polygon, ...review } = await inferenceService.loadReview(request.params.id, options);
-      response.json(review);
+      response.json({
+        ...review,
+        probabilityMap: { width: map.width, height: map.height, data: Array.from(map.data) },
+      });
     }),
   );
 

@@ -24,6 +24,7 @@ const reviews = {
     threshold: 0.5,
     settings: { threshold: 0.5, roiGroupId: "roi-a" },
     wholeImage: { areaFraction: 0.25 },
+    probabilityMap: { width: 2, height: 2, data: [0, 0.5, 0.8, 1] },
     groups: [
       { id: "roi-a", name: "Tissue", color: "#e11d48" },
       { id: "roi-b", name: "Edge", color: "#2563eb" },
@@ -39,6 +40,7 @@ const reviews = {
     threshold: 0.61,
     settings: { threshold: 0.61, roiGroupId: null },
     wholeImage: { areaFraction: 2 / 3 },
+    probabilityMap: { width: 3, height: 1, data: [0.2, 0.61, 0.8] },
     groups: [],
     roi: null,
   },
@@ -345,6 +347,34 @@ test("composites the source canvas and binary mask in one stable stage frame", a
   expect(overlay).toHaveAttribute("height", "2");
 });
 
+test("links 0.001 probability histogram sliders to the one image threshold", async () => {
+  const { fetchMock } = mockInferenceApi();
+  render(<InferencePage />);
+
+  await screen.findByLabelText("Whole image probability histogram");
+  const wholeSlider = screen.getByLabelText("Whole image probability threshold");
+  expect(wholeSlider).toHaveAttribute("step", "0.001");
+
+  fireEvent.change(wholeSlider, { target: { value: "0.42" } });
+  expect(screen.getByLabelText("Threshold")).toHaveValue(0.42);
+  fireEvent.blur(wholeSlider);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    "/api/inference/images/complete-a/threshold",
+    expect.objectContaining({ body: JSON.stringify({ threshold: 0.42 }) }),
+  ));
+
+  const frame = screen.getByLabelText("Composited source and binary mask");
+  vi.spyOn(frame, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 200 });
+  fireEvent(frame, new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+  fireEvent(frame, new MouseEvent("pointerup", { bubbles: true, clientX: 100, clientY: 100 }));
+
+  expect(await screen.findByLabelText("ROI probability histogram")).toBeInTheDocument();
+  const roiSlider = screen.getByLabelText("ROI probability threshold");
+  fireEvent.change(roiSlider, { target: { value: "0.68" } });
+  expect(screen.getByLabelText("Threshold")).toHaveValue(0.68);
+  expect(screen.getByLabelText("Whole image probability histogram")).toBeInTheDocument();
+});
+
 test("sets a typed root, supports folder selection, and reloads inference rows", async () => {
   const { fetchMock } = mockInferenceApi();
   render(<InferencePage />);
@@ -478,7 +508,7 @@ test("normalizes off-grid threshold edits for overlay requests and persistence",
   )).toBe(true));
   const thresholdCall = fetchMock.mock.calls.find(([url]) => url === "/api/inference/images/complete-a/threshold");
   expect(requestBody(thresholdCall)).toEqual({ threshold: 0.724 });
-  expect(await screen.findByDisplayValue("0.724")).toBeInTheDocument();
+  expect(await screen.findByLabelText("Threshold")).toHaveValue(0.724);
 });
 
 test("propagates from the active image using the whole image when no rectangle is set", async () => {

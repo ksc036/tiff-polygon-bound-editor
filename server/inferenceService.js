@@ -419,7 +419,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       roi: polygon
         ? {
           ...(rectangle ? { rectangle } : { groupId: selectedRoiGroupId }),
-          metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon }),
+          metrics: probabilityMetrics({ probabilityMap: map, threshold: settings.threshold, polygon, rectangle }),
         }
         : null,
     };
@@ -446,6 +446,7 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       probabilityMap: referenceMap,
       threshold: referenceSettings.threshold,
       polygon: referencePolygon,
+      rectangle,
     }).areaFraction;
     let updated = 0;
     for (const image of await listImages()) {
@@ -458,7 +459,12 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
       const polygon = targetRectangle
         ? polygonForRectangle(targetRectangle)
         : await polygonForTimestamp(image.timestampFolder, hasRectangle ? null : roiGroupId, map.width, map.height);
-      const { threshold } = closestThreshold({ probabilityMap: map, targetFraction: targetAreaFraction, polygon });
+      const { threshold } = closestThreshold({
+        probabilityMap: map,
+        targetFraction: targetAreaFraction,
+        polygon,
+        rectangle: targetRectangle,
+      });
       await saveThreshold(image.id, {
         threshold,
         referenceId,
