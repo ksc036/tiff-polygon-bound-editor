@@ -1712,13 +1712,20 @@ input[type="range"] {
   pointer-events: none;
 }
 
-.inference-roi-rectangle {
+.inference-roi-overlay {
   position: absolute;
+  inset: 0;
   z-index: 3;
-  box-sizing: border-box;
-  border: 2px solid #64d6ff;
-  background: rgb(100 214 255 / 12%);
+  width: 100%;
+  height: 100%;
   pointer-events: none;
+}
+
+.inference-roi-rectangle {
+  fill: rgb(100 214 255 / 12%);
+  stroke: #64d6ff;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
 }
 
 .inference-cell-boundary-overlay {

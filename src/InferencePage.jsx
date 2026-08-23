@@ -792,6 +792,12 @@ export default function InferencePage() {
     const renderedHeight = rawImage.height * scale;
     const left = bounds.left + (bounds.width - renderedWidth) / 2;
     const top = bounds.top + (bounds.height - renderedHeight) / 2;
+    if (
+      event.clientX < left || event.clientX > left + renderedWidth ||
+      event.clientY < top || event.clientY > top + renderedHeight
+    ) {
+      return null;
+    }
     return {
       x: Math.max(0, Math.min(rawImage.width, Math.round(((event.clientX - left) / renderedWidth) * rawImage.width))),
       y: Math.max(0, Math.min(rawImage.height, Math.round(((event.clientY - top) / renderedHeight) * rawImage.height))),
@@ -921,16 +927,20 @@ export default function InferencePage() {
               />
             ) : null}
             {visibleInferenceRoi && rawImageMatchesActive ? (
-              <div
-                className="inference-roi-rectangle"
-                aria-label="Common inference ROI"
-                style={{
-                  left: `${(visibleInferenceRoi.x / rawImage.width) * 100}%`,
-                  top: `${(visibleInferenceRoi.y / rawImage.height) * 100}%`,
-                  width: `${(visibleInferenceRoi.width / rawImage.width) * 100}%`,
-                  height: `${(visibleInferenceRoi.height / rawImage.height) * 100}%`,
-                }}
-              />
+              <svg
+                className="inference-roi-overlay"
+                viewBox={`0 0 ${rawImage.width} ${rawImage.height}`}
+                preserveAspectRatio="xMidYMid meet"
+              >
+                <rect
+                  className="inference-roi-rectangle"
+                  aria-label="Common inference ROI"
+                  x={visibleInferenceRoi.x}
+                  y={visibleInferenceRoi.y}
+                  width={visibleInferenceRoi.width}
+                  height={visibleInferenceRoi.height}
+                />
+              </svg>
             ) : null}
             {rawImageMatchesActive && visibleCellBoundaries.length ? (
               <svg
