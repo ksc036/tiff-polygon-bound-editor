@@ -167,6 +167,8 @@ export default function InferencePage() {
   const [review, setReview] = useState(null);
   const [inferenceRoi, setInferenceRoi] = useState(null);
   const [draftInferenceRoi, setDraftInferenceRoi] = useState(null);
+  const [roiDirty, setRoiDirty] = useState(false);
+  const [savingRoi, setSavingRoi] = useState(false);
   const [cellBounds, setCellBounds] = useState(null);
   const [activeCellBoundaryId, setActiveCellBoundaryId] = useState(null);
   const [stageTool, setStageTool] = useState("roi");
@@ -270,6 +272,7 @@ export default function InferencePage() {
     setReview(null);
     setInferenceRoi(null);
     setDraftInferenceRoi(null);
+    setRoiDirty(false);
     setCellBounds(null);
     setActiveCellBoundaryId(null);
     setCellBoundaryDirty(false);
@@ -358,6 +361,22 @@ export default function InferencePage() {
     }, 250);
     return () => clearTimeout(timer);
   }, [images, job?.status, loadImages]);
+
+  useEffect(() => {
+    if (!activeRootPath) return undefined;
+    let alive = true;
+    fetch("/api/inference/roi")
+      .then((response) => readJsonResponse(response, "Unable to load saved ROI."))
+      .then((payload) => {
+        if (!alive) return;
+        setInferenceRoi(payload?.roi ?? null);
+        setRoiDirty(false);
+      })
+      .catch((loadError) => {
+        if (alive) setError(loadError.message);
+      });
+    return () => { alive = false; };
+  }, [activeRootPath]);
 
   useEffect(() => {
     if (!activeImage) {
@@ -783,6 +802,26 @@ export default function InferencePage() {
     }
   }
 
+  async function saveRoi() {
+    if (savingRoi || !roiDirty) return;
+    setSavingRoi(true);
+    setError("");
+    try {
+      const payload = await readJsonResponse(await fetch("/api/inference/roi", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roi: inferenceRoi }),
+      }), "Unable to save ROI.");
+      setInferenceRoi(payload.roi ?? null);
+      setRoiDirty(false);
+      setActionMessage(payload.roi ? "ROI saved" : "Saved ROI cleared");
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSavingRoi(false);
+    }
+  }
+
   function stagePixelPoint(event) {
     if (!rawImageMatchesActive || !rawImage?.width || !rawImage?.height) return null;
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -843,7 +882,10 @@ export default function InferencePage() {
     const point = stagePixelPoint(event);
     const nextRoi = point ? rectangleFromPoints(start, point) : null;
     setDraftInferenceRoi(null);
-    if (nextRoi) setInferenceRoi(nextRoi);
+    if (nextRoi) {
+      setInferenceRoi(nextRoi);
+      setRoiDirty(true);
+    }
   }
 
   return (
@@ -1053,10 +1095,13 @@ export default function InferencePage() {
         <div className="inference-roi-status">
           <span>{inferenceRoi ? "Common rectangle ROI" : "Whole image"}</span>
           {inferenceRoi ? (
-            <button type="button" onClick={() => setInferenceRoi(null)}>
+            <button type="button" onClick={() => { setInferenceRoi(null); setRoiDirty(true); }}>
               Clear ROI
             </button>
           ) : null}
+          <button type="button" onClick={saveRoi} disabled={!roiDirty || savingRoi}>
+            {savingRoi ? "Saving ROI" : inferenceRoi ? "Save ROI" : "Clear saved ROI"}
+          </button>
         </div>
 
         <section className="inference-cell-boundaries" aria-label="Cell boundaries">

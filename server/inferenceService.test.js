@@ -122,6 +122,16 @@ describe("scanInferenceImages", () => {
 });
 
 describe("createInferenceService", () => {
+  test("persists one common inference ROI at the dataset root", async () => {
+    const { rootDir, service } = await setupService({ timestamps: ["T01"] });
+
+    await expect(service.loadSavedRoi()).resolves.toBeNull();
+    await expect(service.saveSavedRoi({ x: 0, y: 0, width: 1, height: 1 })).resolves.toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    await expect(readFile(path.join(rootDir, "inference-roi.json"), "utf8")).resolves.toContain('"width": 1');
+    await expect(service.loadSavedRoi()).resolves.toEqual({ x: 0, y: 0, width: 1, height: 1 });
+    await expect(service.saveSavedRoi(null)).resolves.toBeNull();
+  });
+
   test("loads missing cell boundaries and saves them only in the image cell boundary folder", async () => {
     const { service } = await setupService({ timestamps: ["T01"] });
     const [image] = await service.listImages();

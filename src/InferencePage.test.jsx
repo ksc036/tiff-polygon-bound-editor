@@ -113,6 +113,7 @@ function mockInferenceApi({
   let imageSnapshotIndex = 0;
   const currentReviews = clone(reviews);
   let rootPath = "/data/inference";
+  const savedRois = new Map();
 
   const fetchMock = vi.fn(async (url, options = {}) => {
     const method = options.method ?? "GET";
@@ -139,6 +140,14 @@ function mockInferenceApi({
     if (url === "/api/inference/root/select" && method === "POST") {
       rootPath = "/selected/inference";
       return jsonResponse({ rootPath, images: [] });
+    }
+    if (url === "/api/inference/roi" && method === "GET") {
+      return jsonResponse({ roi: savedRois.get(rootPath) ?? null });
+    }
+    if (url === "/api/inference/roi" && method === "PUT") {
+      const roi = JSON.parse(options.body).roi;
+      savedRois.set(rootPath, roi);
+      return jsonResponse({ roi });
     }
     if (url === "/api/inference/jobs" && method === "POST") {
       images = images.map((image) => image.status === "waiting" ? { ...image, status: "sending" } : image);
@@ -595,6 +604,12 @@ test("uses a dragged common rectangle for review and propagation", async () => {
 
   await screen.findByText("75.00%");
   expect(screen.getByLabelText("Common inference ROI")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save ROI" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Save ROI" }));
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    "/api/inference/roi",
+    expect.objectContaining({ method: "PUT", body: JSON.stringify({ roi: { x: 0, y: 0, width: 1, height: 1 } }) }),
+  ));
   fireEvent.click(screen.getByRole("button", { name: "Set other thresholds from reference" }));
   await screen.findByText("Updated 1 other threshold");
   const propagationCall = fetchMock.mock.calls.find(([url]) => url === "/api/inference/reference-thresholds");

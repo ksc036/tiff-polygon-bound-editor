@@ -159,6 +159,16 @@ function validRectangle(rectangle, width, height) {
   return { x, y, width: rectangleWidth, height: rectangleHeight };
 }
 
+function validStoredRoi(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object") return undefined;
+  const { x, y, width, height } = value;
+  if (![x, y, width, height].every(Number.isInteger) || x < 0 || y < 0 || width <= 0 || height <= 0) {
+    return undefined;
+  }
+  return { x, y, width, height };
+}
+
 function emptyCellBoundaries(width, height) {
   return {
     schemaVersion: 1,
@@ -467,6 +477,37 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     return bounds;
   }
 
+  async function loadSavedRoi() {
+    const rootPath = storage.getRoot();
+    if (!rootPath) throw inferenceError("ROOT_UNSET", "Storage root has not been set.", 400);
+    try {
+      const roi = validStoredRoi(JSON.parse(await readFile(path.join(rootPath, "inference-roi.json"), "utf8"))?.roi);
+      if (roi === undefined) throw new Error("Invalid ROI.");
+      return roi;
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      if (error instanceof InferenceError) throw error;
+      throw inferenceError("INVALID_ROI", "Saved ROI is invalid.", 422, error);
+    }
+  }
+
+  async function saveSavedRoi(roi) {
+    const rootPath = storage.getRoot();
+    if (!rootPath) throw inferenceError("ROOT_UNSET", "Storage root has not been set.", 400);
+    const validated = validStoredRoi(roi);
+    if (validated === undefined) throw inferenceError("INVALID_ROI", "ROI rectangle is invalid.", 400);
+    if (validated) {
+      const [image] = await images();
+      if (!image) throw inferenceError("INVALID_ROI", "ROI requires an image.", 400);
+      const dimensions = await sourceDimensions(image.imagePath, maxImagePixels);
+      if (!validRectangle(validated, dimensions.width, dimensions.height)) {
+        throw inferenceError("INVALID_ROI", "ROI rectangle must be inside the image.", 400);
+      }
+    }
+    await writeAtomically(path.join(rootPath, "inference-roi.json"), `${JSON.stringify({ schemaVersion: 1, roi: validated }, null, 2)}\n`);
+    return validated;
+  }
+
   async function loadReview(id, options = {}) {
     const image = await imageFor(id);
     const map = await loadMap(image);
@@ -693,6 +734,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
     loadReview,
     loadCellBoundaries,
     saveCellBoundaries,
+    loadSavedRoi,
+    saveSavedRoi,
     saveThreshold,
     applyReferenceThresholds,
     createOverlay,

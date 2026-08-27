@@ -382,6 +382,20 @@ export function createApp({
   );
 
   app.get(
+    "/api/inference/roi",
+    asyncRoute(async (_request, response) => {
+      response.json({ roi: await inferenceService.loadSavedRoi() });
+    }),
+  );
+
+  app.put(
+    "/api/inference/roi",
+    asyncRoute(async (request, response) => {
+      response.json({ roi: await inferenceService.saveSavedRoi(request.body?.roi) });
+    }),
+  );
+
+  app.get(
     "/api/images",
     asyncRoute(async (_request, response) => {
       if (!imageStorage.getRoot()) {
