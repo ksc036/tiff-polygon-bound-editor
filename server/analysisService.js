@@ -423,7 +423,7 @@ function sanitizeAnalysis(analysis) {
 }
 
 async function writeSkeletonAtomically(outputPath, skeleton, writeSkeleton) {
-  const tempPath = `${outputPath}.tmp-${randomUUID()}`;
+  const tempPath = path.join(path.dirname(outputPath), `.skeleton-${randomUUID()}.tmp.png`);
 
   try {
     await writeSkeleton(tempPath, skeleton);

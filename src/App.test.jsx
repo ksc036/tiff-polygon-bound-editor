@@ -1691,7 +1691,7 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
-    expect(await screen.findByText("Current: plate-a")).toBeInTheDocument();
+    expect(await screen.findByLabelText("heatmap report")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Next image" }));
 
@@ -1705,7 +1705,7 @@ describe("App", () => {
         heatmap: heatmapFixture("plate-b", 20, 0.08, 120, 90),
       }));
     });
-    expect(await screen.findByText("Current: plate-b")).toBeInTheDocument();
+    expect(await screen.findByLabelText("heatmap report")).toBeInTheDocument();
   });
 
   test("reloads and hides a heatmap when a new root reuses the image identity", async () => {
@@ -1729,7 +1729,7 @@ describe("App", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
-    expect(await screen.findByText("Current: plate-a")).toBeInTheDocument();
+    expect(await screen.findByLabelText("heatmap report")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/root path/i), { target: { value: "/replacement/root" } });
     fireEvent.click(screen.getByRole("button", { name: /set root/i }));
@@ -1743,7 +1743,7 @@ describe("App", () => {
         heatmap: heatmapFixture("replacement-plate", 20),
       }));
     });
-    expect(await screen.findByText("Current: replacement-plate")).toBeInTheDocument();
+    expect(await screen.findByLabelText("heatmap report")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20");
   });
 
@@ -1820,7 +1820,7 @@ describe("App", () => {
   });
 
   test("integrates the loaded heatmap report with presets, plot pointer mapping, and opacity", async () => {
-    mockApi({
+    const { fetchMock } = mockApi({
       heatmapResponse: (_url, cellSize) =>
         jsonResponse({ heatmap: gridHeatmapFixture("plate-a", cellSize) }),
     });
@@ -1833,8 +1833,9 @@ describe("App", () => {
     const rawCanvas = within(plot).getByLabelText("heatmap original image");
 
     expect(screen.getByLabelText("Image editor")).toHaveClass("heatmap-mode");
-    expect(report).toHaveTextContent("Current: plate-a");
-    expect(report).toHaveTextContent("Cell 20x20 px | Grid 5x4");
+    expect(screen.getByTestId("image-stage")).toHaveStyle({ aspectRatio: "1.25" });
+    expect(report).not.toHaveTextContent("Current: plate-a");
+    expect(report).not.toHaveTextContent("Cell 20x20 px | Grid 5x4");
     expect(screen.queryByLabelText("heatmap color legend")).not.toBeInTheDocument();
     expect(rawCanvas).toHaveStyle({ opacity: "0.5" });
     expect(rawCanvas).toHaveAttribute("width", "100");
@@ -1842,13 +1843,16 @@ describe("App", () => {
     expect(screen.queryByLabelText(/^ROI preview /)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Medium 50x50/ }));
-    expect(await screen.findByText("Pixel Density | Cell 50x50 px | Grid 2x2")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=50");
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /Small 20x20/ }));
-    await screen.findByText("Pixel Density | Cell 20x20 px | Grid 5x4");
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20");
+    });
 
     const currentPlot = screen.getByLabelText("heatmap report plot");
-    const currentHeader = screen.getByLabelText("heatmap report").querySelector(".heatmap-report-header");
     const currentRawCanvas = within(currentPlot).getByLabelText("heatmap original image");
     vi.spyOn(currentRawCanvas, "getBoundingClientRect").mockReturnValue({
       left: 100,
@@ -1862,7 +1866,6 @@ describe("App", () => {
       toJSON: () => {},
     });
 
-    fireEvent.mouseMove(currentHeader, { clientX: 120, clientY: 120 });
     expect(within(currentPlot).queryByRole("status")).not.toBeInTheDocument();
 
     fireEvent.mouseMove(currentPlot, { clientX: 325, clientY: 325 });
@@ -1875,7 +1878,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Image editor")).not.toHaveClass("heatmap-mode");
   });
 
-  test("clears the heatmap tooltip when the pointer moves from the plot to the report header", async () => {
+  test("clears the heatmap tooltip when the pointer leaves the heatmap stage", async () => {
     mockApi({
       heatmapResponse: (_url, cellSize) =>
         jsonResponse({ heatmap: gridHeatmapFixture("plate-a", cellSize) }),
@@ -1886,7 +1889,7 @@ describe("App", () => {
 
     const report = await screen.findByLabelText("heatmap report");
     const plot = within(report).getByLabelText("heatmap report plot");
-    const header = report.querySelector(".heatmap-report-header");
+    const stage = screen.getByTestId("image-stage");
     const rawCanvas = within(plot).getByLabelText("heatmap original image");
     vi.spyOn(rawCanvas, "getBoundingClientRect").mockReturnValue({
       left: 100,
@@ -1903,11 +1906,11 @@ describe("App", () => {
     fireEvent.mouseMove(plot, { clientX: 325, clientY: 325 });
     expect(await within(plot).findByRole("status")).toHaveTextContent("Row 2, Column 3");
 
-    fireEvent.mouseMove(header, { clientX: 120, clientY: 120 });
+    fireEvent.pointerLeave(stage);
     expect(within(plot).queryByRole("status")).not.toBeInTheDocument();
   });
 
-  test("shows current and estimated metrics using the fixed one-phase report scale", async () => {
+  test("shows estimated-density heatmap without a report scale", async () => {
     mockApi();
     render(<App />);
 
@@ -1915,9 +1918,10 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Estimated Collagen Density" }));
 
     const report = await screen.findByLabelText("heatmap report");
-    expect(report).toHaveTextContent("Color range: 0 to 8 mg/ml");
-    expect(report).toHaveTextContent("Density model: Pixel Density = 0.4394");
-    expect(within(report).getByLabelText("Estimated Collagen Density (mg/ml)")).toBeInTheDocument();
+    expect(report).not.toHaveTextContent("Color range: 0 to 8 mg/ml");
+    expect(report).not.toHaveTextContent("Density model: Pixel Density = 0.4394");
+    expect(within(report).queryByLabelText("Estimated Collagen Density (mg/ml)")).not.toBeInTheDocument();
+    expect(within(report).queryAllByTestId("heatmap-scale-tick")).toHaveLength(0);
   });
 
   test("restores persisted heatmap metric after remount", async () => {
@@ -2221,7 +2225,7 @@ describe("App", () => {
     expect(screen.queryByLabelText("raw16 image")).not.toBeInTheDocument();
   });
 
-  test("adds the previous image and delta scale to the comparison report", async () => {
+  test("shows the comparison heatmap without a delta scale", async () => {
     const compatibleImages = [images[0], { ...images[1], width: 100, height: 80 }];
     mockApi({
       rootImages: compatibleImages,
@@ -2241,10 +2245,11 @@ describe("App", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
     fireEvent.click(await screen.findByRole("button", { name: "Compare Previous" }));
     const report = await screen.findByLabelText("heatmap report");
-    expect(report).toHaveTextContent("Current: plate-b");
-    expect(report).toHaveTextContent("Previous: plate-a");
-    expect(report).toHaveTextContent("Color range: -0.04 to +0.04");
-    expect(within(report).getByLabelText("Delta Pixel Density")).toHaveClass("difference");
+    expect(report).not.toHaveTextContent("Current: plate-b");
+    expect(report).not.toHaveTextContent("Previous: plate-a");
+    expect(report).not.toHaveTextContent("Color range: -0.04 to +0.04");
+    expect(within(report).queryByLabelText("Delta Pixel Density")).not.toBeInTheDocument();
+    expect(within(report).queryAllByTestId("heatmap-scale-tick")).toHaveLength(0);
   });
 
   test("selects a separate batch folder and generates the fixed preset sizes", async () => {

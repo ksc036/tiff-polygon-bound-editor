@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   addGroup,
   addPoint,
@@ -13,11 +13,12 @@ import {
   renameGroup,
 } from "./lib/editorState.js";
 import { findNearestSegment } from "./lib/geometry.js";
+import { downloadAllInferenceOutputs } from "./lib/inferenceDownloads.js";
+import { THRESHOLD_GRID, histogramAreaPath } from "./lib/inferenceHistogram.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
 
 const DEFAULT_SERVER_URL = "http://localhost:8000";
 const TERMINAL_JOB_STATES = new Set(["complete", "partial", "failed"]);
-const THRESHOLD_GRID = 1000;
 const CELL_BOUNDARY_POINT_OPACITY_KEY = "inference-cell-boundary-point-opacity";
 const SEGMENT_INSERT_SCREEN_THRESHOLD = 8;
 const SEGMENT_INSERT_IMAGE_THRESHOLD = 8;
@@ -60,6 +61,23 @@ function reviewUrl(imageId, roi) {
   return roi ? `${base}?roi=${encodeURIComponent(JSON.stringify(roi))}` : base;
 }
 
+async function loadRaw16Image(imageId) {
+  const response = await fetch(`/api/inference/images/${encodeURIComponent(imageId)}/raw16`);
+  if (!response.ok) throw new Error("Unable to read image pixels.");
+  const buffer = await response.arrayBuffer();
+  const width = Number(response.headers.get("x-image-width"));
+  const height = Number(response.headers.get("x-image-height"));
+  const min = Number(response.headers.get("x-display-min"));
+  const max = Number(response.headers.get("x-display-max"));
+  return {
+    pixels: new Uint16Array(buffer),
+    width: Number.isInteger(width) && width > 0 ? width : 0,
+    height: Number.isInteger(height) && height > 0 ? height : 0,
+    min: Number.isFinite(min) ? min : 0,
+    max: Number.isFinite(max) ? max : 65535,
+  };
+}
+
 function rectangleFromPoints(start, end) {
   const left = Math.min(start.x, end.x);
   const top = Math.min(start.y, end.y);
@@ -71,6 +89,10 @@ function rectangleFromPoints(start, end) {
 
 function cellBoundaryVisible(group) {
   return group.visible !== false;
+}
+
+function polygonsFromCellBoundaries(bounds) {
+  return (bounds?.groups ?? []).filter((group) => group.points.length >= 3).map((group) => group.points);
 }
 
 function pointInPolygon(point, polygon) {
@@ -119,11 +141,12 @@ function histogramMetrics(histogram, threshold) {
 }
 
 function ProbabilityHistogram({ label, histogram, threshold, disabled, onThresholdChange, onThresholdCommit }) {
+  const clipId = `inference-histogram-selection-${useId().replaceAll(":", "")}`;
   const bins = Array.isArray(histogram?.bins) ? histogram.bins : [];
   if (bins.length !== 1001) return null;
-  const maximum = Math.max(...bins, 1);
   const normalizedThreshold = normalizeThreshold(threshold) ?? 0.5;
-  const binWidth = 100 / bins.length;
+  const thresholdX = normalizedThreshold * 100;
+  const areaPath = histogramAreaPath(histogram);
 
   return (
     <section className="inference-histogram">
@@ -133,11 +156,14 @@ function ProbabilityHistogram({ label, histogram, threshold, disabled, onThresho
       </div>
       <div className="inference-histogram-chart">
         <svg viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label={`${label} probability histogram`}>
-          {bins.map((count, index) => {
-            const height = (count / maximum) * 38;
-            return <rect key={index} x={index * binWidth} y={40 - height} width={Math.max(binWidth * 0.82, 0.02)} height={height} />;
-          })}
-          <line x1={normalizedThreshold * 100} x2={normalizedThreshold * 100} y1="0" y2="40" />
+          <defs>
+            <clipPath id={clipId}>
+              <rect x={thresholdX} y="0" width={100 - thresholdX} height="40" />
+            </clipPath>
+          </defs>
+          <path className="inference-histogram-area" d={areaPath} />
+          <path className="inference-histogram-selected-area" d={areaPath} clipPath={`url(#${clipId})`} />
+          <line x1={thresholdX} x2={thresholdX} y1="0" y2="40" />
         </svg>
         <input
           className="inference-histogram-slider"
@@ -194,6 +220,8 @@ export default function InferencePage() {
   const [savingThreshold, setSavingThreshold] = useState(false);
   const [propagating, setPropagating] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [downloadingOutputs, setDownloadingOutputs] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(null);
   const canvasRef = useRef(null);
   const pollTimerRef = useRef(null);
   const mountedRef = useRef(true);
@@ -229,7 +257,7 @@ export default function InferencePage() {
   );
   const activeThreshold = normalizeThreshold(Number(thresholdDraft));
   const cellBoundaryPolygons = useMemo(
-    () => (cellBounds?.groups ?? []).filter((group) => group.points.length >= 3).map((group) => group.points),
+    () => polygonsFromCellBoundaries(cellBounds),
     [cellBounds],
   );
   const clientHistograms = useMemo(() => ({
@@ -390,23 +418,13 @@ export default function InferencePage() {
     setRawImage(null);
     setError("");
 
-    fetch(`/api/inference/images/${encodeURIComponent(image.id)}/raw16`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error("Unable to read image pixels.");
-        const buffer = await response.arrayBuffer();
+    loadRaw16Image(image.id)
+      .then((loadedImage) => {
         if (!alive) return;
-        const width = Number(response.headers.get("x-image-width"));
-        const height = Number(response.headers.get("x-image-height"));
-        const min = Number(response.headers.get("x-display-min"));
-        const max = Number(response.headers.get("x-display-max"));
         setRawImage({
           imageId: image.id,
           rootPath: sourceRootPath,
-          pixels: new Uint16Array(buffer),
-          width: Number.isInteger(width) && width > 0 ? width : 0,
-          height: Number.isInteger(height) && height > 0 ? height : 0,
-          min: Number.isFinite(min) ? min : 0,
-          max: Number.isFinite(max) ? max : 65535,
+          ...loadedImage,
         });
       })
       .catch((loadError) => {
@@ -496,7 +514,7 @@ export default function InferencePage() {
         const blob = await response.blob();
         if (!alive) return;
         objectUrl = URL.createObjectURL(blob);
-        setOverlay({ ...source, url: objectUrl });
+        setOverlay({ ...source, url: objectUrl, blob });
       })
       .catch((loadError) => {
         if (alive) setError(loadError.message);
@@ -681,6 +699,61 @@ export default function InferencePage() {
       setError(generationError.message);
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function handleDownloadInferenceZip() {
+    if (completeImages.length === 0 || !inferenceRoi || cellBoundaryDirty || downloadingOutputs) return;
+    setDownloadingOutputs(true);
+    setDownloadProgress(null);
+    setError("");
+    setActionMessage("");
+    try {
+      if (activeCompleteImage && reviewReady && !await persistThreshold({ showMessage: false })) return;
+      await downloadAllInferenceOutputs({
+        images: completeImages,
+        onProgress: setDownloadProgress,
+        loadImageOutputs: async (image) => {
+          const [imageReview, imageRaw] = await Promise.all([
+            readJsonResponse(await fetch(reviewUrl(image.id, inferenceRoi)), "Unable to load inference review."),
+            loadRaw16Image(image.id),
+          ]);
+          const threshold = normalizeThreshold(Number(imageReview.threshold));
+          if (threshold === null) throw new Error(`Invalid threshold for ${image.imageFile}.`);
+          const excludedPolygons = polygonsFromCellBoundaries(imageReview.cellBoundaries);
+          const histograms = {
+            wholeImage: probabilityHistogram(imageReview.probabilityMap, null, excludedPolygons),
+            roi: probabilityHistogram(imageReview.probabilityMap, inferenceRoi, excludedPolygons),
+          };
+          if (!histograms.wholeImage || !histograms.roi) {
+            throw new Error(`Unable to calculate histograms for ${image.imageFile}.`);
+          }
+          const overlayResponse = await fetch(
+            `/api/inference/images/${encodeURIComponent(image.id)}/overlay?threshold=${threshold.toFixed(3)}`,
+          );
+          if (!overlayResponse.ok) throw new Error(`Unable to load the binary mask overlay for ${image.imageFile}.`);
+          const sourceCanvas = document.createElement("canvas");
+          renderRaw16ToCanvas(sourceCanvas, imageRaw);
+          return {
+            sourceCanvas,
+            overlayBlob: await overlayResponse.blob(),
+            roi: inferenceRoi,
+            histograms,
+            metrics: {
+              wholeImage: histogramMetrics(histograms.wholeImage, threshold),
+              roi: histogramMetrics(histograms.roi, threshold),
+            },
+            threshold,
+            imageFile: image.imageFile,
+          };
+        },
+      });
+      setActionMessage("Inference ZIP downloaded");
+    } catch (downloadError) {
+      setError(downloadError.message);
+    } finally {
+      setDownloadingOutputs(false);
+      setDownloadProgress(null);
     }
   }
 
@@ -1194,9 +1267,22 @@ export default function InferencePage() {
             Next
           </button>
         </nav>
-        <button type="button" onClick={handleGenerateMasks} disabled={!reviewReady || generating}>
-          Generate masks
-        </button>
+        <div className="inference-footer-actions">
+          <button type="button" onClick={handleGenerateMasks} disabled={!reviewReady || generating}>
+            Generate masks
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadInferenceZip}
+            aria-busy={downloadingOutputs}
+            title={!inferenceRoi ? "Set an ROI before downloading" : cellBoundaryDirty ? "Save cell boundaries before downloading" : completeImages.length === 0 ? "No completed images to download" : undefined}
+            disabled={completeImages.length === 0 || !inferenceRoi || cellBoundaryDirty || downloadingOutputs}
+          >
+            {downloadingOutputs && downloadProgress
+              ? `Preparing ${downloadProgress.current} / ${downloadProgress.total}...`
+              : downloadingOutputs ? "Preparing ZIP..." : "Download all inference ZIP"}
+          </button>
+        </div>
       </footer>
     </div>
   );

@@ -609,7 +609,8 @@ describe("recalculateAnalysis", () => {
     await expectRejectCode(
       recalculateAnalysis(storage, folderName, {
         writeSkeleton: async (outputPath) => {
-          expect(outputPath).toMatch(/\.tmp-/);
+          expect(path.dirname(outputPath)).toBe(paths.skeletonDir);
+          expect(outputPath).not.toBe(paths.skeletonPath);
           await writeFile(outputPath, "partial skeleton");
           throw new Error("writer failed");
         },
@@ -619,6 +620,30 @@ describe("recalculateAnalysis", () => {
 
     await expect(readFile(paths.skeletonPath, "utf8")).resolves.toBe("existing skeleton");
     await expect(readdir(paths.skeletonDir)).resolves.toEqual([`${folderName}.skeleton.png`]);
+  });
+
+  test("keeps the skeleton temp filename bounded when the final filename is long", async () => {
+    const rootDir = await createTempRoot();
+    const folderName = `selected-stack-sequence-${"long-name-".repeat(12)}T01`;
+    await writeImage(rootDir, folderName);
+    const storage = createStorage({ initialRoot: rootDir });
+    const paths = storage.imagePaths(folderName);
+    await writeBounds(rootDir, folderName, boundsPayload({ imageFolder: folderName }));
+    await writeMask(rootDir, folderName, "frame001.png");
+
+    const maxWriterPathLength = paths.skeletonDir.length + 64;
+    const result = await recalculateAnalysis(storage, folderName, {
+      writeSkeleton: async (outputPath) => {
+        if (outputPath.length > maxWriterPathLength) {
+          throw new Error("simulated image writer path limit");
+        }
+        await mkdir(path.dirname(outputPath), { recursive: true });
+        await writeFile(outputPath, "skeleton");
+      },
+    });
+
+    expect(result.hasAnalysis).toBe(true);
+    await expect(access(paths.skeletonPath)).resolves.toBeUndefined();
   });
 
   test("leaves no skeleton temp files after successful recalculation", async () => {

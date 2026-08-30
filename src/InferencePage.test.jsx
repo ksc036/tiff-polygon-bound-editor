@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import JSZip from "jszip";
 import React from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import AppRouter from "./AppRouter.jsx";
@@ -95,6 +96,16 @@ function deferred() {
     reject = nextReject;
   });
   return { promise, reject, resolve };
+}
+
+function blobArrayBuffer(blob) {
+  if (typeof blob.arrayBuffer === "function") return blob.arrayBuffer();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(blob);
+  });
 }
 
 function mockInferenceApi({
@@ -421,6 +432,171 @@ test("links 0.001 probability histogram sliders to the one image threshold", asy
   fireEvent.change(roiSlider, { target: { value: "0.68" } });
   expect(screen.getByLabelText("Threshold")).toHaveValue(0.68);
   expect(screen.getByLabelText("Whole image probability histogram")).toBeInTheDocument();
+});
+
+test("draws filled threshold areas with comparable peak heights across images", async () => {
+  const images = [
+    { id: "concentrated", timestampFolder: "001", imageFile: "concentrated.tif", status: "complete" },
+    { id: "distributed", timestampFolder: "002", imageFile: "distributed.tif", status: "complete" },
+  ];
+  const reviewFor = (id, imageFile, data) => ({
+    id,
+    timestampFolder: id === "concentrated" ? "001" : "002",
+    imageFile,
+    width: 2,
+    height: 2,
+    threshold: 0.5,
+    settings: { threshold: 0.5, roiGroupId: null },
+    wholeImage: { areaFraction: data.filter((value) => value >= 0.5).length / data.length },
+    probabilityMap: { width: 2, height: 2, data },
+    groups: [],
+    roi: null,
+  });
+  mockInferenceApi({
+    images,
+    rootData: {
+      "/data/inference": {
+        images,
+        reviews: {
+          concentrated: reviewFor("concentrated", "concentrated.tif", [0.1, 0.1, 0.1, 0.1]),
+          distributed: reviewFor("distributed", "distributed.tif", [0.1, 0.1, 0.5, 0.9]),
+        },
+      },
+    },
+  });
+  render(<InferencePage />);
+
+  const histogram = await screen.findByLabelText("Whole image probability histogram");
+  const filledArea = histogram.querySelector(".inference-histogram-area");
+  const selectedArea = histogram.querySelector(".inference-histogram-selected-area");
+  const selectionClip = histogram.querySelector("clipPath rect");
+  expect(filledArea).toBeInTheDocument();
+  expect(selectedArea).toBeInTheDocument();
+  expect(selectionClip).toHaveAttribute("x", "50");
+  expect(selectionClip).toHaveAttribute("width", "50");
+
+  const concentratedPath = filledArea.getAttribute("d");
+  expect((concentratedPath.match(/\bL\b/g) ?? [])).toHaveLength(201);
+  const peakY = (path) => Math.min(...[...path.matchAll(/[ML]\s+[\d.]+\s+([\d.]+)/g)].map((match) => Number(match[1])));
+  const concentratedPeakY = peakY(concentratedPath);
+
+  fireEvent.click(screen.getByRole("button", { name: /distributed\.tif Complete/ }));
+  await screen.findByRole("heading", { name: /distributed\.tif/ });
+  const distributedPath = screen.getByLabelText("Whole image probability histogram")
+    .querySelector(".inference-histogram-area")
+    .getAttribute("d");
+
+  expect(concentratedPeakY).toBe(2);
+  expect(peakY(distributedPath)).toBeGreaterThan(concentratedPeakY);
+});
+
+test("enables the all-image inference ZIP once a common ROI exists, regardless of the selected image status", async () => {
+  mockInferenceApi();
+  render(<InferencePage />);
+
+  const frame = await screen.findByLabelText("Composited source and binary mask");
+  const download = screen.getByRole("button", { name: "Download all inference ZIP" });
+  expect(download).toBeDisabled();
+
+  await screen.findByAltText("Binary mask overlay");
+  vi.spyOn(frame, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 200 });
+  fireEvent(frame, new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+  fireEvent(frame, new MouseEvent("pointerup", { bubbles: true, clientX: 100, clientY: 100 }));
+
+  await screen.findByLabelText("ROI probability histogram");
+  expect(download).toBeEnabled();
+
+  fireEvent.click(screen.getByRole("button", { name: /waiting\.tif Waiting/ }));
+  await waitFor(() => expect(download).toBeEnabled());
+});
+
+test("downloads every completed image with its ROI overlay, whole overlay, and web-matched histograms in one ZIP", async () => {
+  const contexts = [];
+  vi.mocked(HTMLCanvasElement.prototype.getContext).mockImplementation(function getContext() {
+    const fillStyles = [];
+    const strokeStyles = [];
+    const context = {
+      beginPath: vi.fn(),
+      closePath: vi.fn(),
+      drawImage: vi.fn(),
+      fill: vi.fn(),
+      fillRect: vi.fn(),
+      fillStyles,
+      fillText: vi.fn(),
+      lineTo: vi.fn(),
+      measureText: vi.fn((text) => ({ width: String(text).length * 8 })),
+      moveTo: vi.fn(),
+      stroke: vi.fn(),
+      strokeRect: vi.fn(),
+      strokeStyles,
+    };
+    Object.defineProperties(context, {
+      fillStyle: { set: (value) => fillStyles.push(value) },
+      strokeStyle: { set: (value) => strokeStyles.push(value) },
+    });
+    contexts.push(context);
+    return context;
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function toBlob(callback) {
+    callback(new Blob([`${this.width}x${this.height}`], { type: "image/png" }));
+  });
+  const overlayBitmap = { width: 2, height: 2, close: vi.fn() };
+  vi.stubGlobal("createImageBitmap", vi.fn(async () => overlayBitmap));
+  let downloadedBlob = null;
+  let downloadedFilename = "";
+  URL.createObjectURL.mockImplementation((blob) => {
+    if (blob.type === "application/zip") {
+      downloadedBlob = blob;
+      return "blob:inference-zip";
+    }
+    return "blob:mask-overlay";
+  });
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function recordDownload() {
+    downloadedFilename = this.download;
+  });
+  const secondOverlay = deferred();
+  mockInferenceApi({
+    overlayDeferredByUrl: {
+      "/api/inference/images/complete-b/overlay?threshold=0.610": secondOverlay,
+    },
+  });
+  render(<InferencePage />);
+
+  const frame = await screen.findByLabelText("Composited source and binary mask");
+  await screen.findByAltText("Binary mask overlay");
+  vi.spyOn(frame, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 200 });
+  fireEvent(frame, new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+  fireEvent(frame, new MouseEvent("pointerup", { bubbles: true, clientX: 100, clientY: 100 }));
+
+  const download = screen.getByRole("button", { name: "Download all inference ZIP" });
+  await waitFor(() => expect(download).toBeEnabled());
+  fireEvent.click(download);
+
+  expect(await screen.findByRole("button", { name: "Preparing 2 / 2..." })).toBeDisabled();
+  secondOverlay.resolve();
+  expect(await screen.findByRole("status")).toHaveTextContent("Inference ZIP downloaded");
+  expect(downloadedFilename).toBe("inference_outputs.zip");
+  const archive = await JSZip.loadAsync(await blobArrayBuffer(downloadedBlob));
+  expect(Object.values(archive.files).filter((entry) => !entry.dir).map((entry) => entry.name).sort()).toEqual([
+    "override/override_histograms.png",
+    "override/override_roi_mask_overlay.png",
+    "override/override_whole_mask_overlay.png",
+    "reference/reference_histograms.png",
+    "reference/reference_roi_mask_overlay.png",
+    "reference/reference_whole_mask_overlay.png",
+  ]);
+  await expect(archive.file("reference/reference_whole_mask_overlay.png").async("text")).resolves.toBe("2x2");
+  await expect(archive.file("reference/reference_roi_mask_overlay.png").async("text")).resolves.toBe("1x1");
+  await expect(archive.file("override/override_whole_mask_overlay.png").async("text")).resolves.toBe("3x1");
+  await expect(archive.file("override/override_roi_mask_overlay.png").async("text")).resolves.toBe("1x1");
+  expect(contexts.flatMap((context) => context.fillStyles)).toEqual(expect.arrayContaining(["#788692", "#e7474f"]));
+  expect(contexts.flatMap((context) => context.strokeStyles)).toContain("#ff6b72");
+  expect(contexts.flatMap((context) => context.fillText.mock.calls.map(([text]) => text))).toEqual(expect.arrayContaining([
+    "Threshold 0.500",
+    "Whole image area fraction",
+    "ROI area fraction",
+  ]));
+  expect(overlayBitmap.close).toHaveBeenCalledTimes(2);
 });
 
 test("sets a typed root, supports folder selection, and reloads inference rows", async () => {

@@ -26,7 +26,7 @@ import {
   heatmapCompatibilityError,
 } from "./lib/heatmap.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
-import { fitAspectToBox, heatmapReportAspect } from "./lib/stageFit.js";
+import { fitAspectToBox } from "./lib/stageFit.js";
 import {
   createAspectLockedCrop,
   cropContainsPoint,
@@ -237,13 +237,7 @@ export default function App() {
     cellSize: selectedHeatmapCellSize,
   });
   const matchingHeatmap = heatmapSourceKey === activeHeatmapSourceKey ? heatmap : null;
-  const activeStageAspect = imageLayer === "heatmap" && matchingHeatmap
-    ? heatmapReportAspect({
-        columns: matchingHeatmap.columns,
-        rows: matchingHeatmap.rows,
-        imageAspect: activeImageAspect,
-      }) ?? activeImageAspect
-    : activeImageAspect;
+  const activeStageAspect = activeImageAspect;
   const heatmapComparison = useMemo(() => {
     if (!heatmapComparePrevious || !matchingHeatmap || !previousHeatmap) {
       return { value: null, error: "" };

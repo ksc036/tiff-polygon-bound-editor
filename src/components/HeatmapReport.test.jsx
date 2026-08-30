@@ -34,7 +34,7 @@ describe("HeatmapReport", () => {
     vi.restoreAllMocks();
   });
 
-  test("renders axes outside the heatmap without drawing a grid over the image", () => {
+  test("renders only the bordered heatmap box and its tooltip", () => {
     render(
       <HeatmapReport
         heatmap={heatmap}
@@ -49,52 +49,36 @@ describe("HeatmapReport", () => {
       />,
     );
 
-    expect(screen.getByText("Current: scan-a")).toBeInTheDocument();
-    expect(screen.getByText("Pixel Density | Cell 5x5 px | Grid 2x1")).toBeInTheDocument();
-    expect(screen.getByText("Grid X")).toBeInTheDocument();
-    expect(screen.getByText("Grid Y")).toBeInTheDocument();
-    expect(screen.getAllByTestId("heatmap-x-tick")).toHaveLength(5);
-    expect(screen.getAllByTestId("heatmap-y-tick")).toHaveLength(5);
-    expect(screen.getAllByTestId("heatmap-scale-tick")).toHaveLength(5);
+    const report = screen.getByLabelText("heatmap report");
+    expect(screen.getByLabelText("heatmap report plot")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Grid X axis")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Grid Y axis")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("heatmap-x-tick")).toHaveLength(0);
+    expect(screen.queryAllByTestId("heatmap-y-tick")).toHaveLength(0);
+    expect(screen.queryAllByTestId("heatmap-scale-tick")).toHaveLength(0);
+    expect(report.querySelector(".heatmap-report-header")).not.toBeInTheDocument();
+    expect(report.querySelector(".heatmap-report-scale-footer")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("heatmap cell grid")).not.toBeInTheDocument();
     expect(screen.getByLabelText("heatmap original image")).toHaveStyle({ opacity: "0.5" });
     expect(screen.getByRole("status")).toHaveTextContent("Row 1, Column 1");
   });
 
-  test("positions five axis ticks at the four plot intervals", () => {
+  test("uses the heatmap dimensions for the box aspect ratio", () => {
     renderAbsoluteReport();
 
     const plot = screen.getByLabelText("heatmap report plot");
-    const yAxis = screen.getByLabelText("Grid Y axis");
-    const xTick = screen.getAllByTestId("heatmap-x-tick")[0];
-    expect(plot.parentElement).toBe(yAxis.parentElement);
-    expect(plot.parentElement).toHaveClass("heatmap-report-main");
-    expect(xTick.closest(".heatmap-x-axis-main")).toBeInTheDocument();
-    expect(screen.getAllByTestId("heatmap-x-tick").map((tick) => tick.style.left)).toEqual([
-      "0%",
-      "25%",
-      "50%",
-      "75%",
-      "100%",
-    ]);
-    expect(screen.getAllByTestId("heatmap-y-tick").map((tick) => tick.style.top)).toEqual([
-      "0%",
-      "25%",
-      "50%",
-      "75%",
-      "100%",
-    ]);
+    expect(plot).toHaveStyle({ aspectRatio: "10 / 5" });
+    expect(plot.parentElement).toHaveClass("heatmap-report");
   });
 
-  test("matches the export pixel-density unit and visible scale wording", () => {
+  test("does not render a pixel-density scale", () => {
     renderAbsoluteReport();
 
-    expect(screen.getByText("Color range: 0 to 1 ratio")).toBeInTheDocument();
-    expect(screen.getByText("Scale")).toBeInTheDocument();
-    expect(screen.getByLabelText("Pixel Density (ratio)")).toHaveClass("absolute");
+    expect(screen.queryByLabelText("Pixel Density (ratio)")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("heatmap-scale-tick")).toHaveLength(0);
   });
 
-  test("renders a signed difference scale and both image labels for comparisons", () => {
+  test("does not render a scale for comparisons", () => {
     render(
       <HeatmapReport
         heatmap={heatmap}
@@ -114,11 +98,9 @@ describe("HeatmapReport", () => {
       />,
     );
 
-    expect(screen.getByText("Current: scan-a")).toBeInTheDocument();
-    expect(screen.getByText("Previous: scan-previous")).toBeInTheDocument();
-    expect(screen.getByText("Color range: -0.1 to +0.1 ratio")).toBeInTheDocument();
-    expect(screen.getByText("Scale")).toBeInTheDocument();
-    expect(screen.getByLabelText("Delta Pixel Density")).toHaveClass("difference");
+    expect(screen.queryByLabelText("Delta Pixel Density")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("heatmap-scale-tick")).toHaveLength(0);
+    expect(screen.getByLabelText("heatmap overlay")).toBeInTheDocument();
   });
 });
 

@@ -25,7 +25,7 @@ describe("application layout CSS", () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
     expect(css).toContain("grid-template-rows: auto auto minmax(420px, 60vh) max-content auto");
-    expect(css).toContain(".inference-controls {\n    overflow: visible;");
+    expect(css).toMatch(/\.inference-controls\s*\{\s*overflow: visible;/);
   });
 
   test("keeps the app shell fixed to the viewport so bottom panel resizing reclaims image space", async () => {
@@ -80,38 +80,22 @@ describe("application layout CSS", () => {
     expect(css.indexOf(".raw-canvas.heatmap-original-overlay {")).toBeLessThan(css.indexOf(".heatmap-tooltip {"));
   });
 
-  test("bounds the report, clips the plot, and permits header text to wrap", async () => {
+  test("centers a bordered heatmap box against the dark stage", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
     const reportRule = css.match(/\.heatmap-report\s*\{[^}]+\}/)?.[0] ?? "";
     const plotRule = css.match(/\.heatmap-report-plot\s*\{[^}]+\}/)?.[0] ?? "";
-    const headerRule = css.match(/\.heatmap-report-header\s*\{[^}]+\}/)?.[0] ?? "";
+    const stageRule = css.match(/\.image-stage\.heatmap-report-stage\s*\{[^}]+\}/)?.[0] ?? "";
 
     expect(reportRule).toContain("max-width:");
     expect(reportRule).toContain("max-height:");
+    expect(reportRule).toContain("align-items: center");
+    expect(reportRule).toContain("justify-content: center");
     expect(plotRule).toContain("overflow: hidden");
-    expect(headerRule).toContain("white-space: normal");
-    expect(headerRule).toContain("overflow-wrap: anywhere");
-  });
-
-  test("anchors all five report axis ticks to the four plot intervals", async () => {
-    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-
-    const xAxisRule = css.match(/\.heatmap-x-axis\s*\{[^}]+\}/)?.[0] ?? "";
-    const yAxisRule = css.match(/\.heatmap-y-axis\s*\{[^}]+\}/)?.[0] ?? "";
-    const reportMainRule = css.match(/\.heatmap-report-main\s*\{[^}]+\}/)?.[0] ?? "";
-    const xAxisMainRule = css.match(/\.heatmap-x-axis-main\s*\{[^}]+\}/)?.[0] ?? "";
-    const xTickRule = css.match(/\.heatmap-x-axis \[data-testid="heatmap-x-tick"\]\s*\{[^}]+\}/)?.[0] ?? "";
-    const yTickRule = css.match(/\.heatmap-y-axis \[data-testid="heatmap-y-tick"\]\s*\{[^}]+\}/)?.[0] ?? "";
-
-    expect(xAxisRule).toContain("position: relative");
-    expect(yAxisRule).toContain("position: relative");
-    expect(reportMainRule).toContain("grid-template-columns: var(--report-y-band) minmax(0, 1fr)");
-    expect(xAxisMainRule).toContain("grid-template-columns: var(--report-y-band) minmax(0, 1fr)");
-    expect(xTickRule).toContain("position: absolute");
-    expect(xTickRule).toContain("transform: translateX(-50%)");
-    expect(yTickRule).toContain("position: absolute");
-    expect(yTickRule).toContain("transform: translateY(-50%)");
+    expect(plotRule).toContain("border:");
+    expect(plotRule).toContain("box-shadow:");
+    expect(stageRule).toContain("background: #0a0d10");
+    expect(css).not.toContain(".heatmap-report-scale-footer");
   });
 
   test("reserves the mobile Heat Map stage for the report", async () => {
