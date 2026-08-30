@@ -277,19 +277,29 @@ test("uses an independent inference layout with status list and review stage", a
 });
 
 test("edits and saves independent cell boundaries without changing the inference ROI", async () => {
-  const { fetchMock } = mockInferenceApi();
+  const imagePoll = deferred();
+  const { fetchMock } = mockInferenceApi({ imageListDeferredByCall: { 2: imagePoll } });
   render(<InferencePage />);
 
   const stage = await screen.findByLabelText("Composited source and binary mask");
   await waitFor(() => expect(screen.getByRole("button", { name: "Add boundary" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Original source image")).toHaveAttribute("width", "2"));
+  await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/inference/images")).toHaveLength(2));
   vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 100, height: 100 });
   fireEvent.click(screen.getByRole("button", { name: "Add boundary" }));
   expect(screen.getByRole("button", { name: "Boundary 1" })).toBeInTheDocument();
-
-  fireEvent.pointerMove(stage, { clientX: 20, clientY: 30 });
-  fireEvent.keyDown(window, { code: "KeyP" });
   expect(await screen.findByText("Boundary 1 point order")).toBeInTheDocument();
+
+  fireEvent(stage, new MouseEvent("pointermove", { bubbles: true, clientX: 20, clientY: 30 }));
+  fireEvent.keyDown(window, { code: "KeyP" });
+  expect(await screen.findByRole("button", { name: "Delete point-1" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Save cell boundaries" })).toBeEnabled();
+
+  await act(async () => {
+    imagePoll.resolve();
+    await imagePoll.promise;
+  });
+  expect(screen.getByRole("button", { name: "Delete point-1" })).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Save cell boundaries" }));
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(

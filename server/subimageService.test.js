@@ -301,7 +301,7 @@ describe("saveSubimage", () => {
 
     expect(await readFile(paths.subimagePath)).toEqual(priorTiff);
     expect(await readFile(paths.subimageCropPath)).toEqual(priorCrop);
-    await expect(readdir(paths.subimageDir)).resolves.toEqual(["T01.tif", "crop.json"]);
+    expect((await readdir(paths.subimageDir)).sort()).toEqual(["T01.tif", "crop.json"].sort());
   });
 
   test("keeps a single save bound to its starting root when the live root changes during rendering", async () => {

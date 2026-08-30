@@ -144,7 +144,7 @@ test("fails a bundle when the mask snapshot changes during decode", async () => 
         snapshot += 1;
         return snapshot === 1
           ? actualStats
-          : { ...actualStats, ino: actualStats.ino + 1 };
+          : { ...actualStats, ino: actualStats.ino === 0 ? 1 : 0 };
       },
     },
   });

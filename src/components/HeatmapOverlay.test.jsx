@@ -42,7 +42,6 @@ describe("HeatmapOverlay", () => {
       <HeatmapOverlay
         heatmap={heatmap}
         metric="pixel-density"
-        calibration={{ slope: 0.1, intercept: 0.01 }}
         comparison={{
           previousValues: [0.02, 0.1],
           currentValues: [0.04, 0.2],
@@ -62,7 +61,7 @@ describe("HeatmapOverlay", () => {
     expect(context.fillRect).toHaveBeenNthCalledWith(2, 5, 0, 5, 5);
     expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 1 / 25");
     expect(screen.getByRole("status")).toHaveTextContent("Pixel Density 0.0400");
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.3000 mg/ml");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.3038 mg/ml");
     expect(screen.getByRole("status")).toHaveTextContent("Previous 0.0200, Current 0.0400, Change 0.0200");
   });
 
@@ -70,7 +69,6 @@ describe("HeatmapOverlay", () => {
     const props = {
       heatmap,
       metric: "pixel-density",
-      calibration: { slope: 0.1, intercept: 0.01 },
       comparison: null,
     };
     const { rerender } = render(<HeatmapOverlay {...props} pointer={{ x: 1, y: 1 }} />);
@@ -85,33 +83,30 @@ describe("HeatmapOverlay", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 5 / 25");
   });
 
-  test("leaves the canvas transparent for invalid Estimated calibration", () => {
-    const { container } = render(
+  test("draws estimated collagen density cells with the fixed model", () => {
+    render(
       <HeatmapOverlay
         heatmap={heatmap}
         metric="estimated-collagen-density"
-        calibration={{ slope: "", intercept: 0.01 }}
         comparison={null}
         pointer={null}
       />,
     );
 
     expect(context.clearRect).toHaveBeenCalledWith(0, 0, 10, 5);
-    expect(context.fillRect).not.toHaveBeenCalled();
-    expect(container.querySelector("rect")).not.toBeInTheDocument();
+    expect(context.fillRect).toHaveBeenCalledTimes(2);
   });
 
-  test("shows unavailable estimated density when calibration is invalid", () => {
+  test("shows fixed-model estimated density at the pointer", () => {
     render(
       <HeatmapOverlay
         heatmap={heatmap}
         metric="pixel-density"
-        calibration={{ slope: "", intercept: 0.01 }}
         comparison={null}
         pointer={{ x: 1, y: 1 }}
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density Unavailable");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.3038 mg/ml");
   });
 });

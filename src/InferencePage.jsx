@@ -465,7 +465,7 @@ export default function InferencePage() {
     return () => {
       alive = false;
     };
-  }, [activeImage, activeRootPath]);
+  }, [activeImage?.id, activeRootPath]);
 
   useEffect(() => {
     if (!activeCompleteImage) {
