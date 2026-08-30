@@ -80,8 +80,11 @@ export function renderOriginalPreview(raster) {
 export async function renderAnnotatedOriginal(raster, crop) {
   const right = crop.x + crop.width - 0.5;
   const bottom = crop.y + crop.height - 0.5;
+  const rectangleMarkup = crop.width === 1 || crop.height === 1
+    ? `<rect x="${crop.x}" y="${crop.y}" width="${crop.width}" height="${crop.height}" fill="#ff0000"/>`
+    : `<path d="M ${crop.x + 0.5} ${crop.y + 0.5} H ${right} V ${bottom} H ${crop.x + 0.5} Z" fill="none" stroke="#ff0000" stroke-width="1" shape-rendering="crispEdges"/>`;
   const rectangle = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${raster.width}" height="${raster.height}" viewBox="0 0 ${raster.width} ${raster.height}">
-  <path d="M ${crop.x + 0.5} ${crop.y + 0.5} H ${right} V ${bottom} H ${crop.x + 0.5} Z" fill="none" stroke="#ff0000" stroke-width="1" shape-rendering="crispEdges"/>
+  ${rectangleMarkup}
 </svg>`);
 
   return sharp(await renderOriginalPreview(raster))

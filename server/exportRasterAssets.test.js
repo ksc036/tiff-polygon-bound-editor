@@ -69,6 +69,11 @@ function fixtureRaster(width, height) {
   };
 }
 
+function pixelAt(decoded, x, y) {
+  const offset = (y * decoded.info.width + x) * decoded.info.channels;
+  return [...decoded.data.subarray(offset, offset + decoded.info.channels)];
+}
+
 afterEach(async () => {
   await Promise.all(
     tempRoots.splice(0).map((rootDir) => rm(rootDir, {
@@ -155,34 +160,56 @@ test("renders a valid constant-raster PNG without dividing by zero", async () =>
   expect([...constantPng.data]).toEqual([0, 0, 0, 0, 0, 0]);
 });
 
-test("renders matching parent and Subimage previews with only a crop rectangle", async () => {
+test("renders matching parent and Subimage previews", async () => {
   const raster = fixtureRaster(6, 4);
   const crop = { sourceWidth: 6, sourceHeight: 4, x: 2, y: 1, width: 3, height: 2 };
-  const original = await sharp(await renderOriginalPreview(raster)).greyscale().raw().toBuffer({
+  const subimage = await sharp(await renderSubimagePreview(raster, crop)).greyscale().raw().toBuffer({
+    resolveWithObject: true,
+  });
+
+  expect([subimage.info.width, subimage.info.height]).toEqual([3, 2]);
+  expect([...subimage.data]).toEqual([89, 100, 111, 155, 166, 177]);
+});
+
+test("colors exactly the crop perimeter and leaves its interior and surrounding pixels unchanged", async () => {
+  const raster = fixtureRaster(7, 7);
+  const crop = { sourceWidth: 7, sourceHeight: 7, x: 1, y: 1, width: 5, height: 5 };
+  const original = await sharp(await renderOriginalPreview(raster)).ensureAlpha().raw().toBuffer({
     resolveWithObject: true,
   });
   const annotated = await sharp(await renderAnnotatedOriginal(raster, crop)).ensureAlpha().raw().toBuffer({
     resolveWithObject: true,
   });
-  const subimage = await sharp(await renderSubimagePreview(raster, crop)).greyscale().raw().toBuffer({
+
+  expect([annotated.info.width, annotated.info.height]).toEqual([7, 7]);
+  for (let y = 0; y < raster.height; y += 1) {
+    for (let x = 0; x < raster.width; x += 1) {
+      const onPerimeter = x >= 1 && x <= 5 && y >= 1 && y <= 5
+        && (x === 1 || x === 5 || y === 1 || y === 5);
+      expect(pixelAt(annotated, x, y), `pixel ${x},${y}`).toEqual(
+        onPerimeter ? [255, 0, 0, 255] : pixelAt(original, x, y),
+      );
+    }
+  }
+});
+
+test("marks a valid 1x1 crop with one visible red pixel", async () => {
+  const raster = fixtureRaster(4, 3);
+  const crop = { sourceWidth: 4, sourceHeight: 3, x: 2, y: 1, width: 1, height: 1 };
+  const original = await sharp(await renderOriginalPreview(raster)).ensureAlpha().raw().toBuffer({
+    resolveWithObject: true,
+  });
+  const annotated = await sharp(await renderAnnotatedOriginal(raster, crop)).ensureAlpha().raw().toBuffer({
     resolveWithObject: true,
   });
 
-  expect([annotated.info.width, annotated.info.height]).toEqual([6, 4]);
-  expect([subimage.info.width, subimage.info.height]).toEqual([3, 2]);
-  expect([...subimage.data]).toEqual([89, 100, 111, 155, 166, 177]);
-
-  const redPixels = [];
-  for (let index = 0; index < annotated.info.width * annotated.info.height; index += 1) {
-    const offset = index * annotated.info.channels;
-    if (annotated.data[offset] > annotated.data[offset + 1] + 40) {
-      redPixels.push({ x: index % annotated.info.width, y: Math.floor(index / annotated.info.width) });
+  for (let y = 0; y < raster.height; y += 1) {
+    for (let x = 0; x < raster.width; x += 1) {
+      expect(pixelAt(annotated, x, y), `pixel ${x},${y}`).toEqual(
+        x === crop.x && y === crop.y ? [255, 0, 0, 255] : pixelAt(original, x, y),
+      );
     }
   }
-  expect(redPixels.length).toBeGreaterThan(0);
-  expect(redPixels.every(({ x, y }) => x >= 2 && x <= 4 && y >= 1 && y <= 2)).toBe(true);
-  expect(original.data[0]).toBe(0);
-  expect([...annotated.data.subarray(0, 4)]).toEqual([0, 0, 0, 255]);
 });
 
 test("creates deterministic CRLF Subimage dimensions CSV", () => {
