@@ -596,6 +596,31 @@ input[type="range"] {
   overflow-wrap: anywhere;
 }
 
+.heatmap-scale-panel {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px 0;
+  border-top: 1px solid #27313c;
+  border-bottom: 1px solid #27313c;
+  background: #151a20;
+}
+
+.heatmap-scale-bar {
+  box-sizing: border-box;
+  width: 100%;
+  height: 14px;
+  border: 1px solid #465666;
+}
+
+.heatmap-scale-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #aab7c3;
+  font-size: 0.76rem;
+}
+
 .segmented-control {
   display: inline-grid;
   grid-auto-flow: column;

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import HeatmapReport from "./components/HeatmapReport.jsx";
+import HeatmapScale from "./components/HeatmapScale.jsx";
 import SubimageOverlay from "./components/SubimageOverlay.jsx";
 import SubimagePanel from "./components/SubimagePanel.jsx";
 import {
@@ -1764,6 +1765,9 @@ export default function App() {
               {heatmapViewStatus}
             </span>
           </section>
+        ) : null}
+        {imageLayer === "heatmap" ? (
+          <HeatmapScale metric={heatmapMetric} comparison={heatmapComparison.value} />
         ) : null}
         <section className="heatmap-batch" aria-labelledby="heatmap-batch-heading">
           <div className="heatmap-batch-heading">

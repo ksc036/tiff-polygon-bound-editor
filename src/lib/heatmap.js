@@ -93,6 +93,14 @@ export function heatmapDisplayRange(metric) {
   return { min: 0, max: 1, unit: "" };
 }
 
+export function heatmapGradientCss() {
+  return `linear-gradient(to right, ${INFERNO_STOPS.map(([stop, color]) => `${color} ${stop * 100}%`).join(", ")})`;
+}
+
+export function differenceGradientCss() {
+  return `linear-gradient(to right, ${DIFFERENCE_BLUE} 0%, ${DIFFERENCE_WHITE} 50%, ${DIFFERENCE_RED} 100%)`;
+}
+
 export function infernoColor(value, min, max) {
   const normalized = normalizeColorValue(value, min, max);
   return colorFromStops(INFERNO_STOPS, normalized);

@@ -1831,9 +1831,14 @@ describe("App", () => {
     const report = await screen.findByLabelText("heatmap report");
     const plot = within(report).getByLabelText("heatmap report plot");
     const rawCanvas = within(plot).getByLabelText("heatmap original image");
+    const scale = screen.getByLabelText("Heatmap scale");
 
     expect(screen.getByLabelText("Image editor")).toHaveClass("heatmap-mode");
     expect(screen.getByTestId("image-stage")).toHaveStyle({ aspectRatio: "1.25" });
+    expect(screen.getByRole("button", { name: "Pixel Density" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Estimated Collagen Density" })).toBeInTheDocument();
+    expect(scale).toBeInTheDocument();
+    expect(within(plot).queryByLabelText("Heatmap scale")).not.toBeInTheDocument();
     expect(report).not.toHaveTextContent("Current: plate-a");
     expect(report).not.toHaveTextContent("Cell 20x20 px | Grid 5x4");
     expect(screen.queryByLabelText("heatmap color legend")).not.toBeInTheDocument();

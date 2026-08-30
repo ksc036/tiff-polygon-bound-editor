@@ -98,6 +98,22 @@ describe("application layout CSS", () => {
     expect(css).not.toContain(".heatmap-report-scale-footer");
   });
 
+  test("styles the detached heatmap scale as a stable sidebar panel", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const panelRule = css.match(/\.heatmap-scale-panel\s*\{[^}]+\}/)?.[0] ?? "";
+    const barRule = css.match(/\.heatmap-scale-bar\s*\{[^}]+\}/)?.[0] ?? "";
+    const labelsRule = css.match(/\.heatmap-scale-labels\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(panelRule).toContain("gap: 7px");
+    expect(panelRule).toContain("padding: 10px 0");
+    expect(panelRule).toContain("border-top: 1px solid #27313c");
+    expect(panelRule).toContain("border-bottom: 1px solid #27313c");
+    expect(panelRule).toContain("background: #151a20");
+    expect(barRule).toContain("height: 14px");
+    expect(labelsRule).toContain("justify-content: space-between");
+  });
+
   test("reserves the mobile Heat Map stage for the report", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
