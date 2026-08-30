@@ -11,8 +11,6 @@ import {
   infernoColor,
 } from "./heatmap.js";
 
-const calibration = { slope: 0.1, intercept: 0.05 };
-
 function heatmap(overrides = {}) {
   const width = overrides.width ?? 10;
   const height = overrides.height ?? 10;
@@ -54,28 +52,27 @@ function heatmapWithDensities(values) {
 }
 
 describe("heatmap calculations", () => {
-  test("uses the existing calibration formula", () => {
-    expect(estimateHeatmapCollagenDensity(0.2, calibration)).toBeCloseTo(1.5);
-    expect(estimateHeatmapCollagenDensity(0.2, { slope: "0.1", intercept: "0.05" })).toBeCloseTo(1.5);
+  test("uses the fixed one-phase density model", () => {
+    expect(estimateHeatmapCollagenDensity(0.2)).toBeCloseTo(1.7306908086);
   });
 
-  test("returns null for invalid calibration inputs", () => {
-    expect(estimateHeatmapCollagenDensity(0.2, { slope: 0, intercept: 0.05 })).toBeNull();
-    expect(estimateHeatmapCollagenDensity(Number.NaN, calibration)).toBeNull();
+  test("saturates values outside the displayed model range", () => {
+    expect(estimateHeatmapCollagenDensity(0.5)).toBe(8);
+    expect(estimateHeatmapCollagenDensity(Number.NaN)).toBeNull();
   });
 
   test("reads raw and estimated metric values without rescaling", () => {
     const cell = { pixelDensity: 0.2 };
 
-    expect(heatmapMetricValue(cell, "pixel-density", calibration)).toBe(0.2);
-    expect(heatmapMetricValue(cell, "estimated-collagen-density", calibration)).toBeCloseTo(1.5);
+    expect(heatmapMetricValue(cell, "pixel-density")).toBe(0.2);
+    expect(heatmapMetricValue(cell, "estimated-collagen-density")).toBeCloseTo(1.7306908086);
   });
 
   test("calculates signed previous-image changes without rescaling values", () => {
     const current = heatmapWithDensities([0.2, 0.1]);
     const previous = heatmapWithDensities([0.05, 0.3]);
 
-    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density", calibration })).toEqual({
+    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density" })).toEqual({
       currentValues: [0.2, 0.1],
       previousValues: [0.05, 0.3],
       values: [0.15, -0.2],
@@ -83,8 +80,8 @@ describe("heatmap calculations", () => {
     });
   });
 
-  test("preserves unavailable estimated values for zero-slope calibration", () => {
-    const current = heatmapWithDensities([0.2, 0.1]);
+  test("saturates estimated values outside the one-phase display range", () => {
+    const current = heatmapWithDensities([0.2, 0.5]);
     const previous = heatmapWithDensities([0.05, 0.3]);
 
     expect(
@@ -92,32 +89,11 @@ describe("heatmap calculations", () => {
         current,
         previous,
         metric: "estimated-collagen-density",
-        calibration: { slope: 0, intercept: 0.05 },
       }),
-    ).toEqual({
-      currentValues: [null, null],
-      previousValues: [null, null],
-      values: [null, null],
-      maxAbs: 0,
-    });
-  });
-
-  test("preserves unavailable estimated values for non-numeric calibration", () => {
-    const current = heatmapWithDensities([0.2]);
-    const previous = heatmapWithDensities([0.05]);
-
-    expect(
-      buildHeatmapDifference({
-        current,
-        previous,
-        metric: "estimated-collagen-density",
-        calibration: { slope: "not-a-number", intercept: "0.05" },
-      }),
-    ).toEqual({
-      currentValues: [null],
-      previousValues: [null],
-      values: [null],
-      maxAbs: 0,
+    ).toMatchObject({
+      currentValues: [expect.any(Number), 8],
+      previousValues: [expect.any(Number), expect.any(Number)],
+      values: [expect.any(Number), expect.any(Number)],
     });
   });
 
@@ -125,7 +101,7 @@ describe("heatmap calculations", () => {
     const current = heatmapWithDensities([0.2, Number.NaN]);
     const previous = heatmapWithDensities([0.1, 0.3]);
 
-    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density", calibration })).toEqual({
+    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density" })).toEqual({
       currentValues: [0.2, null],
       previousValues: [0.1, 0.3],
       values: [0.1, null],
@@ -138,7 +114,7 @@ describe("heatmap calculations", () => {
     const current = heatmapWithDensities(Array.from({ length: cellCount }, (_, index) => (index === cellCount - 1 ? 0.9 : 0.2)));
     const previous = heatmapWithDensities(Array.from({ length: cellCount }, () => 0.1));
 
-    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density", calibration }).maxAbs).toBe(0.8);
+    expect(buildHeatmapDifference({ current, previous, metric: "pixel-density" }).maxAbs).toBe(0.8);
   });
 
   test("rejects incompatible dimensions and cell sizes", () => {
@@ -163,7 +139,7 @@ describe("heatmap calculations", () => {
 
   test("provides metric display ranges", () => {
     expect(heatmapDisplayRange("pixel-density")).toEqual({ min: 0, max: 1, unit: "" });
-    expect(heatmapDisplayRange("estimated-collagen-density")).toEqual({ min: 0, max: 3, unit: "mg/ml" });
+    expect(heatmapDisplayRange("estimated-collagen-density")).toEqual({ min: 0, max: 8, unit: "mg/ml" });
   });
 
   test("resolves cells at image coordinates including partial edge cells", () => {

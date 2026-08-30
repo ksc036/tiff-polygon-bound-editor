@@ -265,7 +265,7 @@ describe("createApp", () => {
   test.each([
     { slope: 0, intercept: 1 },
     { slope: null, intercept: 1 },
-  ])("rejects invalid export calibration before streaming", async (calibration) => {
+  ])("ignores legacy export calibration fields and uses the fixed model", async (calibration) => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
     await writeImage(imageRoot, "T01", "frame001.tif");
@@ -274,9 +274,8 @@ describe("createApp", () => {
       body: { calibration },
     });
 
-    expect(response.status).toBe(400);
-    expect(response.headers.get("content-type")).toContain("application/json");
-    await expect(response.json()).resolves.toEqual({ error: "Invalid export calibration." });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/zip");
   });
 
   test("rejects export before streaming when no root is active", async () => {

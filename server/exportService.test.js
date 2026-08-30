@@ -12,8 +12,8 @@ import {
   ExportError,
   datasetExportDirectory,
   datasetExportFilename,
+  densityModelForExport,
   safeArchiveSegment,
-  validateExportCalibration,
   writeDatasetZip,
 } from "./exportService.js";
 
@@ -177,12 +177,8 @@ afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-test("validates calibration and creates deterministic safe names", () => {
-  expect(validateExportCalibration({ slope: 0.069676956982087, intercept: 0.067893820336777 })).toEqual({
-    slope: 0.069676956982087,
-    intercept: 0.067893820336777,
-  });
-  expect(() => validateExportCalibration({ slope: 0, intercept: 1 })).toThrow("non-zero");
+test("uses the fixed density model and creates deterministic safe names", () => {
+  expect(densityModelForExport()).toMatchObject({ y0: -0.005983, plateau: 0.4394, k: 0.3587 });
   expect(datasetExportFilename("/data/Study A", new Date("2026-07-27T01:02:03Z"))).toBe(
     "Study_A_export_20260727-010203.zip",
   );

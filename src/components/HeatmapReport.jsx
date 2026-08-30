@@ -27,7 +27,6 @@ export default function HeatmapReport(props) {
     min: range.min,
     max: range.max,
     comparison: Boolean(props.comparison),
-    calibration: props.calibration,
   });
   const xTicks = heatmapAxisTickValues(props.heatmap.columns);
   const yTicks = heatmapAxisTickValues(props.heatmap.rows);
@@ -69,7 +68,6 @@ export default function HeatmapReport(props) {
             <HeatmapOverlay
               heatmap={props.heatmap}
               metric={props.metric}
-              calibration={props.calibration}
               comparison={props.comparison}
               pointer={props.pointer}
             />

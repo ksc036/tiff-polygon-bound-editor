@@ -1,5 +1,7 @@
 export const HEATMAP_FIGURE_TICK_COUNT = 5;
 
+import { collagenDensityModelText } from "./collagenDensity.js";
+
 const TICK_RATIOS = Object.freeze([0, 0.25, 0.5, 0.75, 1]);
 
 export function heatmapAxisTickValues(count) {
@@ -19,8 +21,8 @@ export function formatHeatmapFigureRange(min, max, { signed = false } = {}) {
   return `${formatRangeValue(min, signed)} to ${formatRangeValue(max, signed)}`;
 }
 
-export function heatmapCalibrationText(calibration) {
-  return `Calibration: Pixel Density = ${formatHeatmapFigureNumber(calibration?.slope)} * Collagen Density + ${formatHeatmapFigureNumber(calibration?.intercept)}`;
+export function heatmapCalibrationText() {
+  return `Density model: ${collagenDensityModelText()}`;
 }
 
 export function heatmapFigureText({
@@ -36,7 +38,6 @@ export function heatmapFigureText({
   min,
   max,
   comparison = false,
-  calibration,
 }) {
   return {
     titleLines: [
@@ -44,7 +45,7 @@ export function heatmapFigureText({
       ...(previousImage ? [`Previous: ${previousImage}`] : []),
     ],
     detailLine: `${metricLabel} | Cell ${cellWidth}x${cellHeight} px | Grid ${columns}x${rows}`,
-    calibrationLine: heatmapCalibrationText(calibration),
+    calibrationLine: heatmapCalibrationText(),
     rangeLine: `Color range: ${formatHeatmapFigureRange(min, max, { signed: comparison })}${metricUnit ? ` ${metricUnit}` : ""}`,
     colorBarLabel: comparison
       ? metric === "pixel-density" ? "Delta Pixel Density" : "Delta Collagen Density (mg/ml)"

@@ -11,6 +11,7 @@ import {
 } from "./exportHeatmaps.js";
 import { renderRoiOverview } from "./exportRoiOverview.js";
 import { createImageWorkbook, workbookFailureText } from "./exportWorkbook.js";
+import { COLLAGEN_DENSITY_MODEL } from "../shared/collagenDensity.js";
 
 const ANALYSIS_MODES = new Set(["outside", "inside"]);
 const REQUIRED_BAND_IDS = ["near", "mid", "far"];
@@ -58,16 +59,8 @@ export class ExportError extends Error {
   }
 }
 
-export function validateExportCalibration(value) {
-  const slope = value?.slope;
-  const intercept = value?.intercept;
-  if (!Number.isFinite(slope) || !Number.isFinite(intercept)) {
-    throw new ExportError("INVALID_CALIBRATION", "Calibration values must be finite numbers.", 400);
-  }
-  if (slope === 0) {
-    throw new ExportError("INVALID_CALIBRATION", "Calibration slope must be non-zero.", 400);
-  }
-  return { slope, intercept };
+export function densityModelForExport() {
+  return COLLAGEN_DENSITY_MODEL;
 }
 
 export function safeArchiveSegment(value) {
@@ -100,13 +93,12 @@ export function datasetExportFilename(rootPath, date) {
 export async function writeDatasetZip({
   storage,
   output,
-  calibration,
   autoSavedImageId = null,
   maxImagePixels,
   now = () => new Date(),
   signal,
 }) {
-  const checkedCalibration = validateExportCalibration(calibration);
+  const densityModel = densityModelForExport();
   const exportStorage = storage?.createSnapshot?.() ?? storage;
   const rootPath = exportStorage?.getRoot?.();
   if (!rootPath) {
@@ -126,7 +118,7 @@ export async function writeDatasetZip({
       planSavedHeatmapFigures({
         storage: exportStorage,
         images,
-        calibration: checkedCalibration,
+        calibration: densityModel,
         signal,
       }),
       signal,
@@ -156,7 +148,7 @@ export async function writeDatasetZip({
       archive,
       rootDirectory,
       records,
-      calibration: checkedCalibration,
+      calibration: densityModel,
       exportedAt,
       maxImagePixels,
       storage: exportStorage,

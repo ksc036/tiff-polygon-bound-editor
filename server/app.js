@@ -10,7 +10,6 @@ import { createMaskPreview, createRoiOverlay, createSkeletonPreview } from "./pr
 import {
   ExportError,
   datasetExportFilename,
-  validateExportCalibration,
   writeDatasetZip,
 } from "./exportService.js";
 import { FOLDER_PICKER_CODES, FolderPickerError } from "./folderPicker.js";
@@ -137,7 +136,6 @@ function safeErrorResponse(error) {
   if (error instanceof ExportError) {
     const messages = {
       ROOT_UNSET: "Storage root has not been set.",
-      INVALID_CALIBRATION: "Invalid export calibration.",
       INVALID_IMAGE: "Export image id is invalid.",
       EXPORT_ABORTED: "Dataset export was cancelled.",
       EXPORT_FAILED: "Dataset export failed.",
@@ -720,7 +718,6 @@ export function createApp({
 
   app.post("/api/export", async (request, response, next) => {
     try {
-      const calibration = validateExportCalibration(request.body?.calibration);
       let exportStorage;
       try {
         exportStorage = imageStorage.createSnapshot?.() ?? imageStorage;
@@ -760,7 +757,6 @@ export function createApp({
       await writeDatasetZip({
         storage: exportStorage,
         output: response,
-        calibration,
         autoSavedImageId,
         maxImagePixels,
         now: () => now,

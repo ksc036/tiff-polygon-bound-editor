@@ -1,5 +1,11 @@
 import ExcelJS from "exceljs";
 import { buildAnalysisRows } from "../shared/analysisRows.js";
+import {
+  COLLAGEN_DENSITY_MODEL,
+  collagenDensityInverseText,
+  collagenDensityModelText,
+  estimateCollagenDensity,
+} from "../shared/collagenDensity.js";
 
 const HEADER_FILL = "FF1E293B";
 const HEADER_FONT = "FFFFFFFF";
@@ -28,7 +34,7 @@ const ROI_COLUMNS = [
 
 const METRIC_DEFINITIONS = [
   ["Pixel Density", "mask pixels / ROI area pixels", "0 to 1", "ratio"],
-  ["Estimated Collagen Density", "(Pixel Density - b) / a", "calibration-derived", "mg/ml"],
+  ["Estimated Collagen Density", collagenDensityInverseText(), "one-phase model-derived", "mg/ml"],
   ["ROI Alignment", "nematic order of all fiber segment angles in the ROI", "0 random to 1 aligned", "unitless"],
   ["Radial Alignment", "mean cos(2(theta - boundary-normal angle))", "-1 circumferential to 1 radial", "unitless"],
   ["Circumferential Alignment", "negative radial alignment", "-1 radial to 1 circumferential", "unitless"],
@@ -61,7 +67,6 @@ export function workbookFailureText({ imageFolder, error }) {
 function addRoiStatisticsSheet(workbook, input) {
   const sheet = workbook.addWorksheet("ROI Statistics");
   const roiEntry = input.roiEntry ?? {};
-  const calibration = input.calibration ?? {};
   const rows = buildAnalysisRows(input.analysis, input.bounds);
   configureSheet(sheet, ROI_COLUMNS.map(([header]) => header), ROI_COLUMNS.map(([, , width]) => width));
 
@@ -80,7 +85,7 @@ function addRoiStatisticsSheet(workbook, input) {
       numberOrBlank(metrics.roiAreaPx),
       numberOrBlank(metrics.maskPixelCount),
       numberOrBlank(metrics.density),
-      estimatedCollagenDensity(metrics.density, calibration),
+      estimateCollagenDensity(metrics.density),
       numberOrBlank(metrics.globalAlignment),
       numberOrBlank(metrics.radialNormalAlignment),
       numberOrBlank(metrics.tangentialAlignment),
@@ -116,8 +121,11 @@ function addImageSummarySheet(workbook, input) {
     ["Mask modified", dateValue(sourceFiles.mask?.mtimeMs)],
     ["Bounds modified", dateValue(sourceFiles.bounds?.mtimeMs)],
     ["Analysis modified", dateValue(sourceFiles.analysis?.mtimeMs)],
-    ["Calibration slope (a)", numberOrBlank(input.calibration?.slope)],
-    ["Calibration intercept (b)", numberOrBlank(input.calibration?.intercept)],
+    ["Density model", "One-phase association"],
+    ["Pixel density model", collagenDensityModelText()],
+    ["Model Y0", COLLAGEN_DENSITY_MODEL.y0],
+    ["Model plateau", COLLAGEN_DENSITY_MODEL.plateau],
+    ["Model K", COLLAGEN_DENSITY_MODEL.k],
     ["Bounds auto-saved before export", Boolean(input.autoSavedBounds)],
     ["Exported at", dateValue(input.exportedAt)],
   ];
@@ -165,8 +173,8 @@ function addExportReportSheet(workbook, input) {
   const sheet = workbook.addWorksheet("Export Report");
   configureSheet(
     sheet,
-    ["Timestamp", "Status", "Artifact", "Message", "Calibration Slope (a)", "Calibration Intercept (b)"],
-    [24, 12, 18, 38, 24, 28],
+    ["Timestamp", "Status", "Artifact", "Message", "Density Model"],
+    [24, 12, 18, 38, 52],
   );
 
   const entries = input.reportEntries ?? [];
@@ -176,8 +184,7 @@ function addExportReportSheet(workbook, input) {
       safeStatus(entry.status),
       safeText(entry.artifact),
       safeText(entry.message ?? entry.reason),
-      numberOrBlank(input.calibration?.slope),
-      numberOrBlank(input.calibration?.intercept),
+      "One-phase association",
     ]);
   }
   if (entries.length === 0) {
@@ -186,12 +193,11 @@ function addExportReportSheet(workbook, input) {
       "Included",
       "Workbook",
       "Workbook generated.",
-      numberOrBlank(input.calibration?.slope),
-      numberOrBlank(input.calibration?.intercept),
+      "One-phase association",
     ]);
   }
   formatDates(sheet, 1);
-  applyAutoFilter(sheet, "F");
+  applyAutoFilter(sheet, "E");
 }
 
 function configureSheet(sheet, headers, widths) {
@@ -233,14 +239,6 @@ function artifactValue({ entry, label, directory }) {
   const relativePath = artifactRelativePath(entry?.path, directory);
   if (entry?.status === "Included" && relativePath) return { text: label, hyperlink: relativePath };
   return `Skipped: ${safeText(entry?.reason) || "Artifact unavailable."}`;
-}
-
-function estimatedCollagenDensity(density, calibration) {
-  const normalizedDensity = finiteNumber(density);
-  const slope = finiteNumber(calibration?.slope);
-  const intercept = finiteNumber(calibration?.intercept);
-  if (normalizedDensity == null || slope == null || slope === 0 || intercept == null) return null;
-  return (normalizedDensity - intercept) / slope;
 }
 
 function numberOrBlank(value) {

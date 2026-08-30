@@ -23,7 +23,6 @@ import {
 import { findNearestSegment } from "./lib/geometry.js";
 import {
   buildHeatmapDifference,
-  estimateHeatmapCollagenDensity,
   heatmapCompatibilityError,
 } from "./lib/heatmap.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
@@ -36,6 +35,7 @@ import {
   sameCrop,
 } from "./lib/subimageCrop.js";
 import { buildAnalysisRows, groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
+import { estimateCollagenDensity } from "../shared/collagenDensity.js";
 
 const OPACITY_KEY = "raw16-editor-point-opacity";
 const DEFAULT_OPACITY = 0.85;
@@ -55,8 +55,6 @@ const ANALYSIS_PANEL_HEIGHT_KEY = "raw16-editor-analysis-panel-height";
 const DEFAULT_ANALYSIS_PANEL_HEIGHT = 210;
 const MIN_ANALYSIS_PANEL_HEIGHT = 0;
 const MAX_ANALYSIS_PANEL_HEIGHT = 520;
-const DEFAULT_COLLAGEN_DENSITY_SLOPE = 0.069676956982087;
-const DEFAULT_COLLAGEN_DENSITY_INTERCEPT = 0.067893820336777;
 const ANALYSIS_MODE_LABELS = { outside: "Outside ROI", inside: "Inside area" };
 const FIXED_HEATMAP_PRESETS = { small: 20, medium: 50, large: 100 };
 const LEGACY_HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
@@ -87,9 +85,9 @@ const ANALYSIS_COLUMNS = [
   {
     key: "estimatedCollagenDensity",
     label: "Estimated Collagen Density",
-    help: "Estimated collagen density in mg/ml, calculated as x = (Pixel Density - b) / a.",
+    help: "Estimated collagen density in mg/ml from the fixed one-phase pixel-density calibration, capped at 0 to 8 mg/ml.",
     format: formatCollagenDensity,
-    value: (metrics, densityCalibration) => estimateCollagenDensity(metrics.density, densityCalibration),
+    value: (metrics) => estimateCollagenDensity(metrics.density),
   },
   {
     key: "globalAlignment",
@@ -176,10 +174,6 @@ export default function App() {
     const stored = Number(localStorage.getItem(OPACITY_KEY));
     return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_OPACITY;
   });
-  const [densityCalibration, setDensityCalibration] = useState({
-    slope: String(DEFAULT_COLLAGEN_DENSITY_SLOPE),
-    intercept: String(DEFAULT_COLLAGEN_DENSITY_INTERCEPT),
-  });
   const [heatmapPreset, setHeatmapPreset] = useState(loadSelectedHeatmapPreset);
   const [heatmapMetric, setHeatmapMetric] = useState(loadHeatmapMetric);
   const [heatmapOriginalOpacity, setHeatmapOriginalOpacity] = useState(() =>
@@ -250,9 +244,6 @@ export default function App() {
         imageAspect: activeImageAspect,
       }) ?? activeImageAspect
     : activeImageAspect;
-  const invalidHeatmapCalibration =
-    heatmapMetric === "estimated-collagen-density" &&
-    !Number.isFinite(estimateHeatmapCollagenDensity(0, densityCalibration));
   const heatmapComparison = useMemo(() => {
     if (!heatmapComparePrevious || !matchingHeatmap || !previousHeatmap) {
       return { value: null, error: "" };
@@ -264,14 +255,13 @@ export default function App() {
           current: matchingHeatmap,
           previous: previousHeatmap,
           metric: heatmapMetric,
-          calibration: densityCalibration,
         }),
         error: "",
       };
     } catch (error) {
       return { value: null, error: error.message };
     }
-  }, [densityCalibration, matchingHeatmap, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
+  }, [matchingHeatmap, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
   const heatmapViewStatus = heatmapLoading
     ? "Loading heatmap"
     : heatmapError
@@ -282,9 +272,7 @@ export default function App() {
         ? "Loading previous heatmap"
         : previousHeatmapError
           ? previousHeatmapError
-          : invalidHeatmapCalibration
-            ? "Estimated density requires valid calibration"
-            : heatmapComparison.error
+          : heatmapComparison.error
               ? `Previous heatmap unavailable: ${heatmapComparison.error} Showing current heatmap.`
               : heatmapComparePrevious && previousHeatmap
                 ? `Compared with ${previousImage?.folder ?? previousImage?.imageFolder}`
@@ -1079,10 +1067,6 @@ export default function App() {
     }
   }
 
-  function handleDensityCalibrationChange(key, value) {
-    setDensityCalibration((current) => ({ ...current, [key]: value }));
-  }
-
   function handleHeatmapPresetSelect(preset) {
     setHeatmapPreset(preset);
     localStorage.setItem(HEATMAP_SELECTED_PRESET_KEY, preset);
@@ -1392,13 +1376,7 @@ export default function App() {
       const response = await fetch("/api/export", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          calibration: {
-            slope: Number(densityCalibration.slope),
-            intercept: Number(densityCalibration.intercept),
-          },
-          autoSavedImageId,
-        }),
+        body: JSON.stringify({ autoSavedImageId }),
       });
       if (!response.ok) {
         throw new Error(await responseError(response, "Export failed."));
@@ -2115,7 +2093,6 @@ export default function App() {
               <HeatmapReport
                 heatmap={matchingHeatmap}
                 metric={heatmapMetric}
-                calibration={densityCalibration}
                 comparison={heatmapComparison.value}
                 pointer={pointer}
                 currentImageName={imageDisplayName(activeImage)}
@@ -2358,30 +2335,6 @@ export default function App() {
             <button type="button" disabled={!activeImage || !bounds || analysisLoading} onClick={handleCalculateAnalysis}>
               {analysisLoading ? "Working" : "Calculate"}
             </button>
-            <div className="density-calibration" aria-label="Density calibration">
-              <label htmlFor="density-calibration-slope">
-                <span>a</span>
-                <input
-                  id="density-calibration-slope"
-                  aria-label="Density calibration a"
-                  type="number"
-                  step="any"
-                  value={densityCalibration.slope}
-                  onChange={(event) => handleDensityCalibrationChange("slope", event.target.value)}
-                />
-              </label>
-              <label htmlFor="density-calibration-intercept">
-                <span>b</span>
-                <input
-                  id="density-calibration-intercept"
-                  aria-label="Density calibration b"
-                  type="number"
-                  step="any"
-                  value={densityCalibration.intercept}
-                  onChange={(event) => handleDensityCalibrationChange("intercept", event.target.value)}
-                />
-              </label>
-            </div>
             {imageLayer !== "heatmap" ? <button
               type="button"
               className="compact-panel-toggle"
@@ -2496,7 +2449,7 @@ export default function App() {
 		                        <td>{row.bandLabel}</td>
 		                        {ANALYSIS_COLUMNS.map((column) => (
 	                          <td key={column.key}>
-                              {column.format(analysisColumnValue(column, row.metrics, densityCalibration))}
+                              {column.format(analysisColumnValue(column, row.metrics))}
                             </td>
 	                        ))}
 	                      </tr>
@@ -2540,8 +2493,8 @@ function MetricColumnHeader({ activeMetricHelp, column, onHide, onShow }) {
   );
 }
 
-function analysisColumnValue(column, metrics, densityCalibration) {
-  return column.value ? column.value(metrics, densityCalibration) : metrics[column.key];
+function analysisColumnValue(column, metrics) {
+  return column.value ? column.value(metrics) : metrics[column.key];
 }
 
 function buildRoiPreviewGroups(polygons, image) {
@@ -2954,25 +2907,6 @@ function groupVisible(visibilityByGroupId, groupId) {
 
 function groupDisplayVisible(drawVisibilityByGroupId, statsVisibilityByGroupId, groupId) {
   return groupVisible(drawVisibilityByGroupId, groupId) && groupVisible(statsVisibilityByGroupId, groupId);
-}
-
-function estimateCollagenDensity(pixelDensity, densityCalibration) {
-  const slope = calibrationNumber(densityCalibration.slope);
-  const intercept = calibrationNumber(densityCalibration.intercept);
-  if (!Number.isFinite(pixelDensity) || !Number.isFinite(slope) || !Number.isFinite(intercept) || slope === 0) {
-    return null;
-  }
-
-  return (pixelDensity - intercept) / slope;
-}
-
-function calibrationNumber(value) {
-  if (String(value).trim() === "") {
-    return null;
-  }
-
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
 }
 
 function formatMetric(value) {

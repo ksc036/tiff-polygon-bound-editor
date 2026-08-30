@@ -8,13 +8,13 @@ import {
   infernoColor,
 } from "../lib/heatmap.js";
 
-export default function HeatmapOverlay({ heatmap, metric, calibration, comparison, pointer }) {
+export default function HeatmapOverlay({ heatmap, metric, comparison, pointer }) {
   const canvasRef = useRef(null);
   const hovered = heatmapCellAtPoint(heatmap, pointer);
   const hoveredIndex = hovered ? hovered.row * heatmap.columns + hovered.column : -1;
   const range = heatmapDisplayRange(metric);
   const hoveredEstimated = hovered
-    ? estimateHeatmapCollagenDensity(hovered.pixelDensity, calibration)
+    ? estimateHeatmapCollagenDensity(hovered.pixelDensity)
     : null;
   const pointerX = pointer ? (pointer.x / heatmap.width) * 100 : 0;
   const pointerY = pointer ? (pointer.y / heatmap.height) * 100 : 0;
@@ -26,20 +26,13 @@ export default function HeatmapOverlay({ heatmap, metric, calibration, compariso
     context.imageSmoothingEnabled = false;
     context.globalAlpha = 1;
     context.clearRect(0, 0, heatmap.width, heatmap.height);
-    if (
-      metric === "estimated-collagen-density" &&
-      !Number.isFinite(estimateHeatmapCollagenDensity(0, calibration))
-    ) {
-      return;
-    }
-
     heatmap.cells.forEach((cell, index) => {
       context.fillStyle = comparison
         ? differenceColor(comparison.values[index], comparison.maxAbs)
-        : infernoColor(heatmapMetricValue(cell, metric, calibration), range.min, range.max);
+        : infernoColor(heatmapMetricValue(cell, metric), range.min, range.max);
       context.fillRect(cell.x, cell.y, cell.width, cell.height);
     });
-  }, [calibration, comparison, heatmap, metric, range.max, range.min]);
+  }, [comparison, heatmap, metric, range.max, range.min]);
 
   return (
     <>

@@ -105,7 +105,7 @@ describe("heatmap export", () => {
       "0", "0", "2", "2", "4", "4", "6", "6", "8", "8",
       "0.5", "0.25", "0", "-0.25", "-0.5",
     ]);
-    expect(svg).toContain("Calibration: Pixel Density = 0.069677 * Collagen Density + 0.067894");
+    expect(svg).toContain("Density model: Pixel Density = 0.4394 + (-0.005983 - 0.4394) * exp(-0.3587 * Collagen Density)");
     expect(svg).toContain("Range -0.5 to +0.5");
     expect(svg).toContain("Color range: -0.5 to +0.5 ratio");
   });
@@ -176,7 +176,7 @@ describe("heatmap export", () => {
     };
     const svg = buildHeatmapFigureSvg(figure);
     expect(svg).toContain("T01 | Estimated Collagen Density | Cell 20x20 px | Grid 2x1");
-    expect(svg).toContain("Calibration: Pixel Density = 0.1 * Collagen Density + 0");
+    expect(svg).toContain("Density model: Pixel Density = 0.4394 + (-0.005983 - 0.4394) * exp(-0.3587 * Collagen Density)");
     expect(svg).toContain("Grid X");
     expect(svg).toContain("Grid Y");
     expect(svg).toContain("Estimated Collagen Density (mg/ml)");

@@ -753,13 +753,7 @@ describe("App", () => {
     expect(downloadedFilename).toBe("study_export_20260727-090000.zip");
     expect(screen.getByRole("status")).toHaveTextContent("ZIP downloaded");
     const exportCall = fetchMock.mock.calls.find(([url]) => url === "/api/export");
-    expect(JSON.parse(exportCall[1].body)).toEqual({
-      calibration: {
-        slope: 0.069676956982087,
-        intercept: 0.067893820336777,
-      },
-      autoSavedImageId: null,
-    });
+    expect(JSON.parse(exportCall[1].body)).toEqual({ autoSavedImageId: null });
     await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:export"));
   });
 
@@ -1366,7 +1360,7 @@ describe("App", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent(/roi-wide nematic order parameter/i);
   });
 
-  test("derives estimated collagen density from editable pixel density calibration", async () => {
+  test("derives estimated collagen density from the fixed one-phase model", async () => {
     mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
 
     render(<App />);
@@ -1374,14 +1368,9 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByText(/analysis loaded/i)).toBeInTheDocument());
 
     expect(screen.getByRole("button", { name: "Estimated Collagen Density" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Density calibration a")).toHaveValue(0.069676956982087);
-    expect(screen.getByLabelText("Density calibration b")).toHaveValue(0.067893820336777);
-    expect(within(screen.getByRole("table")).getAllByText("1.8960 mg/ml").length).toBeGreaterThan(0);
-
-    fireEvent.change(screen.getByLabelText("Density calibration a"), { target: { value: "0.1" } });
-    fireEvent.change(screen.getByLabelText("Density calibration b"), { target: { value: "0.05" } });
-
-    expect(within(screen.getByRole("table")).getAllByText("1.5000 mg/ml").length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("Density calibration a")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Density calibration b")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("table")).getAllByText("1.7307 mg/ml").length).toBeGreaterThan(0);
   });
 
   test("calculates analysis after automatically saving edited bounds", async () => {
@@ -1918,7 +1907,7 @@ describe("App", () => {
     expect(within(plot).queryByRole("status")).not.toBeInTheDocument();
   });
 
-  test("shows current and estimated metrics using the report scale and current calibration", async () => {
+  test("shows current and estimated metrics using the fixed one-phase report scale", async () => {
     mockApi();
     render(<App />);
 
@@ -1926,7 +1915,8 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Estimated Collagen Density" }));
 
     const report = await screen.findByLabelText("heatmap report");
-    expect(report).toHaveTextContent("Color range: 0 to 3 mg/ml");
+    expect(report).toHaveTextContent("Color range: 0 to 8 mg/ml");
+    expect(report).toHaveTextContent("Density model: Pixel Density = 0.4394");
     expect(within(report).getByLabelText("Estimated Collagen Density (mg/ml)")).toBeInTheDocument();
   });
 
