@@ -6,6 +6,11 @@ import path from "node:path";
 const DEFAULT_CONNECTION_MODE = "input-order-cycle";
 const SETTINGS_FILE_NAME = "settings.json";
 
+function destinationWriteKey(destinationPath) {
+  const resolvedPath = path.resolve(destinationPath);
+  return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
+}
+
 function isTiffFile(fileName) {
   return /\.tiff?$/i.test(fileName);
 }
@@ -113,19 +118,22 @@ function writePersistedRoot(dataDir, rootPath) {
   writeFileSync(filePath, `${JSON.stringify({ rootPath }, null, 2)}\n`);
 }
 
-export function createStorage({ initialRoot = null, selectRoot = null, dataDir = null } = {}) {
+export function createStorage(
+  { initialRoot = null, selectRoot = null, dataDir = null } = {},
+  destinationWrites = new Map(),
+) {
   let rootDir = null;
   let images = [];
-  const destinationWrites = new Map();
 
   function serializeDestinationWrite(destinationPath, write) {
-    const previousWrite = destinationWrites.get(destinationPath) ?? Promise.resolve();
+    const destinationKey = destinationWriteKey(destinationPath);
+    const previousWrite = destinationWrites.get(destinationKey) ?? Promise.resolve();
     const currentWrite = previousWrite.catch(() => {}).then(write);
-    destinationWrites.set(destinationPath, currentWrite);
+    destinationWrites.set(destinationKey, currentWrite);
 
     return currentWrite.finally(() => {
-      if (destinationWrites.get(destinationPath) === currentWrite) {
-        destinationWrites.delete(destinationPath);
+      if (destinationWrites.get(destinationKey) === currentWrite) {
+        destinationWrites.delete(destinationKey);
       }
     });
   }
@@ -139,7 +147,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
         await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
         await rename(tempPath, destinationPath);
       } catch (error) {
-        await rm(tempPath, { force: true });
+        await rm(tempPath, { force: true }).catch(() => {});
         throw error;
       }
     });
@@ -356,7 +364,7 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
 
   function createSubimageMutationContext() {
     ensureRoot();
-    const snapshotStorage = createStorage({ initialRoot: rootDir });
+    const snapshotStorage = createStorage({ initialRoot: rootDir }, destinationWrites);
 
     return Object.freeze({
       getRoot: snapshotStorage.getRoot,

@@ -1,8 +1,18 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createStorage } from "./storage.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    rename: vi.fn((...args) => actual.rename(...args)),
+    rm: vi.fn((...args) => actual.rm(...args)),
+  };
+});
 
 const tempRoots = [];
 
@@ -164,6 +174,56 @@ describe("createStorage", () => {
     });
   });
 
+  test("serializes crop saves across Subimage mutation contexts so the later invocation wins", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+    const firstContext = storage.createSubimageMutationContext();
+    const secondContext = storage.createSubimageMutationContext();
+
+    const saved = await Promise.all([
+      firstContext.saveSubimageCrop("selected-stack-sequence_T01", {
+        marker: "first",
+        samples: Array.from({ length: 25_000 }, (_, index) => index),
+      }),
+      secondContext.saveSubimageCrop("selected-stack-sequence_T01", { marker: "second" }),
+    ]);
+
+    expect(saved).toHaveLength(2);
+    const subimageDir = storage.imagePaths("selected-stack-sequence_T01").subimageDir;
+    await expect(readdir(subimageDir)).resolves.toEqual(["crop.json"]);
+    const finalCrop = await readJson(path.join(subimageDir, "crop.json"));
+    expect(finalCrop.marker).toBe("second");
+    expect(finalCrop.samples).toBeUndefined();
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "normalizes Windows destination aliases before serializing crop saves",
+    async () => {
+      const rootDir = await createTempRoot();
+      await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+      const storage = createStorage({ initialRoot: rootDir });
+      const firstContext = storage.createSubimageMutationContext();
+      const aliasedRoot = `${path.dirname(rootDir).toUpperCase()}${path.sep}unused${path.sep}..${path.sep}${path.basename(rootDir).toUpperCase()}`;
+      storage.setRoot(aliasedRoot);
+      const secondContext = storage.createSubimageMutationContext();
+
+      await Promise.all([
+        firstContext.saveSubimageCrop("selected-stack-sequence_T01", {
+          marker: "first",
+          samples: Array.from({ length: 25_000 }, (_, index) => index),
+        }),
+        secondContext.saveSubimageCrop("selected-stack-sequence_T01", { marker: "second" }),
+      ]);
+
+      const subimageDir = path.join(rootDir, "selected-stack-sequence_T01", "subimage");
+      await expect(readdir(subimageDir)).resolves.toEqual(["crop.json"]);
+      const finalCrop = await readJson(path.join(subimageDir, "crop.json"));
+      expect(finalCrop.marker).toBe("second");
+      expect(finalCrop.samples).toBeUndefined();
+    },
+  );
+
   test("rejects roots with no folders containing TIFF images", async () => {
     const rootDir = await createTempRoot();
     await mkdir(path.join(rootDir, "not-ready", "image"), { recursive: true });
@@ -272,6 +332,28 @@ describe("createStorage", () => {
     expect(finalBounds.groups[0]?.id).toBe("second");
   });
 
+  test("continues a destination queue after the preceding save fails", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+
+    const results = await Promise.allSettled([
+      storage.saveBounds("selected-stack-sequence_T01", {
+        groups: [{ id: "invalid", value: 1n }],
+      }),
+      storage.saveBounds("selected-stack-sequence_T01", {
+        groups: [{ id: "recovered", points: [] }],
+      }),
+    ]);
+
+    expect(results[0]).toMatchObject({ status: "rejected" });
+    expect(results[1]).toMatchObject({ status: "fulfilled" });
+    const boundsDir = path.join(rootDir, "selected-stack-sequence_T01", "bound");
+    await expect(readdir(boundsDir)).resolves.toEqual(["selected-stack-sequence_T01.bounds.json"]);
+    const finalBounds = await readJson(path.join(boundsDir, "selected-stack-sequence_T01.bounds.json"));
+    expect(finalBounds.groups).toEqual([{ id: "recovered", points: [] }]);
+  });
+
   test("loads existing bounds for saved-bound review", async () => {
     const rootDir = await createTempRoot();
     await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
@@ -320,6 +402,28 @@ describe("createStorage", () => {
     expect(saved).not.toHaveProperty("imageFolder");
     expect(saved).not.toHaveProperty("imageFile");
     expect(Date.parse(saved.updatedAt)).not.toBeNaN();
+  });
+
+  test("preserves the original atomic write error when temp cleanup also fails", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+    const renameError = new Error("rename failed");
+    const cleanupError = new Error("cleanup failed");
+    const actualFs = await vi.importActual("node:fs/promises");
+    const renameMock = vi.mocked(fsPromises.rename);
+    const rmMock = vi.mocked(fsPromises.rm);
+    renameMock.mockRejectedValueOnce(renameError);
+    rmMock.mockRejectedValueOnce(cleanupError);
+
+    try {
+      await expect(
+        storage.saveBounds("selected-stack-sequence_T01", { groups: [] }),
+      ).rejects.toBe(renameError);
+    } finally {
+      renameMock.mockImplementation((...args) => actualFs.rename(...args));
+      rmMock.mockImplementation((...args) => actualFs.rm(...args));
+    }
   });
 
   test("serializes concurrent analysis saves so the later invocation wins", async () => {
