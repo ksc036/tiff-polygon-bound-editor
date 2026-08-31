@@ -605,6 +605,7 @@ describe("recalculateAnalysis", () => {
     await writeMask(rootDir, folderName, "frame001.png");
     await mkdir(paths.skeletonDir, { recursive: true });
     await writeFile(paths.skeletonPath, "existing skeleton");
+    await writeFile(path.join(paths.skeletonDir, "old-skeleton.png"), "old skeleton");
 
     await expectRejectCode(
       recalculateAnalysis(storage, folderName, {
@@ -619,7 +620,24 @@ describe("recalculateAnalysis", () => {
     );
 
     await expect(readFile(paths.skeletonPath, "utf8")).resolves.toBe("existing skeleton");
-    await expect(readdir(paths.skeletonDir)).resolves.toEqual([`${folderName}.skeleton.png`]);
+    expect((await readdir(paths.skeletonDir)).sort()).toEqual([`${folderName}.skeleton.png`, "old-skeleton.png"].sort());
+  });
+
+  test("removes old skeleton images only after successful recalculation", async () => {
+    const { rootDir, folderName, storage } = await setupStorage();
+    const paths = storage.imagePaths(folderName);
+    await writeBounds(rootDir, folderName, boundsPayload());
+    await writeMask(rootDir, folderName, "frame001.png");
+    await mkdir(paths.skeletonDir, { recursive: true });
+    await writeFile(paths.skeletonPath, "existing skeleton");
+    await writeFile(path.join(paths.skeletonDir, "old-skeleton.png"), "old skeleton");
+    await writeFile(path.join(paths.skeletonDir, "old-skeleton.tif"), "old skeleton");
+    await writeFile(path.join(paths.skeletonDir, "notes.txt"), "keep me");
+
+    await recalculateAnalysis(storage, folderName);
+
+    expect((await readdir(paths.skeletonDir)).sort()).toEqual([`${folderName}.skeleton.png`, "notes.txt"].sort());
+    await expect(sharp(paths.skeletonPath).metadata()).resolves.toMatchObject({ format: "png" });
   });
 
   test("keeps the skeleton temp filename bounded when the final filename is long", async () => {

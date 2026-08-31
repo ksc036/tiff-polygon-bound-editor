@@ -32,6 +32,10 @@ function isTiff(fileName) {
   return /\.tiff?$/i.test(fileName);
 }
 
+function imageStem(fileName) {
+  return fileName.replace(/\.tiff?$/i, "");
+}
+
 function compareNames(left, right) {
   return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
 }
@@ -73,9 +77,20 @@ export async function scanInferenceImages(rootPath) {
       throw error;
     }
 
-    for (const imageEntry of imageEntries.filter((candidate) => candidate.isFile() && isTiff(candidate.name)).sort((left, right) => compareNames(left.name, right.name))) {
+    const tiffEntries = imageEntries
+      .filter((candidate) => candidate.isFile() && isTiff(candidate.name))
+      .sort((left, right) => compareNames(left.name, right.name));
+    const stemCounts = new Map();
+    for (const imageEntry of tiffEntries) {
+      const stemKey = imageStem(imageEntry.name).toLocaleLowerCase();
+      stemCounts.set(stemKey, (stemCounts.get(stemKey) ?? 0) + 1);
+    }
+
+    for (const imageEntry of tiffEntries) {
       const imageFile = imageEntry.name;
+      const stem = imageStem(imageFile);
       const probabilityMapsDir = path.join(timestampPath, "probability-maps");
+      const maskFile = stemCounts.get(stem.toLocaleLowerCase()) > 1 ? `${imageFile}.png` : `${stem}.png`;
       images.push({
         id: inferenceId(timestampFolder, imageFile),
         timestampFolder,
@@ -85,7 +100,7 @@ export async function scanInferenceImages(rootPath) {
         mapPath: path.join(probabilityMapsDir, `${imageFile}.probability.npy`),
         settingsPath: path.join(probabilityMapsDir, `${imageFile}.mask-setting.json`),
         cellBoundariesPath: path.join(timestampPath, "cell boundary", `${imageFile}.cell-boundaries.json`),
-        maskPath: path.join(timestampPath, "mask", `${imageFile}.png`),
+        maskPath: path.join(timestampPath, "mask", maskFile),
       });
     }
   }
@@ -128,6 +143,49 @@ async function writeAtomically(filePath, bytes) {
   try {
     await writeFile(tempPath, bytes);
     await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function samePath(left, right) {
+  const leftPath = path.resolve(left);
+  const rightPath = path.resolve(right);
+  return process.platform === "win32"
+    ? leftPath.toLocaleLowerCase() === rightPath.toLocaleLowerCase()
+    : leftPath === rightPath;
+}
+
+function replaceableMaskPaths(image) {
+  const directory = path.dirname(image.maskPath);
+  const stem = imageStem(image.imageFile);
+  if (path.basename(image.maskPath).toLocaleLowerCase() !== `${stem}.png`.toLocaleLowerCase()) {
+    return [image.maskPath];
+  }
+
+  return [
+    image.maskPath,
+    path.join(directory, `${stem}.tif.png`),
+    path.join(directory, `${stem}.tiff.png`),
+    path.join(directory, `${stem}.tif`),
+    path.join(directory, `${stem}.tiff`),
+  ];
+}
+
+async function writeMaskAtomically(image, options) {
+  const directory = path.dirname(image.maskPath);
+  const tempPath = path.join(directory, `.mask-${randomUUID()}.tmp.png`);
+  await mkdir(directory, { recursive: true });
+
+  try {
+    await writeThresholdMaskPng(tempPath, options);
+    await rename(tempPath, image.maskPath);
+    await Promise.all(
+      replaceableMaskPaths(image)
+        .filter((candidate) => !samePath(candidate, image.maskPath))
+        .map((candidate) => rm(candidate, { force: true })),
+    );
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => {});
     throw error;
@@ -634,9 +692,8 @@ export function createInferenceService({ storage, fetchImpl = globalThis.fetch, 
           loadMap(image),
           loadSettings(image, { persistDefault: true }),
         ]);
-        await mkdir(path.dirname(image.maskPath), { recursive: true });
         const cellBounds = await loadCellBoundariesForImage(image, map.width, map.height);
-        await writeThresholdMaskPng(image.maskPath, {
+        await writeMaskAtomically(image, {
           probabilityMap: map,
           threshold: settings.threshold,
           excludedPolygons: cellBoundaryPolygons(cellBounds, map.width, map.height),

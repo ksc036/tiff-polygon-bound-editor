@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -81,7 +81,7 @@ afterEach(async () => {
 });
 
 describe("scanInferenceImages", () => {
-  test("discovers every sorted TIFF with opaque ids and full-filename-derived output paths", async () => {
+  test("discovers every sorted TIFF with opaque ids and canonical mask paths", async () => {
     const rootDir = await createTempRoot();
     await writeTiff(path.join(rootDir, "T10", "image", "z.tiff"));
     await writeTiff(path.join(rootDir, "T02", "image", "b.tif"));
@@ -101,7 +101,7 @@ describe("scanInferenceImages", () => {
       mapPath: path.join(rootDir, "T02", "probability-maps", "a.tif.probability.npy"),
       settingsPath: path.join(rootDir, "T02", "probability-maps", "a.tif.mask-setting.json"),
       cellBoundariesPath: path.join(rootDir, "T02", "cell boundary", "a.tif.cell-boundaries.json"),
-      maskPath: path.join(rootDir, "T02", "mask", "a.tif.png"),
+      maskPath: path.join(rootDir, "T02", "mask", "a.png"),
     });
   });
 
@@ -117,7 +117,10 @@ describe("scanInferenceImages", () => {
       path.join(rootDir, "T01", "probability-maps", "sample.tiff.probability.npy"),
     ]);
     expect(new Set(images.map((image) => image.settingsPath)).size).toBe(2);
-    expect(new Set(images.map((image) => image.maskPath)).size).toBe(2);
+    expect(images.map((image) => image.maskPath)).toEqual([
+      path.join(rootDir, "T01", "mask", "sample.tif.png"),
+      path.join(rootDir, "T01", "mask", "sample.tiff.png"),
+    ]);
   });
 });
 
@@ -444,10 +447,16 @@ describe("createInferenceService", () => {
     await expect(readFile(image.settingsPath, "utf8")).resolves.toBe(malformedSettings);
   });
 
-  test("writes one threshold mask for every complete source without changing probability maps", async () => {
+  test("replaces old mask images with one canonical threshold mask without changing probability maps", async () => {
     const { service } = await setupService();
     const images = await service.listImages();
     await Promise.all(images.map((image) => writeProbabilityMap(image, [0, 0.5, 0.75, 1])));
+    await Promise.all(images.map(async (image) => {
+      const maskDir = path.join(path.dirname(path.dirname(image.imagePath)), "mask");
+      await mkdir(maskDir, { recursive: true });
+      await writeFile(path.join(maskDir, "frame.png"), "old canonical mask");
+      await writeFile(path.join(maskDir, "frame.tif.png"), "old duplicate mask");
+    }));
     const before = await Promise.all(images.map((image) => readFile(image.mapPath)));
     await service.saveThreshold(images[0].id, { threshold: 0.75 });
 
@@ -458,6 +467,10 @@ describe("createInferenceService", () => {
     expect(after).toEqual(before);
     expect([...firstMask.data]).toEqual([0, 0, 255, 255]);
     await expect(access(images[1].maskPath)).resolves.toBeUndefined();
+    await Promise.all(images.map(async (image) => {
+      const maskDir = path.dirname(image.maskPath);
+      await expect(readdir(maskDir)).resolves.toEqual(["frame.png"]);
+    }));
   });
 
   test("normalizes off-grid thresholds consistently for persistence, review, overlays, and masks", async () => {

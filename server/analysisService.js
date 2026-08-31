@@ -428,6 +428,14 @@ async function writeSkeletonAtomically(outputPath, skeleton, writeSkeleton) {
   try {
     await writeSkeleton(tempPath, skeleton);
     await rename(tempPath, outputPath);
+    const skeletonDir = path.dirname(outputPath);
+    const outputKey = path.resolve(outputPath).toLocaleLowerCase();
+    const entries = await readdir(skeletonDir, { withFileTypes: true });
+    await Promise.all(entries
+      .filter((entry) => entry.isFile() && /\.(?:png|tiff?)$/i.test(entry.name))
+      .map((entry) => path.join(skeletonDir, entry.name))
+      .filter((filePath) => path.resolve(filePath).toLocaleLowerCase() !== outputKey)
+      .map((filePath) => rm(filePath, { force: true })));
   } catch (error) {
     await rm(tempPath, { force: true }).catch(() => {});
     throw error;
