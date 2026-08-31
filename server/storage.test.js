@@ -247,26 +247,29 @@ describe("createStorage", () => {
     });
   });
 
-  test("concurrent saves use collision-resistant temp names", async () => {
+  test("serializes concurrent bounds saves so the later invocation wins", async () => {
     const rootDir = await createTempRoot();
     await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
     const storage = createStorage({ initialRoot: rootDir });
-    const now = vi.spyOn(Date, "now").mockReturnValue(123);
+    const firstGroups = [{
+      id: "first",
+      points: Array.from({ length: 25_000 }, (_, index) => ({ id: `point-${index}`, x: index, y: index })),
+    }];
+    const secondGroups = [{ id: "second", points: [] }];
 
-    try {
-      await expect(
-        Promise.all([
-          storage.saveBounds("selected-stack-sequence_T01", { groups: [{ id: "first", points: [] }] }),
-          storage.saveBounds("selected-stack-sequence_T01", { groups: [{ id: "second", points: [] }] }),
-        ]),
-      ).resolves.toHaveLength(2);
-    } finally {
-      now.mockRestore();
-    }
+    const saved = await Promise.all([
+      storage.saveBounds("selected-stack-sequence_T01", { groups: firstGroups }),
+      storage.saveBounds("selected-stack-sequence_T01", { groups: secondGroups }),
+    ]);
 
-    await expect(readdir(path.join(rootDir, "selected-stack-sequence_T01", "bound"))).resolves.toEqual([
+    expect(saved).toHaveLength(2);
+    const boundsDir = path.join(rootDir, "selected-stack-sequence_T01", "bound");
+    await expect(readdir(boundsDir)).resolves.toEqual([
       "selected-stack-sequence_T01.bounds.json",
     ]);
+    const finalBounds = await readJson(path.join(boundsDir, "selected-stack-sequence_T01.bounds.json"));
+    expect(finalBounds.groups).toHaveLength(1);
+    expect(finalBounds.groups[0]?.id).toBe("second");
   });
 
   test("loads existing bounds for saved-bound review", async () => {
@@ -317,6 +320,28 @@ describe("createStorage", () => {
     expect(saved).not.toHaveProperty("imageFolder");
     expect(saved).not.toHaveProperty("imageFile");
     expect(Date.parse(saved.updatedAt)).not.toBeNaN();
+  });
+
+  test("serializes concurrent analysis saves so the later invocation wins", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");
+    const storage = createStorage({ initialRoot: rootDir });
+    const firstGroups = Array.from({ length: 25_000 }, (_, index) => ({ id: `group-${index}`, points: [] }));
+    const secondGroups = [{ id: "second", points: [] }];
+
+    const saved = await Promise.all([
+      storage.saveAnalysis("selected-stack-sequence_T01", { groups: firstGroups }),
+      storage.saveAnalysis("selected-stack-sequence_T01", { groups: secondGroups }),
+    ]);
+
+    expect(saved).toHaveLength(2);
+    const analysisDir = path.join(rootDir, "selected-stack-sequence_T01", "analysis");
+    await expect(readdir(analysisDir)).resolves.toEqual([
+      "selected-stack-sequence_T01.analysis.json",
+    ]);
+    const finalAnalysis = await readJson(path.join(analysisDir, "selected-stack-sequence_T01.analysis.json"));
+    expect(finalAnalysis.groups).toHaveLength(1);
+    expect(finalAnalysis.groups[0]?.id).toBe("second");
   });
 
   test("loads a missing subimage crop as null and saves crop JSON atomically", async () => {

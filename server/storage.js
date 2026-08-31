@@ -116,6 +116,34 @@ function writePersistedRoot(dataDir, rootPath) {
 export function createStorage({ initialRoot = null, selectRoot = null, dataDir = null } = {}) {
   let rootDir = null;
   let images = [];
+  const destinationWrites = new Map();
+
+  function serializeDestinationWrite(destinationPath, write) {
+    const previousWrite = destinationWrites.get(destinationPath) ?? Promise.resolve();
+    const currentWrite = previousWrite.catch(() => {}).then(write);
+    destinationWrites.set(destinationPath, currentWrite);
+
+    return currentWrite.finally(() => {
+      if (destinationWrites.get(destinationPath) === currentWrite) {
+        destinationWrites.delete(destinationPath);
+      }
+    });
+  }
+
+  function writeJsonAtomically(directoryPath, destinationPath, tempFileName, payload) {
+    return serializeDestinationWrite(destinationPath, async () => {
+      const tempPath = path.join(directoryPath, tempFileName);
+
+      try {
+        await mkdir(directoryPath, { recursive: true });
+        await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
+        await rename(tempPath, destinationPath);
+      } catch (error) {
+        await rm(tempPath, { force: true });
+        throw error;
+      }
+    });
+  }
 
   function setRoot(nextRoot) {
     const scannedImages = scanRoot(nextRoot);
@@ -210,11 +238,12 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
       groups: bounds?.groups ?? [],
       updatedAt: new Date().toISOString(),
     };
-    const tempPath = path.join(boundDir, `${image.imageFolder}.bounds.json.tmp-${randomUUID()}`);
-
-    await mkdir(boundDir, { recursive: true });
-    await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
-    await rename(tempPath, boundsPath);
+    await writeJsonAtomically(
+      boundDir,
+      boundsPath,
+      `${image.imageFolder}.bounds.json.tmp-${randomUUID()}`,
+      payload,
+    );
 
     return payload;
   }
@@ -245,11 +274,12 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
       schemaVersion: analysis?.schemaVersion ?? 1,
       updatedAt: new Date().toISOString(),
     };
-    const tempPath = path.join(analysisDir, `${image.imageFolder}.analysis.json.tmp-${randomUUID()}`);
-
-    await mkdir(analysisDir, { recursive: true });
-    await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
-    await rename(tempPath, analysisPath);
+    await writeJsonAtomically(
+      analysisDir,
+      analysisPath,
+      `${image.imageFolder}.analysis.json.tmp-${randomUUID()}`,
+      payload,
+    );
 
     return payload;
   }
@@ -277,16 +307,12 @@ export function createStorage({ initialRoot = null, selectRoot = null, dataDir =
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),
     };
-    const tempPath = path.join(subimageDir, `.crop-${randomUUID()}.json.tmp`);
-
-    await mkdir(subimageDir, { recursive: true });
-    try {
-      await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
-      await rename(tempPath, subimageCropPath);
-    } catch (error) {
-      await rm(tempPath, { force: true });
-      throw error;
-    }
+    await writeJsonAtomically(
+      subimageDir,
+      subimageCropPath,
+      `.crop-${randomUUID()}.json.tmp`,
+      payload,
+    );
     return payload;
   }
 
