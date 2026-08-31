@@ -1,3 +1,4 @@
+import { constants as bufferConstants } from "node:buffer";
 import sharp from "sharp";
 import { COLLAGEN_DENSITY_DISPLAY_MAX } from "../shared/collagenDensity.js";
 import {
@@ -7,12 +8,16 @@ import {
   infernoColor,
 } from "../src/lib/heatmap.js";
 import { loadImageHeatmap } from "./heatmapService.js";
+import { resolveMaxImagePixels } from "./imageProcessing.js";
+import { runSharpWithSignal } from "./sharpRender.js";
 
 export const ESTIMATED_HEATMAP_CELL_SIZES = Object.freeze([20, 50, 100]);
 
 const METRIC = "estimated-collagen-density";
 const METRIC_LABEL = "Estimated Collagen Density";
 const UNIT = "mg/ml";
+const RGB_CHANNELS = 3;
+const RENDER_ABORT_CHECK_INTERVAL = 4_096;
 const ABSOLUTE_SCALE_LAYOUT = Object.freeze({
   width: 220,
   height: 360,
@@ -52,14 +57,15 @@ export async function planEstimatedHeatmapAssets({
         throwIfAborted(signal);
         availability.set(sourceKey(image.id, cellSize), { status: "Included" });
         descriptors.push(absoluteDescriptor({ image, source, cellSize, crop: null }));
-        if (crop) {
+        const cropReason = absoluteSubimageReason(crop, source);
+        if (!cropReason) {
           descriptors.push(absoluteDescriptor({ image, source, cellSize, crop }));
         } else {
           reportEntries.push(skippedReportEntry({
             kind: "absolute-subimage",
             image,
             cellSize,
-            reason: "Saved Subimage is unavailable.",
+            reason: cropReason,
           }));
         }
       } catch (error) {
@@ -165,7 +171,12 @@ export async function planEstimatedHeatmapAssets({
         ));
       }
 
-      const cropReason = subimageComparisonReason(currentCrop, previousCrop);
+      const cropReason = subimageComparisonReason({
+        currentCrop,
+        previousCrop,
+        current,
+        previous,
+      });
       if (cropReason) {
         reportEntries.push(skippedReportEntry({
           kind: "comparison-subimage",
@@ -271,34 +282,50 @@ export async function hydrateEstimatedHeatmapAsset(
   };
 }
 
-export async function renderEstimatedHeatmapAsset(asset) {
-  const width = positiveInteger(asset?.width, "Heatmap asset width");
-  const height = positiveInteger(asset?.height, "Heatmap asset height");
+export async function renderEstimatedHeatmapAsset(asset, { signal, maxImagePixels } = {}) {
+  throwIfAborted(signal);
+  const width = positiveSafeInteger(asset?.width, "Heatmap asset width");
+  const height = positiveSafeInteger(asset?.height, "Heatmap asset height");
   if (typeof asset?.valueAt !== "function") {
     throw new TypeError("Heatmap asset valueAt must be a function.");
   }
 
-  const pixels = Buffer.alloc(width * height * 3);
-  const isComparison = asset.isComparison ?? asset.kind?.startsWith("comparison");
-  const colorCache = new Map();
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const value = asset.valueAt(x, y);
-      const key = Number.isFinite(value) ? value : "no-data";
-      let color = colorCache.get(key);
-      if (!color) {
-        color = hexChannels(isComparison
-          ? differenceColor(value, asset.maxAbs)
-          : infernoColor(value, 0, COLLAGEN_DENSITY_DISPLAY_MAX));
-        colorCache.set(key, color);
-      }
-      writeRgb(pixels, y * width + x, color);
-    }
+  const pixelCount = safeAllocationProduct(width, height);
+  const pixelLimit = resolveMaxImagePixels(maxImagePixels);
+  if (pixelCount > pixelLimit) {
+    throw new RangeError("Heatmap asset exceeds the configured maximum image pixel count.");
+  }
+  const byteLength = safeAllocationProduct(pixelCount, RGB_CHANNELS);
+  if (byteLength > bufferConstants.MAX_LENGTH) {
+    throw new RangeError("Heatmap asset dimensions exceed safe allocation limits.");
   }
 
-  return sharp(pixels, { raw: { width, height, channels: 3 } })
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
+  throwIfAborted(signal);
+  const pixels = Buffer.alloc(byteLength);
+  const isComparison = asset.isComparison ?? asset.kind?.startsWith("comparison");
+  const colorCache = new Map();
+  for (let index = 0; index < pixelCount; index += 1) {
+    if (index % RENDER_ABORT_CHECK_INTERVAL === 0) throwIfAborted(signal);
+    const x = index % width;
+    const y = Math.floor(index / width);
+    const value = asset.valueAt(x, y);
+    const key = Number.isFinite(value) ? value : "no-data";
+    let color = colorCache.get(key);
+    if (!color) {
+      color = hexChannels(isComparison
+        ? differenceColor(value, asset.maxAbs)
+        : infernoColor(value, 0, COLLAGEN_DENSITY_DISPLAY_MAX));
+      colorCache.set(key, color);
+    }
+    writeRgb(pixels, index, color);
+  }
+
+  throwIfAborted(signal);
+  const pipeline = sharp(pixels, {
+    raw: { width, height, channels: RGB_CHANNELS },
+    limitInputPixels: pixelLimit,
+  }).png({ compressionLevel: 9, adaptiveFiltering: true });
+  return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
 
 export async function renderHeatmapScaleAsset(input = {}) {
@@ -550,14 +577,40 @@ function cropFor(cropsByImage, image) {
   return cropsByImage?.[image.id] ?? cropsByImage?.[imageLabel(image)] ?? null;
 }
 
-function subimageComparisonReason(currentCrop, previousCrop) {
+function absoluteSubimageReason(crop, source) {
+  if (!crop) return "Saved Subimage is unavailable.";
+  if (!isCropValidForHeatmap(crop, source)) {
+    return "Saved Subimage crop is invalid for this heatmap.";
+  }
+  return null;
+}
+
+function subimageComparisonReason({ currentCrop, previousCrop, current, previous }) {
   if (!currentCrop && !previousCrop) return "Current and previous Subimages are unavailable.";
   if (!currentCrop) return "Current Subimage is unavailable.";
   if (!previousCrop) return "Previous Subimage is unavailable.";
+  if (!isCropValidForHeatmap(currentCrop, current)) {
+    return "Current Subimage crop is invalid for its heatmap.";
+  }
+  if (!isCropValidForHeatmap(previousCrop, previous)) {
+    return "Previous Subimage crop is invalid for its heatmap.";
+  }
   if (currentCrop.width !== previousCrop.width || currentCrop.height !== previousCrop.height) {
     return "Subimage dimensions do not match previous image.";
   }
   return null;
+}
+
+function isCropValidForHeatmap(crop, source) {
+  const fields = ["sourceWidth", "sourceHeight", "x", "y", "width", "height"];
+  if (!crop || fields.some((field) => !Number.isInteger(crop[field]))) return false;
+  if (crop.sourceWidth <= 0 || crop.sourceHeight <= 0 || crop.width <= 0 || crop.height <= 0) {
+    return false;
+  }
+  if (crop.x < 0 || crop.y < 0) return false;
+  if (crop.sourceWidth !== source.width || crop.sourceHeight !== source.height) return false;
+  if (crop.width > source.width || crop.height > source.height) return false;
+  return crop.x <= source.width - crop.width && crop.y <= source.height - crop.height;
 }
 
 function skippedReportEntry({ kind, image, previousImage = null, cellSize, reason }) {
@@ -651,9 +704,18 @@ function formatScaleNumber(value) {
   return Number(value.toFixed(6)).toString();
 }
 
-function positiveInteger(value, label) {
-  if (!Number.isInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer.`);
+function positiveSafeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer.`);
+  }
   return value;
+}
+
+function safeAllocationProduct(left, right) {
+  if (left > Number.MAX_SAFE_INTEGER / right) {
+    throw new RangeError("Heatmap asset dimensions exceed safe allocation limits.");
+  }
+  return left * right;
 }
 
 function hexChannels(hex) {

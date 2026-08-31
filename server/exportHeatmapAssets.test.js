@@ -168,6 +168,56 @@ describe("estimated collagen heatmap asset planning", () => {
     )).toHaveLength(3);
   });
 
+  test.each([
+    ["non-integer source width", { sourceWidth: 120.5 }],
+    ["non-integer source height", { sourceHeight: 20.5 }],
+    ["non-integer x", { x: 0.5 }],
+    ["non-integer y", { y: 0.5 }],
+    ["non-integer width", { width: 19.5 }],
+    ["non-integer height", { height: 19.5 }],
+    ["non-positive width", { width: 0 }],
+    ["non-positive height", { height: 0 }],
+    ["mismatched source width", { sourceWidth: 121 }],
+    ["mismatched source height", { sourceHeight: 21 }],
+    ["horizontal overflow", { x: 110 }],
+    ["vertical overflow", { y: 10 }],
+  ])("skips absolute Subimage descriptors for %s", async (_name, overrides) => {
+    const invalidCrop = { ...crop(0), ...overrides };
+    const plan = await planEstimatedHeatmapAssets({
+      storage: {},
+      images: [image("T01")],
+      cropsByImage: new Map([["T01", invalidCrop]]),
+      loadHeatmap: loaderFor(completeSources(["T01"])),
+    });
+
+    expect(plan.descriptors.filter((entry) => entry.kind === "absolute-full")).toHaveLength(3);
+    expect(plan.descriptors.filter((entry) => entry.kind === "absolute-subimage")).toHaveLength(0);
+    expect(plan.reportEntries.filter((entry) =>
+      entry.kind === "absolute-subimage" &&
+      entry.reason === "Saved Subimage crop is invalid for this heatmap."
+    )).toHaveLength(3);
+  });
+
+  test("skips a comparison Subimage when the previous crop belongs to different heatmap dimensions", async () => {
+    const plan = await planEstimatedHeatmapAssets({
+      storage: {},
+      images: [image("T01"), image("T02")],
+      cropsByImage: new Map([
+        ["T01", { ...crop(0), sourceWidth: 121 }],
+        ["T02", crop(20)],
+      ]),
+      loadHeatmap: loaderFor(completeSources(["T01", "T02"])),
+    });
+
+    expect(plan.descriptors.filter((entry) => entry.kind === "comparison-full")).toHaveLength(3);
+    expect(plan.descriptors.filter((entry) => entry.kind === "comparison-subimage")).toHaveLength(0);
+    expect(plan.reportEntries.filter((entry) =>
+      entry.kind === "comparison-subimage" &&
+      entry.reason === "Previous Subimage crop is invalid for its heatmap."
+    )).toHaveLength(3);
+    expect(plan.reportEntries.map((entry) => entry.message).join(" ")).not.toContain("121");
+  });
+
   test("missing heatmaps skip their absolute and dependent comparison outputs", async () => {
     const images = [image("T01"), image("T02"), image("T03")];
     const entries = completeSources();
@@ -309,6 +359,106 @@ describe("estimated collagen heatmap asset rendering", () => {
     expect(pixelAt(decoded, 0, 0)).toEqual(rgb(differenceColor(-2, 2)));
     expect(pixelAt(decoded, 1, 0)).toEqual(rgb(differenceColor(0, 2)));
     expect(pixelAt(decoded, 2, 0)).toEqual(rgb(differenceColor(2, 2)));
+  });
+
+  test("rejects an asset above the configured image-pixel limit before sampling", async () => {
+    const valueAt = vi.fn(() => 0);
+
+    await expect(renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width: 3,
+      height: 2,
+      valueAt,
+    }, { maxImagePixels: 5 })).rejects.toThrow(
+      "Heatmap asset exceeds the configured maximum image pixel count.",
+    );
+    expect(valueAt).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["width-height product", Number.MAX_SAFE_INTEGER, 2],
+    ["RGB byte count", Math.floor(Number.MAX_SAFE_INTEGER / 2), 1],
+  ])("rejects an unsafe %s before allocation", async (_name, width, height) => {
+    const valueAt = vi.fn(() => 0);
+
+    await expect(renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width,
+      height,
+      valueAt,
+    }, { maxImagePixels: Number.MAX_SAFE_INTEGER })).rejects.toThrow(
+      "Heatmap asset dimensions exceed safe allocation limits.",
+    );
+    expect(valueAt).not.toHaveBeenCalled();
+  });
+
+  test("rejects a pre-aborted render before sampling or allocation", async () => {
+    const controller = new AbortController();
+    const valueAt = vi.fn(() => 0);
+    controller.abort();
+
+    await expect(renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width: 1,
+      height: 1,
+      valueAt,
+    }, { signal: controller.signal, maxImagePixels: 1 })).rejects.toMatchObject({
+      name: "AbortError",
+      code: "ABORT_ERR",
+    });
+    expect(valueAt).not.toHaveBeenCalled();
+  });
+
+  test("observes an abort during the synchronous pixel loop at a bounded interval", async () => {
+    const controller = new AbortController();
+    let samples = 0;
+    const pixelCount = 10_000;
+    const valueAt = () => {
+      samples += 1;
+      if (samples === 10) controller.abort();
+      return 0;
+    };
+
+    await expect(renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width: pixelCount,
+      height: 1,
+      valueAt,
+    }, { signal: controller.signal, maxImagePixels: pixelCount })).rejects.toMatchObject({
+      name: "AbortError",
+      code: "ABORT_ERR",
+    });
+    expect(samples).toBeGreaterThanOrEqual(10);
+    expect(samples).toBeLessThanOrEqual(4_096);
+  });
+
+  test("cancels the active Sharp pipeline and detaches its abort listener", async () => {
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+    const rendering = renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width: 256,
+      height: 256,
+      valueAt: () => 4,
+    }, { signal: controller.signal, maxImagePixels: 256 * 256 });
+    controller.abort();
+
+    await expect(rendering).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
+  test("detaches the Sharp abort listener after a successful encode", async () => {
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+
+    await renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width: 1,
+      height: 1,
+      valueAt: () => 4,
+    }, { signal: controller.signal, maxImagePixels: 1 });
+
+    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
   test("renders a detached vertical absolute scale with fixed metadata and endpoint colors", async () => {
