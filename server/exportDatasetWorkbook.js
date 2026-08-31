@@ -153,25 +153,16 @@ function safeStatus(value) {
 
 function safeReportText(value) {
   if (typeof value !== "string") return null;
-  return scrubHostPaths(value);
+  return containsHostPathSignature(value) ? HOST_PATH_OMISSION : value;
 }
 
 function absolutePathLike(value) {
   return value.startsWith("/") || value.startsWith("//") || /^[a-z]:\//i.test(value);
 }
 
-function scrubHostPaths(value) {
-  return value
-    .replace(
-      /(^|[^a-z0-9])(?:[a-z]:[\\/])[^\s"'<>|()\[\]{},;!?]+/gi,
-      (_match, boundary) => `${boundary}${HOST_PATH_OMISSION}`,
-    )
-    .replace(
-      /(^|[^a-z0-9/:])(?:\\\\|\/\/)[^\s"'<>|()\[\]{},;!?]+/gi,
-      (_match, boundary) => `${boundary}${HOST_PATH_OMISSION}`,
-    )
-    .replace(
-      /(^|[^a-z0-9/])\/(?!\/)[^\s"'<>|()\[\]{},;!?]+/gi,
-      (_match, boundary) => `${boundary}${HOST_PATH_OMISSION}`,
-    );
+function containsHostPathSignature(value) {
+  return /(^|[^a-z0-9])[a-z]:[\\/]/i.test(value) ||
+    /(^|[^a-z0-9\\])\\\\[^\\\s]+\\[^\s]+/i.test(value) ||
+    /(^|[^a-z0-9/:])\/\/[^/\s]+\/[^\s]+/i.test(value) ||
+    /(^|[^a-z0-9/])\/(?!\/|\s)/i.test(value);
 }

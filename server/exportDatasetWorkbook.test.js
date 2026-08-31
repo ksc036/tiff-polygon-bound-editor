@@ -251,15 +251,15 @@ test("keeps sanitized names while excluding absolute host paths", async () => {
 });
 
 test.each([
-  ["Windows drive path after equals", "source=C:/private/secret.txt", "source=[host path omitted]"],
-  ["Windows backslash path after equals", String.raw`source=C:\private\secret.txt`, "source=[host path omitted]"],
-  ["POSIX absolute path after equals", "source=/private/secret.txt", "source=[host path omitted]"],
-  ["forward-slash UNC path after equals", "source=//server/share/secret.txt", "source=[host path omitted]"],
-  ["backslash UNC path after equals", String.raw`source=\\server\share\secret.txt`, "source=[host path omitted]"],
-  ["Windows path surrounded by punctuation", "Failed (C:/private/secret.txt); retry.", "Failed ([host path omitted]); retry."],
-  ["POSIX path surrounded by punctuation", "Failed: /private/secret.txt, retry.", "Failed: [host path omitted], retry."],
-  ["root-level POSIX path", "/secret.txt", "[host path omitted]"],
-])("scrubs %s from artifact and reason text after reload", async (_name, probe, expected) => {
+  ["Windows drive path after equals", "source=C:/private/secret.txt"],
+  ["Windows backslash path after equals", String.raw`source=C:\private\secret.txt`],
+  ["POSIX absolute path after equals", "source=/private/secret.txt"],
+  ["forward-slash UNC path after equals", "source=//server/share/secret.txt"],
+  ["backslash UNC path after equals", String.raw`source=\\server\share\secret.txt`],
+  ["Windows path surrounded by punctuation", "Failed (C:/private/secret.txt); retry."],
+  ["POSIX path surrounded by punctuation", "Failed: /private/secret.txt, retry."],
+  ["root-level POSIX path", "/secret.txt"],
+])("omits the whole %s artifact and reason cell after reload", async (_name, probe) => {
   const workbook = await loadWorkbook(workbookInput({
     records: [
       {
@@ -286,11 +286,81 @@ test.each([
   }));
   const report = workbook.getWorksheet("Export Report");
 
-  expect(report.getCell("C2").value).toBe(expected);
-  expect(report.getCell("H2").value).toBe(expected);
+  expect(report.getCell("C2").value).toBe("[host path omitted]");
+  expect(report.getCell("H2").value).toBe("[host path omitted]");
   expect(report.getCell("C3").value).toBe("Archive asset T01/heatmap/20x20/full.png");
   expect(report.getCell("G3").value).toBe("T01/heatmap/20x20/full.png");
   expect(report.getCell("H3").value).toBe("Normal report text remains useful.");
+});
+
+const SPACED_HOST_PATHS = [
+  ["Windows drive", String.raw`C:\private\secret file.txt`],
+  ["POSIX absolute", "/private/secret file.txt"],
+  ["forward-slash UNC", "//server/share/secret file.txt"],
+  ["backslash UNC", String.raw`\\server\share\secret file.txt`],
+];
+
+test.each(SPACED_HOST_PATHS.flatMap(([name, path]) => [
+  [`${name} path after equals`, `source=${path}`],
+  [`${name} path surrounded by punctuation`, `Failed (${path}); retry.`],
+  [`${name} path as the whole cell`, path],
+]))("omits a spaced %s without retaining path fragments", async (_name, probe) => {
+  const workbook = await loadWorkbook(workbookInput({
+    records: [
+      {
+        image: { id: "T01", imageFolder: "T01" },
+        subimage: { status: "Skipped", reason: "Saved Subimage is unavailable." },
+        derivedEntries: [
+          {
+            status: "Skipped",
+            artifact: probe,
+            currentImage: "T01",
+            reason: probe,
+          },
+          {
+            status: "Included",
+            artifact: "Archive asset T01/heatmap/20x20/full.png",
+            currentImage: "T01",
+            path: "T01/heatmap/20x20/full.png",
+            reason: "Normal report text remains useful.",
+          },
+        ],
+      },
+    ],
+    scaleEntries: [],
+  }));
+  const report = workbook.getWorksheet("Export Report");
+  const unsafeCells = [report.getCell("C2").value, report.getCell("H2").value];
+
+  expect(unsafeCells).toEqual(["[host path omitted]", "[host path omitted]"]);
+  expect(unsafeCells.join("\n")).not.toMatch(/private|secret|server|share|file\.txt/i);
+  expect(report.getCell("C3").value).toBe("Archive asset T01/heatmap/20x20/full.png");
+  expect(report.getCell("G3").value).toBe("T01/heatmap/20x20/full.png");
+  expect(report.getCell("H3").value).toBe("Normal report text remains useful.");
+});
+
+test("keeps URLs, archive-relative paths, and ordinary slash text unchanged after reload", async () => {
+  const workbook = await loadWorkbook(workbookInput({
+    records: [
+      {
+        image: { id: "T01", imageFolder: "T01" },
+        subimage: { status: "Skipped", reason: "Saved Subimage is unavailable." },
+        derivedEntries: [{
+          status: "Included",
+          artifact: "Documentation https://example.test/export/report",
+          currentImage: "T01",
+          path: "T01/heatmap/20x20/full.png",
+          reason: "Archive T01/heatmap/20x20/full.png uses an input/output label.",
+        }],
+      },
+    ],
+    scaleEntries: [],
+  }));
+  const report = workbook.getWorksheet("Export Report");
+
+  expect(report.getCell("C2").value).toBe("Documentation https://example.test/export/report");
+  expect(report.getCell("G2").value).toBe("T01/heatmap/20x20/full.png");
+  expect(report.getCell("H2").value).toBe("Archive T01/heatmap/20x20/full.png uses an input/output label.");
 });
 
 test("stores whitespace-only and invalid numeric strings as blank after reload", async () => {
