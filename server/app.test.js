@@ -1,5 +1,5 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -123,7 +123,7 @@ function validBounds(folderName, imageFile = "frame001.tif") {
 }
 
 async function request(app, pathname, options = {}, listenPort = 0) {
-  const server = app.listen(listenPort);
+  const server = app.listen(listenPort, "127.0.0.1");
   let listening = false;
 
   try {
@@ -216,6 +216,41 @@ afterEach(async () => {
 });
 
 describe("createApp", () => {
+  test("request helper rejects instead of reaching an IPv4 port occupant", async ({ skip }) => {
+    let occupantRequests = 0;
+    const occupant = createServer((_request, response) => {
+      occupantRequests += 1;
+      response.statusCode = 418;
+      response.end("occupant");
+    });
+    let occupantListening = false;
+
+    try {
+      await new Promise((resolve, reject) => {
+        occupant.once("error", reject);
+        occupant.listen(6000, "127.0.0.1", resolve);
+      });
+      occupantListening = true;
+
+      const rootDir = await createTempRoot();
+      await expect(request(createApp({ rootDir }), "/api/health", {}, 6000)).rejects.toMatchObject({
+        code: "EADDRINUSE",
+      });
+      expect(occupantRequests).toBe(0);
+    } catch (error) {
+      if (!occupantListening && error?.code === "EADDRINUSE") {
+        skip("Port 6000 is already in use on this host.");
+      }
+      throw error;
+    } finally {
+      if (occupantListening) {
+        await new Promise((resolve, reject) => {
+          occupant.close((error) => error ? reject(error) : resolve());
+        });
+      }
+    }
+  });
+
   test("request helper supports a Fetch-forbidden server port", async ({ skip }) => {
     const rootDir = await createTempRoot();
     let response;
