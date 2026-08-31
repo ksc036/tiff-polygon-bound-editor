@@ -543,6 +543,46 @@ test.each([
   }
 });
 
+test("continues the ZIP and reports stale heatmaps after the source TIFF is resized", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01", "T02"],
+    heatmapSizes: { T01: [20, 50, 100], T02: [20, 50, 100] },
+  });
+  const resizedWidth = 60;
+  const resizedHeight = 40;
+  await writeFile(
+    fixture.storage.imagePaths("T02").imagePath,
+    uint16Tiff({
+      width: resizedWidth,
+      height: resizedHeight,
+      pixels: Uint16Array.from(
+        { length: resizedWidth * resizedHeight },
+        (_, index) => (index * 977) % 65_536,
+      ),
+    }),
+  );
+
+  const archive = await exportFixtureArchive(fixture);
+  const names = archive.files.map((file) => file.path);
+  const workbook = await openWorkbookEntry(archive, "/export_report.xlsx");
+  const report = workbook.getWorksheet("Export Report");
+  const reason = "Saved heatmap dimensions do not match the current TIFF.";
+  const staleRows = Array.from(
+    { length: report.rowCount - 1 },
+    (_, index) => report.getRow(index + 2),
+  ).filter((row) => String(row.getCell(8).value ?? "").includes(reason));
+
+  expect(names).toContain("fixture_export/T01/heatmap/20x20/full.png");
+  expect(names).not.toContain("fixture_export/T02/heatmap/20x20/full.png");
+  expect(names).not.toContain("fixture_export/T02/heatmap/20x20/subimage.png");
+  expect(names).not.toContain("fixture_export/T02/compare/20x20/full_current_minus_previous.png");
+  expect(names).not.toContain("fixture_export/T02/compare/20x20/subimage_current_minus_previous.png");
+  expect(names).toContain("fixture_export/T02/statistics/T02_statistics.xlsx");
+  expect(staleRows).toHaveLength(12);
+  expect(staleRows.every((row) => row.getCell(2).value === "Skipped")).toBe(true);
+  expect(staleRows.map((row) => row.getCell(8).value).join(" ")).not.toContain(fixture.rootDir);
+});
+
 test("reports a saved Subimage TIFF that disappears after validation as skipped", async () => {
   const fixture = await createExportFixture({
     imageFolders: ["T01"],
@@ -1103,7 +1143,8 @@ test("aborts and detaches the active derived-raster Sharp pipeline", async () =>
       if (
         type === "abort" &&
         stack.includes("runSharpWithSignal") &&
-        stack.includes("exportRasterAssets")
+        stack.includes("exportRasterAssets") &&
+        stack.includes("readExportRaster")
       ) {
         resolveRasterStage(this);
       }

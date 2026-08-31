@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   createSubimageDimensionsCsv,
   percentileDisplayRange,
+  readExportImageDimensions,
   readExportRaster,
   renderAnnotatedOriginal,
   renderOriginalPreview,
@@ -195,6 +196,37 @@ describe("readExportRaster", () => {
   });
 });
 
+describe("readExportImageDimensions", () => {
+  test("reads current TIFF dimensions within the configured pixel limit", async () => {
+    const rootDir = await createTempRoot();
+    const imagePath = path.join(rootDir, "source.tif");
+    await writeFile(imagePath, uint16Tiff({ width: 3, height: 2, pixels: [0, 1, 2, 3, 4, 5] }));
+
+    await expect(readExportImageDimensions({ imagePath, maxImagePixels: 6 })).resolves.toEqual({
+      width: 3,
+      height: 2,
+    });
+  });
+
+  test("rejects TIFF dimensions above the configured pixel limit", async () => {
+    const rootDir = await createTempRoot();
+    const imagePath = path.join(rootDir, "source.tif");
+    await writeFile(imagePath, uint16Tiff({ width: 3, height: 2, pixels: [0, 1, 2, 3, 4, 5] }));
+
+    await expect(readExportImageDimensions({ imagePath, maxImagePixels: 5 })).rejects.toThrow();
+  });
+
+  test("rejects a pre-aborted metadata read", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(readExportImageDimensions({
+      imagePath: "unused.tif",
+      signal: controller.signal,
+    })).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+  });
+});
+
 test.each([
   ["original", (raster, crop, signal) => renderOriginalPreview(raster, { signal })],
   ["annotated original", (raster, crop, signal) => renderAnnotatedOriginal(raster, crop, { signal })],
@@ -210,46 +242,69 @@ test.each([
   )).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
 });
 
-test("observes an abort during normalization without caching partial pixels", async () => {
+test("yields so an external abort stops normalization without caching partial pixels", async () => {
   const controller = new AbortController();
-  const sourcePixels = Uint16Array.from({ length: 10_000 }, (_, index) => index);
+  const width = 1_000;
+  const height = 1_000;
+  const pixelCount = width * height;
+  const sourcePixels = Uint16Array.from({ length: pixelCount }, (_, index) => index % 65_536);
   let reads = 0;
   const pixels = new Proxy(sourcePixels, {
     get(target, property) {
       if (typeof property === "string" && /^\d+$/.test(property)) {
         reads += 1;
-        if (reads === 10) controller.abort();
       }
       return Reflect.get(target, property, target);
     },
   });
   const raster = {
-    width: 10_000,
-    height: 1,
+    width,
+    height,
     pixels,
     displayMin: 0,
-    displayMax: 9_999,
+    displayMax: 65_535,
   };
+  const aborted = new Promise((resolve) => {
+    setImmediate(() => {
+      controller.abort();
+      resolve();
+    });
+  });
 
-  await expect(renderOriginalPreview(raster, { signal: controller.signal })).rejects.toMatchObject({
+  const rendering = renderOriginalPreview(raster, { signal: controller.signal });
+  await aborted;
+  await expect(rendering).rejects.toMatchObject({
     name: "AbortError",
     code: "ABORT_ERR",
   });
-  expect(reads).toBeGreaterThanOrEqual(10);
+  expect(reads).toBeGreaterThan(0);
   expect(reads).toBeLessThanOrEqual(4_096);
 
-  const decoded = await sharp(await renderOriginalPreview(raster)).greyscale().raw().toBuffer();
-  expect(decoded.at(-1)).toBe(255);
+  reads = 0;
+  const retry = await sharp(await renderOriginalPreview(raster)).metadata();
+  expect(retry).toMatchObject({ width, height, format: "png" });
+  expect(reads).toBe(pixelCount);
 });
 
 test("cancels an active Subimage Sharp pipeline and detaches its abort listener", async () => {
   const controller = new AbortController();
+  const originalAddEventListener = controller.signal.addEventListener.bind(controller.signal);
+  let resolveSharpStage;
+  const sharpStage = new Promise((resolve) => {
+    resolveSharpStage = resolve;
+  });
+  vi.spyOn(controller.signal, "addEventListener").mockImplementation((type, listener, options) => {
+    const result = originalAddEventListener(type, listener, options);
+    if (type === "abort") resolveSharpStage();
+    return result;
+  });
   const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
   const rendering = renderSubimagePreview(
     fixtureRaster(256, 256),
     { sourceWidth: 256, sourceHeight: 256, x: 0, y: 0, width: 256, height: 256 },
     { signal: controller.signal },
   );
+  await sharpStage;
   controller.abort();
 
   await expect(rendering).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });

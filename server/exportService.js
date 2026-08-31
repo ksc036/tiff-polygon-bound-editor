@@ -18,6 +18,7 @@ import {
 } from "./exportHeatmapAssets.js";
 import {
   createSubimageDimensionsCsv,
+  readExportImageDimensions,
   readExportRaster,
   renderAnnotatedOriginal,
   renderOriginalPreview,
@@ -163,11 +164,16 @@ export async function writeDatasetZip({
         .filter((record) => record.subimage.status === "Included")
         .map((record) => [record.image.id, record.subimage.crop]),
     );
+    const sourceDimensionsByImage = await collectSourceDimensionsByImage(records, {
+      maxImagePixels,
+      signal,
+    });
     const estimatedHeatmapPlan = await raceWithSignal(
       planEstimatedHeatmapAssets({
         storage: exportStorage,
         images,
         cropsByImage,
+        sourceDimensionsByImage,
         signal,
       }),
       signal,
@@ -207,6 +213,33 @@ export async function writeDatasetZip({
   } finally {
     abortState.detach();
   }
+}
+
+async function collectSourceDimensionsByImage(records, { maxImagePixels, signal }) {
+  const dimensionsByImage = new Map();
+  const unavailableReason = "Current TIFF dimensions are unavailable for heatmap validation.";
+
+  for (const record of records) {
+    throwIfAborted(signal);
+    if (!record.imageSource?.path) {
+      dimensionsByImage.set(record.image.id, { status: "Skipped", reason: unavailableReason });
+      continue;
+    }
+    try {
+      const dimensions = await raceWithSignal(readExportImageDimensions({
+        imagePath: record.imageSource.path,
+        maxImagePixels,
+        signal,
+      }), signal);
+      dimensionsByImage.set(record.image.id, { status: "Included", ...dimensions });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throwIfAborted(signal);
+      dimensionsByImage.set(record.image.id, { status: "Skipped", reason: unavailableReason });
+    }
+  }
+
+  return dimensionsByImage;
 }
 
 async function collectImageExportRecords({

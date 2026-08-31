@@ -35,10 +35,21 @@ const COMPARISON_SCALE_LAYOUT = Object.freeze({
   barHeight: 32,
 });
 
+function yieldToEventLoop() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function yieldAfterRenderChunk(signal) {
+  throwIfAborted(signal);
+  await yieldToEventLoop();
+  throwIfAborted(signal);
+}
+
 export async function planEstimatedHeatmapAssets({
   storage,
   images,
   cropsByImage = new Map(),
+  sourceDimensionsByImage = new Map(),
   loadHeatmap = loadImageHeatmap,
   signal,
 }) {
@@ -55,6 +66,29 @@ export async function planEstimatedHeatmapAssets({
       try {
         const source = await loadHeatmap(storage, image.id, cellSize);
         throwIfAborted(signal);
+        const sourceDimensionReason = currentSourceDimensionReason(
+          dimensionsFor(sourceDimensionsByImage, image),
+          source,
+        );
+        if (sourceDimensionReason) {
+          availability.set(sourceKey(image.id, cellSize), {
+            status: "Skipped",
+            reason: sourceDimensionReason,
+          });
+          reportEntries.push(skippedReportEntry({
+            kind: "absolute-full",
+            image,
+            cellSize,
+            reason: sourceDimensionReason,
+          }));
+          reportEntries.push(skippedReportEntry({
+            kind: "absolute-subimage",
+            image,
+            cellSize,
+            reason: sourceDimensionReason,
+          }));
+          continue;
+        }
         availability.set(sourceKey(image.id, cellSize), { status: "Included" });
         descriptors.push(absoluteDescriptor({ image, source, cellSize, crop: null }));
         const cropReason = absoluteSubimageReason(crop, source);
@@ -305,7 +339,6 @@ export async function renderEstimatedHeatmapAsset(asset, { signal, maxImagePixel
   const isComparison = asset.isComparison ?? asset.kind?.startsWith("comparison");
   const colorCache = new Map();
   for (let index = 0; index < pixelCount; index += 1) {
-    if (index % RENDER_ABORT_CHECK_INTERVAL === 0) throwIfAborted(signal);
     const x = index % width;
     const y = Math.floor(index / width);
     const value = asset.valueAt(x, y);
@@ -318,6 +351,9 @@ export async function renderEstimatedHeatmapAsset(asset, { signal, maxImagePixel
       colorCache.set(key, color);
     }
     writeRgb(pixels, index, color);
+    if ((index + 1) % RENDER_ABORT_CHECK_INTERVAL === 0) {
+      await yieldAfterRenderChunk(signal);
+    }
   }
 
   throwIfAborted(signal);
@@ -575,6 +611,24 @@ function cropFor(cropsByImage, image) {
     return cropsByImage.get(image.id) ?? cropsByImage.get(imageLabel(image)) ?? null;
   }
   return cropsByImage?.[image.id] ?? cropsByImage?.[imageLabel(image)] ?? null;
+}
+
+function dimensionsFor(sourceDimensionsByImage, image) {
+  if (sourceDimensionsByImage instanceof Map) {
+    return sourceDimensionsByImage.get(image.id) ?? sourceDimensionsByImage.get(imageLabel(image)) ?? null;
+  }
+  return sourceDimensionsByImage?.[image.id] ?? sourceDimensionsByImage?.[imageLabel(image)] ?? null;
+}
+
+function currentSourceDimensionReason(dimensions, source) {
+  if (!dimensions) return "Current TIFF dimensions are unavailable for heatmap validation.";
+  if (dimensions.status === "Skipped") {
+    return dimensions.reason ?? "Current TIFF dimensions are unavailable for heatmap validation.";
+  }
+  if (dimensions.width !== source.width || dimensions.height !== source.height) {
+    return "Saved heatmap dimensions do not match the current TIFF.";
+  }
+  return null;
 }
 
 function absoluteSubimageReason(crop, source) {

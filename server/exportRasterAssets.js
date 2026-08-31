@@ -89,7 +89,24 @@ export async function readExportRaster({ imagePath, maxImagePixels, signal }) {
   return { width: info.width, height: info.height, pixels, ...displayRange };
 }
 
-function normalizedPixelsFor(raster, signal) {
+export async function readExportImageDimensions({ imagePath, maxImagePixels, signal }) {
+  throwIfAborted(signal);
+  const pixelLimit = resolveMaxImagePixels(maxImagePixels);
+  const pipeline = sharp(imagePath, { limitInputPixels: pixelLimit });
+  const metadata = await runSharpWithSignal(pipeline, () => pipeline.metadata(), signal);
+  throwIfAborted(signal);
+  const width = metadata?.width;
+  const height = metadata?.height;
+  if (!Number.isSafeInteger(width) || width <= 0 || !Number.isSafeInteger(height) || height <= 0) {
+    throw new TypeError("Original TIFF dimensions are invalid.");
+  }
+  if (height > Math.floor(pixelLimit / width)) {
+    throw new RangeError("Original TIFF exceeds the configured maximum image pixel count.");
+  }
+  return { width, height };
+}
+
+async function normalizedPixelsFor(raster, signal) {
   throwIfAborted(signal);
   const cached = normalizedPixelsByRaster.get(raster);
   if (cached) return cached;
@@ -97,17 +114,20 @@ function normalizedPixelsFor(raster, signal) {
   const normalized = Buffer.alloc(raster.pixels.length);
   const range = raster.displayMax - raster.displayMin;
   for (let index = 0; index < raster.pixels.length; index += 1) {
-    if (index % NORMALIZATION_ABORT_CHECK_INTERVAL === 0) throwIfAborted(signal);
     const fraction = Math.min(Math.max((raster.pixels[index] - raster.displayMin) / range, 0), 1);
     normalized[index] = Math.round(fraction * 255);
+    if ((index + 1) % NORMALIZATION_ABORT_CHECK_INTERVAL === 0) {
+      await yieldAfterChunk(signal);
+    }
   }
   throwIfAborted(signal);
   normalizedPixelsByRaster.set(raster, normalized);
   return normalized;
 }
 
-function sharpFromNormalizedRaster(raster, signal) {
-  return sharp(normalizedPixelsFor(raster, signal), {
+async function sharpFromNormalizedRaster(raster, signal) {
+  const normalized = await normalizedPixelsFor(raster, signal);
+  return sharp(normalized, {
     raw: {
       width: raster.width,
       height: raster.height,
@@ -121,7 +141,7 @@ export async function renderOriginalPreview(raster, { signal } = {}) {
   const cached = originalPreviewByRaster.get(raster);
   if (cached) return cached;
 
-  const pipeline = sharpFromNormalizedRaster(raster, signal)
+  const pipeline = (await sharpFromNormalizedRaster(raster, signal))
     .png({ compressionLevel: 9, adaptiveFiltering: true });
   const preview = await runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
   throwIfAborted(signal);
@@ -148,7 +168,7 @@ export async function renderAnnotatedOriginal(raster, crop, { signal } = {}) {
 
 export async function renderSubimagePreview(raster, crop, { signal } = {}) {
   throwIfAborted(signal);
-  const pipeline = sharpFromNormalizedRaster(raster, signal)
+  const pipeline = (await sharpFromNormalizedRaster(raster, signal))
     .extract({ left: crop.x, top: crop.y, width: crop.width, height: crop.height })
     .png({ compressionLevel: 9, adaptiveFiltering: true });
   return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);

@@ -74,6 +74,10 @@ function completeSources(ids = ["T01", "T02", "T03"]) {
   }));
 }
 
+function sourceDimensionsFor(images) {
+  return new Map(images.map(({ id }) => [id, { width: 120, height: 20 }]));
+}
+
 function rgb(hex) {
   return [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16));
 }
@@ -93,6 +97,7 @@ describe("estimated collagen heatmap asset planning", () => {
       storage: {},
       images,
       cropsByImage,
+      sourceDimensionsByImage: sourceDimensionsFor(images),
       loadHeatmap,
     });
 
@@ -157,6 +162,7 @@ describe("estimated collagen heatmap asset planning", () => {
         ["T01", crop(0)],
         ["T02", crop(20, { width: 19 })],
       ]),
+      sourceDimensionsByImage: sourceDimensionsFor(images),
       loadHeatmap: loaderFor(completeSources(["T01", "T02"])),
     });
 
@@ -183,10 +189,12 @@ describe("estimated collagen heatmap asset planning", () => {
     ["vertical overflow", { y: 10 }],
   ])("skips absolute Subimage descriptors for %s", async (_name, overrides) => {
     const invalidCrop = { ...crop(0), ...overrides };
+    const images = [image("T01")];
     const plan = await planEstimatedHeatmapAssets({
       storage: {},
-      images: [image("T01")],
+      images,
       cropsByImage: new Map([["T01", invalidCrop]]),
+      sourceDimensionsByImage: sourceDimensionsFor(images),
       loadHeatmap: loaderFor(completeSources(["T01"])),
     });
 
@@ -199,13 +207,15 @@ describe("estimated collagen heatmap asset planning", () => {
   });
 
   test("skips a comparison Subimage when the previous crop belongs to different heatmap dimensions", async () => {
+    const images = [image("T01"), image("T02")];
     const plan = await planEstimatedHeatmapAssets({
       storage: {},
-      images: [image("T01"), image("T02")],
+      images,
       cropsByImage: new Map([
         ["T01", { ...crop(0), sourceWidth: 121 }],
         ["T02", crop(20)],
       ]),
+      sourceDimensionsByImage: sourceDimensionsFor(images),
       loadHeatmap: loaderFor(completeSources(["T01", "T02"])),
     });
 
@@ -229,6 +239,7 @@ describe("estimated collagen heatmap asset planning", () => {
       storage: {},
       images,
       cropsByImage: new Map(images.map(({ id }) => [id, crop(20)])),
+      sourceDimensionsByImage: sourceDimensionsFor(images),
       loadHeatmap: loaderFor(entries),
     });
 
@@ -249,6 +260,52 @@ describe("estimated collagen heatmap asset planning", () => {
     )).toHaveLength(4);
   });
 
+  test("skips stale heatmaps and every dependent output when current TIFF dimensions differ", async () => {
+    const images = [image("T01"), image("T02")];
+    const mismatchReason = "Saved heatmap dimensions do not match the current TIFF.";
+
+    const plan = await planEstimatedHeatmapAssets({
+      storage: {},
+      images,
+      cropsByImage: new Map(images.map(({ id }) => [id, crop(20)])),
+      sourceDimensionsByImage: new Map([
+        ["T01", { width: 120, height: 20 }],
+        ["T02", { width: 121, height: 20 }],
+      ]),
+      loadHeatmap: loaderFor(completeSources(["T01", "T02"])),
+    });
+
+    expect(plan.descriptors.some((entry) =>
+      entry.currentImageId === "T02" || entry.previousImageId === "T02"
+    )).toBe(false);
+    expect(plan.reportEntries.filter((entry) =>
+      entry.currentImage === "T02" &&
+      entry.kind.startsWith("absolute") &&
+      entry.reason === mismatchReason
+    )).toHaveLength(6);
+    expect(plan.reportEntries.filter((entry) =>
+      entry.currentImage === "T02" &&
+      entry.kind.startsWith("comparison") &&
+      entry.reason.includes(mismatchReason)
+    )).toHaveLength(6);
+    expect(plan.reportEntries.map((entry) => entry.reason).join(" ")).not.toContain("121");
+  });
+
+  test("reports unavailable current TIFF dimensions instead of trusting saved heatmaps", async () => {
+    const reason = "Current TIFF dimensions are unavailable for heatmap validation.";
+    const plan = await planEstimatedHeatmapAssets({
+      storage: {},
+      images: [image("T01")],
+      loadHeatmap: loaderFor(completeSources(["T01"])),
+    });
+
+    expect(plan.descriptors).toHaveLength(0);
+    expect(plan.reportEntries).toHaveLength(6);
+    expect(plan.reportEntries.every((entry) =>
+      entry.status === "Skipped" && entry.reason === reason
+    )).toBe(true);
+  });
+
   test("shares per-cell-size comparison ranges across full and Subimage maxima", async () => {
     const images = [image("T01"), image("T02")];
     const loadHeatmap = loaderFor([
@@ -267,6 +324,7 @@ describe("estimated collagen heatmap asset planning", () => {
         ["T01", crop(0)],
         ["T02", crop(100)],
       ]),
+      sourceDimensionsByImage: sourceDimensionsFor(images),
       loadHeatmap,
     });
 
@@ -409,31 +467,61 @@ describe("estimated collagen heatmap asset rendering", () => {
     expect(valueAt).not.toHaveBeenCalled();
   });
 
-  test("observes an abort during the synchronous pixel loop at a bounded interval", async () => {
+  test("yields so an external abort stops pixel rasterization and a retry renders completely", async () => {
     const controller = new AbortController();
     let samples = 0;
-    const pixelCount = 10_000;
+    const width = 1_000;
+    const height = 1_000;
+    const pixelCount = width * height;
     const valueAt = () => {
       samples += 1;
-      if (samples === 10) controller.abort();
       return 0;
     };
+    const aborted = new Promise((resolve) => {
+      setImmediate(() => {
+        controller.abort();
+        resolve();
+      });
+    });
 
-    await expect(renderEstimatedHeatmapAsset({
+    const rendering = renderEstimatedHeatmapAsset({
       kind: "absolute-full",
-      width: pixelCount,
-      height: 1,
+      width,
+      height,
       valueAt,
-    }, { signal: controller.signal, maxImagePixels: pixelCount })).rejects.toMatchObject({
+    }, { signal: controller.signal, maxImagePixels: pixelCount });
+
+    await aborted;
+    await expect(rendering).rejects.toMatchObject({
       name: "AbortError",
       code: "ABORT_ERR",
     });
-    expect(samples).toBeGreaterThanOrEqual(10);
+    expect(samples).toBeGreaterThan(0);
     expect(samples).toBeLessThanOrEqual(4_096);
+
+    samples = 0;
+    const retry = await sharp(await renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width,
+      height,
+      valueAt,
+    }, { maxImagePixels: pixelCount })).metadata();
+    expect(retry).toMatchObject({ width, height, format: "png" });
+    expect(samples).toBe(pixelCount);
   });
 
   test("cancels the active Sharp pipeline and detaches its abort listener", async () => {
     const controller = new AbortController();
+    const originalAddEventListener = controller.signal.addEventListener.bind(controller.signal);
+    let resolveSharpStage;
+    const sharpStage = new Promise((resolve) => {
+      resolveSharpStage = resolve;
+    });
+    vi.spyOn(controller.signal, "addEventListener").mockImplementation((type, listener, options) => {
+      const result = originalAddEventListener(type, listener, options);
+      if (type === "abort") resolveSharpStage();
+      return result;
+    });
     const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
     const rendering = renderEstimatedHeatmapAsset({
       kind: "absolute-full",
@@ -441,6 +529,7 @@ describe("estimated collagen heatmap asset rendering", () => {
       height: 256,
       valueAt: () => 4,
     }, { signal: controller.signal, maxImagePixels: 256 * 256 });
+    await sharpStage;
     controller.abort();
 
     await expect(rendering).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
