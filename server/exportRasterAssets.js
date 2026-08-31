@@ -4,34 +4,52 @@ import { runSharpWithSignal } from "./sharpRender.js";
 
 const MAX_GREY16 = 65_535;
 const NORMALIZATION_ABORT_CHECK_INTERVAL = 4_096;
+const HISTOGRAM_ABORT_CHECK_INTERVAL = 4_096;
 const normalizedPixelsByRaster = new WeakMap();
 const originalPreviewByRaster = new WeakMap();
 
-function valueAtRank(histogram, rank) {
+function valueAtRank(histogram, rank, signal) {
+  throwIfAborted(signal);
   let count = 0;
   for (let value = 0; value < histogram.length; value += 1) {
+    if (value % HISTOGRAM_ABORT_CHECK_INTERVAL === 0) throwIfAborted(signal);
     count += histogram[value];
-    if (rank < count) return value;
+    if (rank < count) {
+      throwIfAborted(signal);
+      return value;
+    }
   }
+  throwIfAborted(signal);
   return MAX_GREY16;
 }
 
-function percentileFromHistogram(histogram, length, fraction) {
+function percentileFromHistogram(histogram, length, fraction, signal) {
+  throwIfAborted(signal);
   const position = (length - 1) * fraction;
   const lowerRank = Math.floor(position);
   const upperRank = Math.ceil(position);
-  const lower = valueAtRank(histogram, lowerRank);
+  const lower = valueAtRank(histogram, lowerRank, signal);
+  throwIfAborted(signal);
   if (lowerRank === upperRank) return lower;
-  const upper = valueAtRank(histogram, upperRank);
+  const upper = valueAtRank(histogram, upperRank, signal);
   const weight = position - lowerRank;
-  return lower * (1 - weight) + upper * weight;
+  throwIfAborted(signal);
+  const percentile = lower * (1 - weight) + upper * weight;
+  throwIfAborted(signal);
+  return percentile;
 }
 
-export function percentileDisplayRange(pixels) {
+export function percentileDisplayRange(pixels, { signal } = {}) {
+  throwIfAborted(signal);
   const histogram = new Uint32Array(65_536);
-  for (const value of pixels) histogram[value] += 1;
-  const displayMin = percentileFromHistogram(histogram, pixels.length, 0.01);
-  const rawMax = percentileFromHistogram(histogram, pixels.length, 0.998);
+  for (let index = 0; index < pixels.length; index += 1) {
+    if (index % HISTOGRAM_ABORT_CHECK_INTERVAL === 0) throwIfAborted(signal);
+    histogram[pixels[index]] += 1;
+  }
+  throwIfAborted(signal);
+  const displayMin = percentileFromHistogram(histogram, pixels.length, 0.01, signal);
+  const rawMax = percentileFromHistogram(histogram, pixels.length, 0.998, signal);
+  throwIfAborted(signal);
   if (rawMax > displayMin) return { displayMin, displayMax: rawMax };
   return displayMin < MAX_GREY16
     ? { displayMin, displayMax: displayMin + 1 }
@@ -52,7 +70,7 @@ export async function readExportRaster({ imagePath, maxImagePixels, signal }) {
   );
   throwIfAborted(signal);
   const pixels = new Uint16Array(data.buffer, data.byteOffset, data.byteLength / 2);
-  const displayRange = percentileDisplayRange(pixels);
+  const displayRange = percentileDisplayRange(pixels, { signal });
   throwIfAborted(signal);
   return { width: info.width, height: info.height, pixels, ...displayRange };
 }

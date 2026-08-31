@@ -108,6 +108,29 @@ describe("percentileDisplayRange", () => {
       displayMax: 65535,
     });
   });
+
+  test("stops promptly when aborted during histogram scanning without poisoning later calculations", () => {
+    const source = Array.from({ length: 10_000 }, (_, index) => index);
+    const controller = new AbortController();
+    let pixelReads = 0;
+    const pixels = new Proxy(source, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/.test(property)) {
+          pixelReads += 1;
+          if (pixelReads === 17) controller.abort();
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(() => percentileDisplayRange(pixels, { signal: controller.signal }))
+      .toThrow("Raster export aborted.");
+    expect(pixelReads).toBeLessThanOrEqual(4_096);
+
+    const completed = percentileDisplayRange(source);
+    expect(completed.displayMin).toBeCloseTo(99.99);
+    expect(completed.displayMax).toBeCloseTo(9_979.002);
+  });
 });
 
 describe("readExportRaster", () => {
