@@ -129,6 +129,10 @@ describe("chooseFolder", () => {
     expect(script).toContain("$owner.TopMost = $true");
     expect(script).toContain("$owner.ShowInTaskbar = $false");
     expect(script).toContain("$owner.Opacity = 0");
+    expect(script).toContain(
+      "$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen",
+    );
+    expect(script).not.toContain("System.Drawing.Point(-32000, -32000)");
     expect(script).toContain("$owner.Show()");
     expect(script).toContain("PickFolder($owner.Handle");
 
@@ -182,6 +186,12 @@ describe("chooseFolder", () => {
     );
     expect(script).toMatch(
       /SetWindowPos\(dialogHandle, HWND_TOPMOST,[\s\S]*SwpShowWindow\);[\s\S]*SetForegroundWindow\(dialogHandle\);/,
+    );
+    const dialogPromotionFlags = script.match(
+      /bool elevated = SetWindowPos\(dialogHandle, HWND_TOPMOST, 0, 0, 0, 0,\s*([\s\S]*?)\);/,
+    )?.[1];
+    expect(dialogPromotionFlags?.replace(/\s+/g, "")).toBe(
+      "SwpNoSize|SwpNoMove|SwpShowWindow",
     );
     expect(script).toMatch(
       /public void Dispose\(\)[\s\S]*timer\.Stop\(\);[\s\S]*timer\.Tick -= PromoteOwnedDialog;[\s\S]*timer\.Dispose\(\);/,

@@ -173,7 +173,7 @@ internal sealed class TopmostDialogGuard : IDisposable
             }
 
             bool elevated = SetWindowPos(dialogHandle, HWND_TOPMOST, 0, 0, 0, 0,
-                SwpNoSize | SwpNoMove | SwpNoActivate | SwpShowWindow);
+                SwpNoSize | SwpNoMove | SwpShowWindow);
             SetForegroundWindow(dialogHandle);
 
             if (elevated)
@@ -270,8 +270,7 @@ try {
   $owner.TopMost = $true
   $owner.ShowInTaskbar = $false
   $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
-  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-  $owner.Location = New-Object System.Drawing.Point(-32000, -32000)
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
   $owner.Size = New-Object System.Drawing.Size(1, 1)
   $owner.Opacity = 0
   $owner.Show()
