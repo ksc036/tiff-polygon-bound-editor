@@ -9,8 +9,24 @@ import {
   planSavedHeatmapFigures,
   renderHeatmapFigure,
 } from "./exportHeatmaps.js";
+import {
+  ESTIMATED_HEATMAP_CELL_SIZES,
+  hydrateEstimatedHeatmapAsset,
+  planEstimatedHeatmapAssets,
+  renderEstimatedHeatmapAsset,
+  renderHeatmapScaleAsset,
+} from "./exportHeatmapAssets.js";
+import {
+  createSubimageDimensionsCsv,
+  readExportRaster,
+  renderAnnotatedOriginal,
+  renderOriginalPreview,
+  renderSubimagePreview,
+} from "./exportRasterAssets.js";
+import { createDatasetExportWorkbook } from "./exportDatasetWorkbook.js";
 import { renderRoiOverview } from "./exportRoiOverview.js";
 import { createImageWorkbook, workbookFailureText } from "./exportWorkbook.js";
+import { loadSubimage } from "./subimageService.js";
 import { COLLAGEN_DENSITY_MODEL } from "../shared/collagenDensity.js";
 
 const ANALYSIS_MODES = new Set(["outside", "inside"]);
@@ -110,11 +126,12 @@ export async function writeDatasetZip({
   let rootDirectory;
   let exportedAt;
   let records;
+  let estimatedHeatmapRanges;
   try {
     images = await raceWithSignal(exportStorage.scanImages(), signal);
     rootDirectory = safeArchiveSegment(datasetExportDirectory(rootPath));
     exportedAt = validExportDate(now());
-    const plan = await raceWithSignal(
+    const legacyHeatmapPlan = await raceWithSignal(
       planSavedHeatmapFigures({
         storage: exportStorage,
         images,
@@ -127,12 +144,29 @@ export async function writeDatasetZip({
       collectImageExportRecords({
         storage: exportStorage,
         images,
-        plan,
+        plan: legacyHeatmapPlan,
         autoSavedImageId,
+        maxImagePixels,
         signal,
       }),
       signal,
     );
+    const cropsByImage = new Map(
+      records
+        .filter((record) => record.subimage.status === "Included")
+        .map((record) => [record.image.id, record.subimage.crop]),
+    );
+    const estimatedHeatmapPlan = await raceWithSignal(
+      planEstimatedHeatmapAssets({
+        storage: exportStorage,
+        images,
+        cropsByImage,
+        signal,
+      }),
+      signal,
+    );
+    attachEstimatedHeatmapPlan(records, estimatedHeatmapPlan);
+    estimatedHeatmapRanges = estimatedHeatmapPlan.ranges;
   } catch (error) {
     throw publicExportError(error, signal);
   }
@@ -151,6 +185,7 @@ export async function writeDatasetZip({
       calibration: densityModel,
       exportedAt,
       maxImagePixels,
+      estimatedHeatmapRanges,
       storage: exportStorage,
       abortState,
     });
@@ -167,7 +202,14 @@ export async function writeDatasetZip({
   }
 }
 
-async function collectImageExportRecords({ storage, images, plan, autoSavedImageId, signal }) {
+async function collectImageExportRecords({
+  storage,
+  images,
+  plan,
+  autoSavedImageId,
+  maxImagePixels,
+  signal,
+}) {
   const records = [];
 
   for (const image of images) {
@@ -187,6 +229,9 @@ async function collectImageExportRecords({ storage, images, plan, autoSavedImage
       sourceFiles: {},
       roiEntry: null,
       heatmapEntries: [],
+      subimage: null,
+      estimatedHeatmapAssets: [],
+      derivedEntries: [],
       reportEntries,
       autoSavedBounds: image.id === autoSavedImageId,
       figures: plan.figures.filter((figure) => figure.currentImage === imageFolder),
@@ -194,6 +239,28 @@ async function collectImageExportRecords({ storage, images, plan, autoSavedImage
 
     record.imageSource = await sourceFileRecord(paths.imagePath, imageFile);
     record.sourceFiles.image = publicSourceFile(record.imageSource, imageFile);
+
+    try {
+      const loadedSubimage = await raceWithSignal(
+        loadSubimage(storage, image.id, { maxImagePixels }),
+        signal,
+      );
+      record.subimage = loadedSubimage.hasSubimage
+        ? {
+            status: "Included",
+            crop: loadedSubimage.crop,
+            sourcePath: paths.subimagePath,
+            path: `${imageFolder}/subimage/subimage_16bit.tif`,
+          }
+        : { status: "Skipped", reason: "Saved Subimage is unavailable." };
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throwIfAborted(signal);
+      record.subimage = {
+        status: "Skipped",
+        reason: "Saved Subimage is missing or invalid.",
+      };
+    }
 
     try {
       const selectedMask = await selectMaskSource(image, paths.maskDir);
@@ -263,6 +330,39 @@ async function collectImageExportRecords({ storage, images, plan, autoSavedImage
   return records;
 }
 
+function attachEstimatedHeatmapPlan(records, plan) {
+  const recordsByImage = new Map(records.map((record) => [record.imageFolder, record]));
+
+  for (const descriptor of plan.descriptors) {
+    recordsByImage.get(descriptor.currentImage)?.estimatedHeatmapAssets.push(descriptor);
+  }
+
+  for (const entry of plan.reportEntries) {
+    const record = recordsByImage.get(entry.currentImage);
+    if (!record) continue;
+    record.derivedEntries.push(estimatedHeatmapDerivedEntry(entry, {
+      status: "Skipped",
+      reason: entry.reason ?? "Estimated heatmap is unavailable.",
+    }));
+  }
+
+  const firstRecord = records[0];
+  if (!firstRecord) return;
+  for (const cellSize of ESTIMATED_HEATMAP_CELL_SIZES) {
+    for (const kind of ["comparison-full", "comparison-subimage"]) {
+      firstRecord.derivedEntries.push(estimatedHeatmapDerivedEntry({
+        kind,
+        currentImage: firstRecord.imageFolder,
+        previousImage: null,
+        sourceCellSize: cellSize,
+      }, {
+        status: "Not applicable",
+        reason: "First image has no previous image.",
+      }));
+    }
+  }
+}
+
 async function appendDatasetEntries({
   archive,
   rootDirectory,
@@ -270,6 +370,7 @@ async function appendDatasetEntries({
   calibration,
   exportedAt,
   maxImagePixels,
+  estimatedHeatmapRanges,
   storage,
   abortState,
 }) {
@@ -290,6 +391,14 @@ async function appendDatasetEntries({
     } else {
       record.reportEntries.push(report("Skipped", "Image", "Original TIFF is unavailable."));
     }
+
+    await appendDerivedRasterEntries({
+      archive,
+      base,
+      record,
+      maxImagePixels,
+      abortState,
+    });
 
     if (record.maskSource) {
       const name = archiveName(...base, "mask", record.maskSource.file);
@@ -322,15 +431,360 @@ async function appendDatasetEntries({
       });
     }
 
+    for (const asset of record.estimatedHeatmapAssets) {
+      await appendEstimatedHeatmapEntry({
+        archive,
+        base,
+        record,
+        asset,
+        storage,
+        maxImagePixels,
+        abortState,
+      });
+    }
+
     await appendWorkbookEntry({
       archive,
       base,
       record,
       calibration,
       exportedAt,
+    abortState,
+  });
+}
+
+  const scaleEntries = await appendEstimatedHeatmapScales({
+    archive,
+    rootDirectory,
+    ranges: estimatedHeatmapRanges,
+    abortState,
+  });
+  await appendDatasetWorkbookEntry({
+    archive,
+    rootDirectory,
+    records,
+    scaleEntries,
+    exportedAt,
+    abortState,
+  });
+}
+
+async function appendDerivedRasterEntries({ archive, base, record, maxImagePixels, abortState }) {
+  await appendDerivedPathEntry({
+    archive,
+    record,
+    sourcePath: record.imageSource?.path,
+    archivePath: archiveName(...base, "original", "original_16bit.tif"),
+    publicPath: `${record.imageFolder}/original/original_16bit.tif`,
+    artifact: "Original 16-bit TIFF",
+    unavailableReason: "Original TIFF is unavailable.",
+    failureReason: "Original TIFF could not be included.",
+    abortState,
+  });
+  await appendDerivedPathEntry({
+    archive,
+    record,
+    sourcePath: record.subimage.status === "Included" ? record.subimage.sourcePath : null,
+    archivePath: archiveName(...base, "subimage", "subimage_16bit.tif"),
+    publicPath: `${record.imageFolder}/subimage/subimage_16bit.tif`,
+    artifact: "Subimage 16-bit TIFF",
+    unavailableReason: record.subimage.reason ?? "Saved Subimage is unavailable.",
+    failureReason: "Saved Subimage TIFF could not be included.",
+    abortState,
+  });
+
+  let raster = null;
+  let rasterReason = null;
+  if (!record.imageSource) {
+    rasterReason = "Original TIFF is unavailable for preview rendering.";
+  } else {
+    try {
+      raster = await abortState.race(readExportRaster({
+        imagePath: record.imageSource.path,
+        maxImagePixels,
+      }));
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      abortState.throwIfAborted();
+      rasterReason = "Original TIFF could not be read for preview rendering.";
+    }
+  }
+
+  if (raster) {
+    await appendDerivedBufferEntry({
+      archive,
+      record,
+      render: () => renderOriginalPreview(raster),
+      archivePath: archiveName(...base, "original", "original_8bit.png"),
+      publicPath: `${record.imageFolder}/original/original_8bit.png`,
+      artifact: "Original 8-bit preview",
+      failureReason: "Original preview could not be rendered.",
       abortState,
     });
+  } else {
+    recordDerivedEntry(record, {
+      status: "Skipped",
+      artifact: "Original 8-bit preview",
+      reason: rasterReason,
+    });
   }
+
+  const crop = record.subimage.status === "Included" ? record.subimage.crop : null;
+  const subimageReason = record.subimage.reason ?? "Saved Subimage is unavailable.";
+  if (raster && crop) {
+    await appendDerivedBufferEntry({
+      archive,
+      record,
+      render: () => renderAnnotatedOriginal(raster, crop),
+      archivePath: archiveName(...base, "original", "original_with_subimage.png"),
+      publicPath: `${record.imageFolder}/original/original_with_subimage.png`,
+      artifact: "Annotated original",
+      failureReason: "Annotated original could not be rendered.",
+      abortState,
+    });
+    await appendDerivedBufferEntry({
+      archive,
+      record,
+      render: () => renderSubimagePreview(raster, crop),
+      archivePath: archiveName(...base, "subimage", "subimage_8bit.png"),
+      publicPath: `${record.imageFolder}/subimage/subimage_8bit.png`,
+      artifact: "Subimage 8-bit preview",
+      failureReason: "Subimage preview could not be rendered.",
+      abortState,
+    });
+  } else {
+    const reason = crop ? rasterReason : subimageReason;
+    recordDerivedEntry(record, { status: "Skipped", artifact: "Annotated original", reason });
+    recordDerivedEntry(record, { status: "Skipped", artifact: "Subimage 8-bit preview", reason });
+  }
+
+  if (crop) {
+    await appendDerivedBufferEntry({
+      archive,
+      record,
+      render: () => createSubimageDimensionsCsv({
+        imageFolder: record.imageFolder,
+        source: raster ?? { width: crop.sourceWidth, height: crop.sourceHeight },
+        crop,
+      }),
+      archivePath: archiveName(...base, "subimage", "dimensions.csv"),
+      publicPath: `${record.imageFolder}/subimage/dimensions.csv`,
+      artifact: "Subimage dimensions",
+      failureReason: "Subimage dimensions CSV could not be created.",
+      abortState,
+    });
+  } else {
+    recordDerivedEntry(record, {
+      status: "Skipped",
+      artifact: "Subimage dimensions",
+      reason: subimageReason,
+    });
+  }
+
+  raster = null;
+}
+
+async function appendDerivedPathEntry({
+  archive,
+  record,
+  sourcePath,
+  archivePath,
+  publicPath,
+  artifact,
+  unavailableReason,
+  failureReason,
+  abortState,
+}) {
+  if (!sourcePath) {
+    recordDerivedEntry(record, { status: "Skipped", artifact, reason: unavailableReason });
+    return;
+  }
+  try {
+    await appendPathAndWait(archive, sourcePath, archivePath, abortState);
+    recordDerivedEntry(record, { status: "Included", artifact, path: publicPath });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    abortState.throwIfAborted();
+    recordDerivedEntry(record, { status: "Skipped", artifact, reason: failureReason });
+  }
+}
+
+async function appendDerivedBufferEntry({
+  archive,
+  record,
+  render,
+  archivePath,
+  publicPath,
+  artifact,
+  failureReason,
+  abortState,
+}) {
+  try {
+    const buffer = await abortState.render(Promise.resolve().then(render));
+    await appendBufferAndWait(archive, buffer, archivePath, abortState);
+    recordDerivedEntry(record, { status: "Included", artifact, path: publicPath });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    abortState.throwIfAborted();
+    recordDerivedEntry(record, { status: "Skipped", artifact, reason: failureReason });
+  }
+}
+
+async function appendEstimatedHeatmapEntry({
+  archive,
+  base,
+  record,
+  asset,
+  storage,
+  maxImagePixels,
+  abortState,
+}) {
+  const relativeSegments = estimatedHeatmapRelativeSegments(asset);
+  const publicPath = [record.imageFolder, ...relativeSegments].join("/");
+
+  try {
+    const hydrated = await abortState.race(hydrateEstimatedHeatmapAsset(asset, {
+      storage,
+      signal: abortState.signal,
+    }));
+    const buffer = await abortState.render(renderEstimatedHeatmapAsset(hydrated, {
+      signal: abortState.signal,
+      maxImagePixels,
+    }));
+    await appendBufferAndWait(
+      archive,
+      buffer,
+      archiveName(...base, ...relativeSegments),
+      abortState,
+    );
+    record.derivedEntries.push(estimatedHeatmapDerivedEntry(asset, {
+      status: "Included",
+      path: publicPath,
+    }));
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    abortState.throwIfAborted();
+    record.derivedEntries.push(estimatedHeatmapDerivedEntry(asset, {
+      status: "Skipped",
+      reason: "Estimated heatmap could not be rendered.",
+    }));
+  }
+}
+
+async function appendEstimatedHeatmapScales({ archive, rootDirectory, ranges, abortState }) {
+  const definitions = [
+    {
+      input: { kind: "absolute" },
+      artifact: "Estimated Density scale",
+      file: "estimated_collagen_density.png",
+      path: "scales/estimated_collagen_density.png",
+    },
+    ...ESTIMATED_HEATMAP_CELL_SIZES.map((cellSize) => ({
+      input: { kind: "comparison", cellSize, maxAbs: ranges?.get(cellSize) ?? 0 },
+      artifact: "Comparison scale",
+      cellSize,
+      file: `comparison_${cellSize}x${cellSize}.png`,
+      path: `scales/comparison_${cellSize}x${cellSize}.png`,
+    })),
+  ];
+  const entries = [];
+
+  for (const definition of definitions) {
+    try {
+      const buffer = await abortState.render(renderHeatmapScaleAsset(definition.input));
+      await appendBufferAndWait(
+        archive,
+        buffer,
+        archiveName(rootDirectory, "scales", definition.file),
+        abortState,
+      );
+      entries.push({
+        status: "Included",
+        artifact: definition.artifact,
+        cellSize: definition.cellSize,
+        path: definition.path,
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      abortState.throwIfAborted();
+      entries.push({
+        status: "Skipped",
+        artifact: definition.artifact,
+        cellSize: definition.cellSize,
+        reason: "Heatmap scale could not be rendered.",
+      });
+    }
+  }
+  return entries;
+}
+
+async function appendDatasetWorkbookEntry({
+  archive,
+  rootDirectory,
+  records,
+  scaleEntries,
+  exportedAt,
+  abortState,
+}) {
+  try {
+    const buffer = await abortState.race(createDatasetExportWorkbook({
+      records,
+      scaleEntries,
+      exportedAt,
+    }));
+    await appendBufferAndWait(
+      archive,
+      buffer,
+      archiveName(rootDirectory, "export_report.xlsx"),
+      abortState,
+    );
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    abortState.throwIfAborted();
+    const fallback = workbookFailureText({ imageFolder: "dataset", error });
+    await appendBufferAndWait(
+      archive,
+      fallback,
+      archiveName(rootDirectory, "export_report_error.txt"),
+      abortState,
+    );
+  }
+}
+
+function estimatedHeatmapRelativeSegments(asset) {
+  const folder = `${asset.sourceCellSize}x${asset.sourceCellSize}`;
+  const paths = {
+    "absolute-full": ["heatmap", folder, "full.png"],
+    "absolute-subimage": ["heatmap", folder, "subimage.png"],
+    "comparison-full": ["compare", folder, "full_current_minus_previous.png"],
+    "comparison-subimage": ["compare", folder, "subimage_current_minus_previous.png"],
+  };
+  return paths[asset.kind];
+}
+
+function estimatedHeatmapDerivedEntry(asset, details) {
+  const artifacts = {
+    "absolute-full": "Full heatmap",
+    "absolute-subimage": "Subimage heatmap",
+    "comparison-full": "Full comparison",
+    "comparison-subimage": "Subimage comparison",
+  };
+  return {
+    ...details,
+    artifact: artifacts[asset.kind] ?? "Estimated heatmap",
+    currentImage: asset.currentImage,
+    previousImage: asset.previousImage ?? null,
+    sourceCellSize: asset.sourceCellSize,
+    cellSize: asset.cellSize ?? asset.sourceCellSize,
+  };
+}
+
+function recordDerivedEntry(record, details) {
+  record.derivedEntries.push({
+    ...details,
+    currentImage: record.imageFolder,
+    previousImage: null,
+  });
 }
 
 async function appendRoiEntry({ archive, base, record, maxImagePixels, abortState }) {

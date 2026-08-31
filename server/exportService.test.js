@@ -8,6 +8,7 @@ import unzipper from "unzipper";
 import { afterEach, expect, test, vi } from "vitest";
 import { generateHeatmapBatch } from "./heatmapService.js";
 import { createStorage } from "./storage.js";
+import { saveSubimage } from "./subimageService.js";
 import {
   ExportError,
   datasetExportDirectory,
@@ -36,6 +37,12 @@ async function openWorkbookEntry(archive, suffix) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(await entry.buffer());
   return workbook;
+}
+
+async function imageDimensions(archive, name) {
+  const entry = archive.files.find((file) => file.path === name);
+  const metadata = await sharp(await entry.buffer()).metadata();
+  return { width: metadata.width, height: metadata.height };
 }
 
 async function exportFixtureArchive(fixture) {
@@ -67,6 +74,45 @@ function analysisMetrics(maskPixelCount, areaPx) {
   };
 }
 
+function uint16Tiff({ width, height, pixels }) {
+  const entryCount = 9;
+  const ifdOffset = 8;
+  const dataOffset = ifdOffset + 2 + entryCount * 12 + 4;
+  const buffer = Buffer.alloc(dataOffset + pixels.length * 2);
+  let offset = 0;
+
+  buffer.write("II", offset, "ascii");
+  offset += 2;
+  buffer.writeUInt16LE(42, offset);
+  offset += 2;
+  buffer.writeUInt32LE(ifdOffset, offset);
+  offset = ifdOffset;
+  buffer.writeUInt16LE(entryCount, offset);
+  offset += 2;
+
+  const writeEntry = (tag, type, count, value) => {
+    buffer.writeUInt16LE(tag, offset);
+    buffer.writeUInt16LE(type, offset + 2);
+    buffer.writeUInt32LE(count, offset + 4);
+    if (type === 3 && count === 1) buffer.writeUInt16LE(value, offset + 8);
+    else buffer.writeUInt32LE(value, offset + 8);
+    offset += 12;
+  };
+
+  writeEntry(256, 4, 1, width);
+  writeEntry(257, 4, 1, height);
+  writeEntry(258, 3, 1, 16);
+  writeEntry(259, 3, 1, 1);
+  writeEntry(262, 3, 1, 1);
+  writeEntry(273, 4, 1, dataOffset);
+  writeEntry(277, 3, 1, 1);
+  writeEntry(278, 4, 1, height);
+  writeEntry(279, 4, 1, pixels.length * 2);
+  buffer.writeUInt32LE(0, offset);
+  pixels.forEach((value, index) => buffer.writeUInt16LE(value, dataOffset + index * 2));
+  return buffer;
+}
+
 async function writeExportBundle(rootDir, imageFolder, maskPixelCount, { width = 40, height = 40 } = {}) {
   const folderPath = path.join(rootDir, imageFolder);
   const imageDir = path.join(folderPath, "image");
@@ -83,9 +129,11 @@ async function writeExportBundle(rootDir, imageFolder, maskPixelCount, { width =
   const imageFile = `${imageFolder}.tif`;
   const maskFile = `${imageFolder}.png`;
   const areaPx = width * height;
-  const imageBytes = await sharp(Buffer.alloc(areaPx, 128), {
-    raw: { width, height, channels: 1 },
-  }).tiff().toBuffer();
+  const imageBytes = uint16Tiff({
+    width,
+    height,
+    pixels: Uint16Array.from({ length: areaPx }, (_, index) => (index * 977) % 65_536),
+  });
   const mask = Buffer.alloc(areaPx, 0);
   mask.fill(255, 0, maskPixelCount);
   await writeFile(path.join(imageDir, imageFile), imageBytes);
@@ -137,7 +185,12 @@ async function writeExportBundle(rootDir, imageFolder, maskPixelCount, { width =
   return { imageBytes, maskBytes: await readFile(maskPath) };
 }
 
-async function createExportFixture({ imageFolders, heatmapSizes, dimensionsByImage = {} }) {
+async function createExportFixture({
+  imageFolders,
+  heatmapSizes,
+  dimensionsByImage = {},
+  subimagesByImage = {},
+}) {
   const parent = await createTempRoot("dataset-export-");
   const rootDir = path.join(parent, "fixture");
   await mkdir(rootDir);
@@ -165,12 +218,50 @@ async function createExportFixture({ imageFolders, heatmapSizes, dimensionsByIma
       }
     }
   }
+  const storage = createStorage({ initialRoot: rootDir });
+  for (const [imageFolder, crop] of Object.entries(subimagesByImage)) {
+    await saveSubimage(storage, imageFolder, crop);
+  }
   return {
     rootDir,
     originalTiffBytes,
     originalMaskBytes,
-    storage: createStorage({ initialRoot: rootDir }),
+    storage,
   };
+}
+
+function equalSubimages() {
+  return {
+    T01: { sourceWidth: 40, sourceHeight: 40, x: 2, y: 3, width: 20, height: 20 },
+    T02: { sourceWidth: 40, sourceHeight: 40, x: 8, y: 6, width: 20, height: 20 },
+  };
+}
+
+async function setupMissingSubimage() {
+  return createExportFixture({
+    imageFolders: ["T01", "T02"],
+    heatmapSizes: { T01: [20, 50, 100], T02: [20, 50, 100] },
+    subimagesByImage: { T01: equalSubimages().T01 },
+  });
+}
+
+async function setupMismatchedCrops() {
+  return createExportFixture({
+    imageFolders: ["T01", "T02"],
+    heatmapSizes: { T01: [20, 50, 100], T02: [20, 50, 100] },
+    subimagesByImage: {
+      T01: equalSubimages().T01,
+      T02: { sourceWidth: 40, sourceHeight: 40, x: 8, y: 6, width: 16, height: 16 },
+    },
+  });
+}
+
+async function setupMissingHeatmap() {
+  return createExportFixture({
+    imageFolders: ["T01", "T02"],
+    heatmapSizes: { T01: [20, 50, 100], T02: [20, 50] },
+    subimagesByImage: equalSubimages(),
+  });
 }
 
 afterEach(async () => {
@@ -265,6 +356,7 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   const fixture = await createExportFixture({
     imageFolders: ["T01", "T02"],
     heatmapSizes: { T01: [20, 50, 100], T02: [20, 50] },
+    subimagesByImage: equalSubimages(),
   });
   const output = new PassThrough();
   const zipPromise = collectStream(output);
@@ -292,15 +384,58 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   expect(names).toContain("fixture_export/T01/heatmap/100x100/T01_cell_100px_collagen_density.png");
   expect(names).toContain("fixture_export/T02/heatmap/20x20/T02_cell_20px_pixel_density_vs_T01.png");
   expect(names).toContain("fixture_export/T02/heatmap/20x20/T02_cell_20px_collagen_density_vs_T01.png");
+  expect(names).toEqual(expect.arrayContaining([
+    "fixture_export/T01/original/original_16bit.tif",
+    "fixture_export/T01/original/original_8bit.png",
+    "fixture_export/T01/original/original_with_subimage.png",
+    "fixture_export/T01/subimage/subimage_16bit.tif",
+    "fixture_export/T01/subimage/subimage_8bit.png",
+    "fixture_export/T01/subimage/dimensions.csv",
+    "fixture_export/T01/heatmap/20x20/full.png",
+    "fixture_export/T01/heatmap/20x20/subimage.png",
+    "fixture_export/T02/compare/20x20/full_current_minus_previous.png",
+    "fixture_export/T02/compare/20x20/subimage_current_minus_previous.png",
+    "fixture_export/scales/estimated_collagen_density.png",
+    "fixture_export/scales/comparison_20x20.png",
+    "fixture_export/scales/comparison_50x50.png",
+    "fixture_export/scales/comparison_100x100.png",
+    "fixture_export/export_report.xlsx",
+  ]));
   expect(names.some((name) => name.includes("/T01_cell_") && name.includes("_vs_"))).toBe(false);
+  expect(names.some((name) => name.startsWith("fixture_export/T01/compare/"))).toBe(false);
   expect(names.some((name) => name.includes("/100x100/") && name.includes("T02"))).toBe(false);
   expect(names.some((name) => name.endsWith(".bounds.json") || name.endsWith(".analysis.json"))).toBe(false);
   expect(names.join("\n")).not.toContain(fixture.rootDir);
 
   const tiff = archive.files.find((file) => file.path === "fixture_export/T01/image/T01.tif");
   expect(await tiff.buffer()).toEqual(fixture.originalTiffBytes.T01);
+  const derivedTiff = archive.files.find(
+    (file) => file.path === "fixture_export/T01/original/original_16bit.tif",
+  );
+  expect(await derivedTiff.buffer()).toEqual(fixture.originalTiffBytes.T01);
+  const savedSubimage = await readFile(fixture.storage.imagePaths("T01").subimagePath);
+  const derivedSubimage = archive.files.find(
+    (file) => file.path === "fixture_export/T01/subimage/subimage_16bit.tif",
+  );
+  expect(await derivedSubimage.buffer()).toEqual(savedSubimage);
   const mask = archive.files.find((file) => file.path === "fixture_export/T01/mask/T01.png");
   expect(await mask.buffer()).toEqual(fixture.originalMaskBytes.T01);
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T01/original/original_8bit.png",
+  )).resolves.toEqual({ width: 40, height: 40 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T01/subimage/subimage_8bit.png",
+  )).resolves.toEqual({ width: 20, height: 20 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T01/heatmap/20x20/full.png",
+  )).resolves.toEqual({ width: 40, height: 40 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T02/compare/20x20/subimage_current_minus_previous.png",
+  )).resolves.toEqual({ width: 20, height: 20 });
 
   const workbook = await openWorkbookEntry(archive, "/T02_statistics.xlsx");
   const reportMessages = workbook.getWorksheet("Export Report").getColumn(4).values;
@@ -308,6 +443,63 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   expect(reportMessages).toContain("Recalculate analysis if the auto-saved boundary geometry changed");
   expect(reportMessages).toContain("T02 Pixel Density heatmap skipped: Saved heatmap is missing.");
   expect(JSON.stringify(workbook.worksheets.map((sheet) => sheet.getSheetValues()))).not.toContain(fixture.rootDir);
+
+  const datasetWorkbook = await openWorkbookEntry(archive, "/export_report.xlsx");
+  expect(datasetWorkbook.worksheets.map((sheet) => sheet.name)).toEqual(["Subimages", "Export Report"]);
+  const subimages = datasetWorkbook.getWorksheet("Subimages");
+  expect(subimages.getRow(2).values).toEqual([
+    undefined,
+    "T01",
+    40,
+    40,
+    2,
+    3,
+    20,
+    20,
+    "Included",
+    "T01/subimage/subimage_16bit.tif",
+  ]);
+  const datasetReport = datasetWorkbook.getWorksheet("Export Report");
+  const reportRows = Array.from(
+    { length: datasetReport.rowCount - 1 },
+    (_, index) => datasetReport.getRow(index + 2).values,
+  );
+  expect(reportRows.filter((row) =>
+    row[2] === "Not applicable" &&
+    row[4] === "T01" &&
+    row[8] === "First image has no previous image."
+  )).toHaveLength(6);
+  expect(JSON.stringify(datasetWorkbook.worksheets.map((sheet) => sheet.getSheetValues())))
+    .not.toContain(fixture.rootDir);
+});
+
+test.each([
+  ["missing Subimage", setupMissingSubimage, "Saved Subimage is unavailable."],
+  ["different Subimage size", setupMismatchedCrops, "Subimage dimensions do not match previous image."],
+  ["missing 100x100 heatmap", setupMissingHeatmap, "Saved heatmap is missing."],
+])("continues the ZIP for %s", async (name, setup, expectedReason) => {
+  const fixture = await setup();
+  const archive = await exportFixtureArchive(fixture);
+  const names = archive.files.map((file) => file.path);
+  const workbook = await openWorkbookEntry(archive, "/export_report.xlsx");
+
+  expect(names).toContain("fixture_export/T02/heatmap/20x20/full.png");
+  expect(names).toContain("fixture_export/T02/statistics/T02_statistics.xlsx");
+  expect(workbook.getWorksheet("Export Report").getColumn(8).values).toContain(expectedReason);
+
+  if (name === "missing Subimage") {
+    expect(names).not.toContain("fixture_export/T02/heatmap/20x20/subimage.png");
+    expect(names).not.toContain("fixture_export/T02/compare/20x20/subimage_current_minus_previous.png");
+  }
+  if (name === "different Subimage size") {
+    expect(names).toContain("fixture_export/T02/compare/20x20/full_current_minus_previous.png");
+    expect(names).not.toContain("fixture_export/T02/compare/20x20/subimage_current_minus_previous.png");
+  }
+  if (name === "missing 100x100 heatmap") {
+    expect(names).not.toContain("fixture_export/T02/heatmap/100x100/full.png");
+    expect(names).not.toContain("fixture_export/T02/compare/100x100/full_current_minus_previous.png");
+    expect(names).toContain("fixture_export/T02/compare/20x20/full_current_minus_previous.png");
+  }
 });
 
 test("keeps saved heatmaps after file times change and skips incompatible adjacent grids", async () => {
@@ -782,6 +974,9 @@ test("uses a safe text fallback when workbook generation fails", async () => {
     const text = (await fallback.buffer()).toString("utf8");
     expect(text).toContain("workbook generation failed");
     expect(text).not.toContain(fixture.rootDir);
+    expect(archive.files.some(
+      (file) => file.path === "fixture_export/export_report_error.txt",
+    )).toBe(true);
     expect(archive.files.some((file) => file.path.endsWith(".xlsx"))).toBe(false);
   } finally {
     writeBuffer.mockRestore();
