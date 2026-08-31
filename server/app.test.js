@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -121,31 +122,60 @@ function validBounds(folderName, imageFile = "frame001.tif") {
   };
 }
 
-async function request(app, pathname, options = {}) {
-  const server = app.listen(0);
+async function request(app, pathname, options = {}, listenPort = 0) {
+  const server = app.listen(listenPort);
+  let listening = false;
 
   try {
-    await new Promise((resolve) => server.once("listening", resolve));
+    await new Promise((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    listening = true;
     const { port } = server.address();
-    const response = await fetch(`http://127.0.0.1:${port}${pathname}`, options);
-    const body = await response.arrayBuffer();
-
-    return new Response(body.byteLength > 0 ? body : null, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
+    return await new Promise((resolve, reject) => {
+      const clientRequest = httpRequest({
+        host: "127.0.0.1",
+        port,
+        path: pathname,
+        method: options.method ?? "GET",
+        headers: Object.fromEntries(new Headers(options.headers).entries()),
+      }, (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("error", reject);
+        response.on("end", () => {
+          const body = Buffer.concat(chunks);
+          const headers = new Headers();
+          for (const [name, value] of Object.entries(response.headers)) {
+            for (const item of Array.isArray(value) ? value : [value]) {
+              if (item !== undefined) headers.append(name, item);
+            }
+          }
+          resolve(new Response(body.length > 0 ? body : null, {
+            status: response.statusCode,
+            statusText: response.statusMessage,
+            headers,
+          }));
+        });
+      });
+      clientRequest.on("error", reject);
+      if (options.body !== undefined && options.body !== null) clientRequest.write(options.body);
+      clientRequest.end();
     });
   } finally {
-    await new Promise((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+    if (listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
 
-        resolve();
+          resolve();
+        });
       });
-    });
+    }
   }
 }
 
@@ -186,6 +216,23 @@ afterEach(async () => {
 });
 
 describe("createApp", () => {
+  test("request helper supports a Fetch-forbidden server port", async ({ skip }) => {
+    const rootDir = await createTempRoot();
+    let response;
+
+    try {
+      response = await request(createApp({ rootDir }), "/api/health", {}, 6000);
+    } catch (error) {
+      if (error?.code === "EADDRINUSE") {
+        skip("Port 6000 is already in use on this host.");
+      }
+      throw error;
+    }
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+  });
+
   test("streams a named ZIP for the active root", async () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
