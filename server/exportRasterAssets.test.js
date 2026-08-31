@@ -86,30 +86,30 @@ afterEach(async () => {
 });
 
 describe("percentileDisplayRange", () => {
-  test("derives P1 and P99.8 from a 16-bit histogram without sorting the raster", () => {
+  test("derives P1 and P99.8 from a 16-bit histogram without sorting the raster", async () => {
     const pixels = Uint16Array.from([300, 0, 65535, 100, 200]);
-    const range = percentileDisplayRange(pixels);
+    const range = await percentileDisplayRange(pixels);
 
     expect(range.displayMin).toBeCloseTo(4);
     expect(range.displayMax).toBeCloseTo(65013.12);
     expect([...pixels]).toEqual([300, 0, 65535, 100, 200]);
   });
 
-  test("uses a one-level fallback for a constant raster", () => {
-    expect(percentileDisplayRange(Uint16Array.from([4096, 4096, 4096]))).toEqual({
+  test("uses a one-level fallback for a constant raster", async () => {
+    expect(await percentileDisplayRange(Uint16Array.from([4096, 4096, 4096]))).toEqual({
       displayMin: 4096,
       displayMax: 4097,
     });
   });
 
-  test("keeps a one-level fallback at the saturated grey16 boundary", () => {
-    expect(percentileDisplayRange(Uint16Array.from([65535, 65535]))).toEqual({
+  test("keeps a one-level fallback at the saturated grey16 boundary", async () => {
+    expect(await percentileDisplayRange(Uint16Array.from([65535, 65535]))).toEqual({
       displayMin: 65534,
       displayMax: 65535,
     });
   });
 
-  test("stops promptly when aborted during histogram scanning without poisoning later calculations", () => {
+  test("yields so an external abort stops histogram scanning without poisoning later calculations", async () => {
     const source = Array.from({ length: 10_000 }, (_, index) => index);
     const controller = new AbortController();
     let pixelReads = 0;
@@ -117,17 +117,23 @@ describe("percentileDisplayRange", () => {
       get(target, property, receiver) {
         if (typeof property === "string" && /^\d+$/.test(property)) {
           pixelReads += 1;
-          if (pixelReads === 17) controller.abort();
         }
         return Reflect.get(target, property, receiver);
       },
     });
+    const aborted = new Promise((resolve) => {
+      setImmediate(() => {
+        controller.abort();
+        resolve();
+      });
+    });
+    const calculation = Promise.resolve(percentileDisplayRange(pixels, { signal: controller.signal }));
 
-    expect(() => percentileDisplayRange(pixels, { signal: controller.signal }))
-      .toThrow("Raster export aborted.");
+    await aborted;
+    await expect(calculation).rejects.toThrow("Raster export aborted.");
     expect(pixelReads).toBeLessThanOrEqual(4_096);
 
-    const completed = percentileDisplayRange(source);
+    const completed = await percentileDisplayRange(source);
     expect(completed.displayMin).toBeCloseTo(99.99);
     expect(completed.displayMax).toBeCloseTo(9_979.002);
   });
@@ -275,11 +281,12 @@ test("renders representative normalized pixels", async () => {
 });
 
 test("renders a valid constant-raster PNG without dividing by zero", async () => {
+  const displayRange = await percentileDisplayRange(new Uint16Array(6).fill(4096));
   const constant = {
     width: 3,
     height: 2,
     pixels: new Uint16Array(6).fill(4096),
-    ...percentileDisplayRange(new Uint16Array(6).fill(4096)),
+    ...displayRange,
   };
   const constantPng = await sharp(await renderOriginalPreview(constant)).greyscale().raw().toBuffer({
     resolveWithObject: true,
