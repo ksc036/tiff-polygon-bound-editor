@@ -64,6 +64,20 @@ describe("application layout CSS", () => {
     expect(actionsRule).toContain("grid-template-columns: minmax(0, 1fr)");
   });
 
+  test("fits all three heatmap size labels in equal constrained sidebar columns", async () => {
+    const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+
+    const controlRule = css.match(/\.heatmap-size-control\s*\{[^}]+\}/)?.[0] ?? "";
+    const buttonRule = css.match(/\.heatmap-size-control button\s*\{[^}]+\}/)?.[0] ?? "";
+
+    expect(controlRule).toContain("grid-template-columns: repeat(3, minmax(0, 1fr))");
+    expect(buttonRule).toContain("padding: 0 3px");
+    expect(buttonRule).toContain("font-size: 0.7rem");
+    expect(buttonRule).toContain("line-height: 1.15");
+    expect(buttonRule).toContain("white-space: normal");
+    expect(css).not.toMatch(/\.heatmap-metric-control button\s*\{/);
+  });
+
   test("stacks the Heat Map without an internal cell-grid layer", async () => {
     const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 

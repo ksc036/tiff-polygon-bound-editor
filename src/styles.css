@@ -561,7 +561,14 @@ input[type="range"] {
 }
 
 .heatmap-size-control {
-  grid-auto-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.heatmap-size-control button {
+  padding: 0 3px;
+  font-size: 0.7rem;
+  line-height: 1.15;
+  white-space: normal;
 }
 
 .heatmap-display-actions {
