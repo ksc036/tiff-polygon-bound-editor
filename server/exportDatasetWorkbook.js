@@ -2,6 +2,7 @@ import ExcelJS from "exceljs";
 
 const HEADER_FILL = "FF1E293B";
 const HEADER_FONT = "FFFFFFFF";
+const HOST_PATH_OMISSION = "[host path omitted]";
 
 const SUBIMAGE_COLUMNS = [
   ["Image", 18],
@@ -115,8 +116,9 @@ function applyAutoFilter(sheet, lastColumn) {
 
 function finiteNumber(value) {
   if (typeof value !== "number" && typeof value !== "string") return null;
-  if (value === "") return null;
-  const number = Number(value);
+  const candidate = typeof value === "string" ? value.trim() : value;
+  if (candidate === "") return null;
+  const number = Number(candidate);
   return Number.isFinite(number) ? number : null;
 }
 
@@ -151,14 +153,25 @@ function safeStatus(value) {
 
 function safeReportText(value) {
   if (typeof value !== "string") return null;
-  return containsHostPath(value) ? null : value;
+  return scrubHostPaths(value);
 }
 
 function absolutePathLike(value) {
   return value.startsWith("/") || value.startsWith("//") || /^[a-z]:\//i.test(value);
 }
 
-function containsHostPath(value) {
-  const normalized = value.replaceAll("\\", "/");
-  return /(^|[\s('"`])(?:[a-z]:\/|\/\/|\/[^\s/]+\/)/i.test(normalized);
+function scrubHostPaths(value) {
+  return value
+    .replace(
+      /(^|[^a-z0-9])(?:[a-z]:[\\/])[^\s"'<>|()\[\]{},;!?]+/gi,
+      (_match, boundary) => `${boundary}${HOST_PATH_OMISSION}`,
+    )
+    .replace(
+      /(^|[^a-z0-9/:])(?:\\\\|\/\/)[^\s"'<>|()\[\]{},;!?]+/gi,
+      (_match, boundary) => `${boundary}${HOST_PATH_OMISSION}`,
+    )
+    .replace(
+      /(^|[^a-z0-9/])\/(?!\/)[^\s"'<>|()\[\]{},;!?]+/gi,
+      (_match, boundary) => `${boundary}${HOST_PATH_OMISSION}`,
+    );
 }

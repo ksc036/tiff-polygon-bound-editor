@@ -250,6 +250,114 @@ test("keeps sanitized names while excluding absolute host paths", async () => {
   }
 });
 
+test.each([
+  ["Windows drive path after equals", "source=C:/private/secret.txt", "source=[host path omitted]"],
+  ["Windows backslash path after equals", String.raw`source=C:\private\secret.txt`, "source=[host path omitted]"],
+  ["POSIX absolute path after equals", "source=/private/secret.txt", "source=[host path omitted]"],
+  ["forward-slash UNC path after equals", "source=//server/share/secret.txt", "source=[host path omitted]"],
+  ["backslash UNC path after equals", String.raw`source=\\server\share\secret.txt`, "source=[host path omitted]"],
+  ["Windows path surrounded by punctuation", "Failed (C:/private/secret.txt); retry.", "Failed ([host path omitted]); retry."],
+  ["POSIX path surrounded by punctuation", "Failed: /private/secret.txt, retry.", "Failed: [host path omitted], retry."],
+  ["root-level POSIX path", "/secret.txt", "[host path omitted]"],
+])("scrubs %s from artifact and reason text after reload", async (_name, probe, expected) => {
+  const workbook = await loadWorkbook(workbookInput({
+    records: [
+      {
+        image: { id: "T01", imageFolder: "T01" },
+        subimage: { status: "Skipped", reason: "Saved Subimage is unavailable." },
+        derivedEntries: [
+          {
+            status: "Skipped",
+            artifact: probe,
+            currentImage: "T01",
+            reason: probe,
+          },
+          {
+            status: "Included",
+            artifact: "Archive asset T01/heatmap/20x20/full.png",
+            currentImage: "T01",
+            path: "T01/heatmap/20x20/full.png",
+            reason: "Normal report text remains useful.",
+          },
+        ],
+      },
+    ],
+    scaleEntries: [],
+  }));
+  const report = workbook.getWorksheet("Export Report");
+
+  expect(report.getCell("C2").value).toBe(expected);
+  expect(report.getCell("H2").value).toBe(expected);
+  expect(report.getCell("C3").value).toBe("Archive asset T01/heatmap/20x20/full.png");
+  expect(report.getCell("G3").value).toBe("T01/heatmap/20x20/full.png");
+  expect(report.getCell("H3").value).toBe("Normal report text remains useful.");
+});
+
+test("stores whitespace-only and invalid numeric strings as blank after reload", async () => {
+  const invalidValues = [" ", "\t", "\r\n", "not-a-number", "Infinity", "NaN"];
+  const records = invalidValues.map((value, index) => ({
+    image: { id: `N${index + 1}`, imageFolder: `N${index + 1}` },
+    subimage: {
+      status: "Included",
+      crop: {
+        sourceWidth: value,
+        sourceHeight: value,
+        x: value,
+        y: value,
+        width: value,
+        height: value,
+      },
+      path: `N${index + 1}/subimage/subimage_16bit.tif`,
+    },
+    derivedEntries: [{
+      status: "Included",
+      artifact: "Numeric probe",
+      currentImage: `N${index + 1}`,
+      cellSize: value,
+      path: `N${index + 1}/heatmap/full.png`,
+    }],
+  }));
+  records.push({
+    image: { id: "N7", imageFolder: "N7" },
+    subimage: {
+      status: "Included",
+      crop: {
+        sourceWidth: " 40 ",
+        sourceHeight: "\t40\t",
+        x: " 5",
+        y: "6 ",
+        width: " 20 ",
+        height: "\t20",
+      },
+      path: "N7/subimage/subimage_16bit.tif",
+    },
+    derivedEntries: [{
+      status: "Included",
+      artifact: "Trimmed numeric probe",
+      currentImage: "N7",
+      cellSize: " 20 ",
+      path: "N7/heatmap/full.png",
+    }],
+  });
+
+  const workbook = await loadWorkbook(workbookInput({ records, scaleEntries: [] }));
+  const subimages = workbook.getWorksheet("Subimages");
+  const report = workbook.getWorksheet("Export Report");
+  for (let index = 0; index < invalidValues.length; index += 1) {
+    expect(rowValues(subimages.getRow(index + 2), 9).slice(1, 7)).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    expect(report.getCell(index + 2, 6).value ?? null).toBeNull();
+  }
+  expect(rowValues(subimages.getRow(8), 9).slice(1, 7)).toEqual([40, 40, 5, 6, 20, 20]);
+  expect(report.getCell(8, 6).value).toBe(20);
+});
+
 test("matches the existing workbook header and width conventions", async () => {
   const workbook = await loadWorkbook(workbookInput());
 
