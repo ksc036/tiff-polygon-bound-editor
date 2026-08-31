@@ -17,6 +17,8 @@ const COLORS = {
   unselected: "#788692",
   selected: "#e7474f",
   threshold: "#ff6b72",
+  roiFill: "rgb(100 214 255 / 12%)",
+  roiStroke: "#64d6ff",
 };
 
 function outputBaseName(imageFile) {
@@ -62,6 +64,17 @@ function compositeCanvas(sourceCanvas, overlayBitmap, rectangle = null) {
     context.drawImage(sourceCanvas, 0, 0, region.width, region.height);
     context.drawImage(overlayBitmap, 0, 0, region.width, region.height);
   }
+  return canvas;
+}
+
+function originalWithRoiCanvas(sourceCanvas, rectangle) {
+  const { canvas, context } = createCanvas(sourceCanvas.width, sourceCanvas.height);
+  context.drawImage(sourceCanvas, 0, 0);
+  context.fillStyle = COLORS.roiFill;
+  context.fillRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+  context.strokeStyle = COLORS.roiStroke;
+  context.lineWidth = 2;
+  context.strokeRect(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
   return canvas;
 }
 
@@ -160,15 +173,18 @@ export async function createInferenceOutputFiles({
   }
   const overlayBitmap = await createImageBitmap(overlayBlob);
   try {
+    const originalRoiCanvas = originalWithRoiCanvas(sourceCanvas, roi);
     const wholeCanvas = compositeCanvas(sourceCanvas, overlayBitmap);
     const roiCanvas = compositeCanvas(sourceCanvas, overlayBitmap, roi);
     const chartsCanvas = histogramCanvas({ imageFile, histograms, metrics, threshold });
-    const [wholeBlob, roiBlob, chartsBlob] = await Promise.all([
+    const [originalRoiBlob, wholeBlob, roiBlob, chartsBlob] = await Promise.all([
+      canvasBlob(originalRoiCanvas),
       canvasBlob(wholeCanvas),
       canvasBlob(roiCanvas),
       canvasBlob(chartsCanvas),
     ]);
-    const [wholeBytes, roiBytes, chartsBytes] = await Promise.all([
+    const [originalRoiBytes, wholeBytes, roiBytes, chartsBytes] = await Promise.all([
+      blobBytes(originalRoiBlob),
       blobBytes(wholeBlob),
       blobBytes(roiBlob),
       blobBytes(chartsBlob),
@@ -177,6 +193,7 @@ export async function createInferenceOutputFiles({
     return {
       baseName,
       files: [
+        { name: `${baseName}_whole_original_roi.png`, bytes: originalRoiBytes },
         { name: `${baseName}_whole_mask_overlay.png`, bytes: wholeBytes },
         { name: `${baseName}_roi_mask_overlay.png`, bytes: roiBytes },
         { name: `${baseName}_histograms.png`, bytes: chartsBytes },

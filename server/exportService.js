@@ -747,6 +747,63 @@ async function appendEstimatedHeatmapEntry({
       status: "Skipped",
       reason: "Estimated heatmap could not be included.",
     }));
+    return;
+  }
+
+  await appendEstimatedHeatmapRoiEntry({
+    archive,
+    base,
+    record,
+    asset,
+    hydrated,
+    maxImagePixels,
+    abortState,
+  });
+}
+
+async function appendEstimatedHeatmapRoiEntry({
+  archive,
+  base,
+  record,
+  asset,
+  hydrated,
+  maxImagePixels,
+  abortState,
+}) {
+  const relativeSegments = estimatedHeatmapRoiRelativeSegments(asset);
+  if (!relativeSegments) return;
+  const roi = record.subimage.status === "Included" ? record.subimage.crop : null;
+  if (!roi) {
+    record.derivedEntries.push(estimatedHeatmapRoiDerivedEntry(asset, {
+      status: "Skipped",
+      reason: record.subimage.reason ?? "Saved Subimage is unavailable.",
+    }));
+    return;
+  }
+
+  try {
+    const buffer = await abortState.render(renderEstimatedHeatmapAsset(hydrated, {
+      signal: abortState.signal,
+      maxImagePixels,
+      roi,
+    }));
+    await appendBufferAndWait(
+      archive,
+      buffer,
+      archiveName(...base, ...relativeSegments),
+      abortState,
+    );
+    record.derivedEntries.push(estimatedHeatmapRoiDerivedEntry(asset, {
+      status: "Included",
+      path: [record.imageFolder, ...relativeSegments].join("/"),
+    }));
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    abortState.throwIfAborted();
+    record.derivedEntries.push(estimatedHeatmapRoiDerivedEntry(asset, {
+      status: "Skipped",
+      reason: "ROI-marked heatmap could not be rendered.",
+    }));
   }
 }
 
@@ -841,6 +898,15 @@ function estimatedHeatmapRelativeSegments(asset) {
   return paths[asset.kind];
 }
 
+function estimatedHeatmapRoiRelativeSegments(asset) {
+  const folder = `${asset.sourceCellSize}x${asset.sourceCellSize}`;
+  const paths = {
+    "absolute-full": ["heatmap", folder, "full_with_subimage.png"],
+    "comparison-full": ["compare", folder, "full_with_subimage_current_minus_previous.png"],
+  };
+  return paths[asset.kind] ?? null;
+}
+
 function estimatedHeatmapDerivedEntry(asset, details) {
   const artifacts = {
     "absolute-full": "Full heatmap",
@@ -851,6 +917,21 @@ function estimatedHeatmapDerivedEntry(asset, details) {
   return {
     ...details,
     artifact: artifacts[asset.kind] ?? "Estimated heatmap",
+    currentImage: asset.currentImage,
+    previousImage: asset.previousImage ?? null,
+    sourceCellSize: asset.sourceCellSize,
+    cellSize: asset.cellSize ?? asset.sourceCellSize,
+  };
+}
+
+function estimatedHeatmapRoiDerivedEntry(asset, details) {
+  const artifacts = {
+    "absolute-full": "Full heatmap with Subimage ROI",
+    "comparison-full": "Full comparison with Subimage ROI",
+  };
+  return {
+    ...details,
+    artifact: artifacts[asset.kind] ?? "ROI-marked heatmap",
     currentImage: asset.currentImage,
     previousImage: asset.previousImage ?? null,
     sourceCellSize: asset.sourceCellSize,

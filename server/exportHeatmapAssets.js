@@ -9,6 +9,7 @@ import {
 } from "../src/lib/heatmap.js";
 import { loadImageHeatmap } from "./heatmapService.js";
 import { resolveMaxImagePixels } from "./imageProcessing.js";
+import { createRoiMarkerSvg } from "./exportRoiMarker.js";
 import { runSharpWithSignal } from "./sharpRender.js";
 
 export const ESTIMATED_HEATMAP_CELL_SIZES = Object.freeze([20, 50, 100]);
@@ -316,7 +317,7 @@ export async function hydrateEstimatedHeatmapAsset(
   };
 }
 
-export async function renderEstimatedHeatmapAsset(asset, { signal, maxImagePixels } = {}) {
+export async function renderEstimatedHeatmapAsset(asset, { signal, maxImagePixels, roi } = {}) {
   throwIfAborted(signal);
   const width = positiveSafeInteger(asset?.width, "Heatmap asset width");
   const height = positiveSafeInteger(asset?.height, "Heatmap asset height");
@@ -357,10 +358,14 @@ export async function renderEstimatedHeatmapAsset(asset, { signal, maxImagePixel
   }
 
   throwIfAborted(signal);
-  const pipeline = sharp(pixels, {
+  let pipeline = sharp(pixels, {
     raw: { width, height, channels: RGB_CHANNELS },
     limitInputPixels: pixelLimit,
-  }).png({ compressionLevel: 9, adaptiveFiltering: true });
+  });
+  if (roi) {
+    pipeline = pipeline.composite([{ input: createRoiMarkerSvg(width, height, roi) }]);
+  }
+  pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true });
   return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
 

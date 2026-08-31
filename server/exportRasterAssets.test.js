@@ -361,9 +361,9 @@ test("renders matching parent and Subimage previews", async () => {
   expect([...subimage.data]).toEqual([89, 100, 111, 155, 166, 177]);
 });
 
-test("colors exactly the crop perimeter and leaves its interior and surrounding pixels unchanged", async () => {
-  const raster = fixtureRaster(7, 7);
-  const crop = { sourceWidth: 7, sourceHeight: 7, x: 1, y: 1, width: 5, height: 5 };
+test("marks the crop with a high-contrast black and yellow outline", async () => {
+  const raster = fixtureRaster(24, 24);
+  const crop = { sourceWidth: 24, sourceHeight: 24, x: 6, y: 6, width: 12, height: 12 };
   const original = await sharp(await renderOriginalPreview(raster)).ensureAlpha().raw().toBuffer({
     resolveWithObject: true,
   });
@@ -371,19 +371,22 @@ test("colors exactly the crop perimeter and leaves its interior and surrounding 
     resolveWithObject: true,
   });
 
-  expect([annotated.info.width, annotated.info.height]).toEqual([7, 7]);
+  expect([annotated.info.width, annotated.info.height]).toEqual([24, 24]);
+  const changedPixels = [];
   for (let y = 0; y < raster.height; y += 1) {
     for (let x = 0; x < raster.width; x += 1) {
-      const onPerimeter = x >= 1 && x <= 5 && y >= 1 && y <= 5
-        && (x === 1 || x === 5 || y === 1 || y === 5);
-      expect(pixelAt(annotated, x, y), `pixel ${x},${y}`).toEqual(
-        onPerimeter ? [255, 0, 0, 255] : pixelAt(original, x, y),
-      );
+      const pixel = pixelAt(annotated, x, y);
+      if (pixel.join(",") !== pixelAt(original, x, y).join(",")) changedPixels.push(pixel);
     }
   }
+  expect(changedPixels).toContainEqual([0, 0, 0, 255]);
+  expect(changedPixels).toContainEqual([255, 234, 0, 255]);
+  expect(changedPixels).not.toContainEqual([255, 0, 0, 255]);
+  expect(pixelAt(annotated, 12, 12)).toEqual(pixelAt(original, 12, 12));
+  expect(pixelAt(annotated, 0, 0)).toEqual(pixelAt(original, 0, 0));
 });
 
-test("marks a valid 1x1 crop with one visible red pixel", async () => {
+test("marks a valid 1x1 crop with one visible yellow pixel", async () => {
   const raster = fixtureRaster(4, 3);
   const crop = { sourceWidth: 4, sourceHeight: 3, x: 2, y: 1, width: 1, height: 1 };
   const original = await sharp(await renderOriginalPreview(raster)).ensureAlpha().raw().toBuffer({
@@ -396,7 +399,7 @@ test("marks a valid 1x1 crop with one visible red pixel", async () => {
   for (let y = 0; y < raster.height; y += 1) {
     for (let x = 0; x < raster.width; x += 1) {
       expect(pixelAt(annotated, x, y), `pixel ${x},${y}`).toEqual(
-        x === crop.x && y === crop.y ? [255, 0, 0, 255] : pixelAt(original, x, y),
+        x === crop.x && y === crop.y ? [255, 234, 0, 255] : pixelAt(original, x, y),
       );
     }
   }

@@ -433,8 +433,10 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
     "fixture_export/T01/subimage/subimage_8bit.png",
     "fixture_export/T01/subimage/dimensions.csv",
     "fixture_export/T01/heatmap/20x20/full.png",
+    "fixture_export/T01/heatmap/20x20/full_with_subimage.png",
     "fixture_export/T01/heatmap/20x20/subimage.png",
     "fixture_export/T02/compare/20x20/full_current_minus_previous.png",
+    "fixture_export/T02/compare/20x20/full_with_subimage_current_minus_previous.png",
     "fixture_export/T02/compare/20x20/subimage_current_minus_previous.png",
     "fixture_export/scales/estimated_collagen_density.png",
     "fixture_export/scales/comparison_20x20.png",
@@ -472,6 +474,14 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   await expect(imageDimensions(
     archive,
     "fixture_export/T01/heatmap/20x20/full.png",
+  )).resolves.toEqual({ width: 40, height: 40 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T01/heatmap/20x20/full_with_subimage.png",
+  )).resolves.toEqual({ width: 40, height: 40 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T02/compare/20x20/full_with_subimage_current_minus_previous.png",
   )).resolves.toEqual({ width: 40, height: 40 });
   await expect(imageDimensions(
     archive,

@@ -419,6 +419,33 @@ describe("estimated collagen heatmap asset rendering", () => {
     expect(pixelAt(decoded, 2, 0)).toEqual(rgb(differenceColor(2, 2)));
   });
 
+  test("renders a separate high-contrast ROI-marked full heatmap", async () => {
+    const asset = {
+      kind: "absolute-full",
+      width: 24,
+      height: 24,
+      isComparison: false,
+      valueAt: () => 4,
+    };
+    const roi = { sourceWidth: 24, sourceHeight: 24, x: 6, y: 6, width: 12, height: 12 };
+
+    const plain = await sharp(await renderEstimatedHeatmapAsset(asset)).raw().toBuffer({ resolveWithObject: true });
+    const marked = await sharp(await renderEstimatedHeatmapAsset(asset, { roi })).raw().toBuffer({ resolveWithObject: true });
+
+    expect(pixelAt(marked, 0, 0)).toEqual(pixelAt(plain, 0, 0));
+    expect(pixelAt(marked, 12, 12)).toEqual(pixelAt(plain, 12, 12));
+    const markedColors = [];
+    for (let y = 0; y < marked.info.height; y += 1) {
+      for (let x = 0; x < marked.info.width; x += 1) {
+        if (pixelAt(marked, x, y).join(",") !== pixelAt(plain, x, y).join(",")) {
+          markedColors.push(pixelAt(marked, x, y));
+        }
+      }
+    }
+    expect(markedColors).toContainEqual([0, 0, 0]);
+    expect(markedColors).toContainEqual([255, 234, 0]);
+  });
+
   test("rejects an asset above the configured image-pixel limit before sampling", async () => {
     const valueAt = vi.fn(() => 0);
 

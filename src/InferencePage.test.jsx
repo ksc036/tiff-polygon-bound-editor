@@ -591,16 +591,27 @@ test("downloads every completed image with its ROI overlay, whole overlay, and w
     "override/override_histograms.png",
     "override/override_roi_mask_overlay.png",
     "override/override_whole_mask_overlay.png",
+    "override/override_whole_original_roi.png",
     "reference/reference_histograms.png",
     "reference/reference_roi_mask_overlay.png",
     "reference/reference_whole_mask_overlay.png",
+    "reference/reference_whole_original_roi.png",
   ]);
+  await expect(archive.file("reference/reference_whole_original_roi.png").async("text")).resolves.toBe("2x2");
   await expect(archive.file("reference/reference_whole_mask_overlay.png").async("text")).resolves.toBe("2x2");
   await expect(archive.file("reference/reference_roi_mask_overlay.png").async("text")).resolves.toBe("1x1");
+  await expect(archive.file("override/override_whole_original_roi.png").async("text")).resolves.toBe("3x1");
   await expect(archive.file("override/override_whole_mask_overlay.png").async("text")).resolves.toBe("3x1");
   await expect(archive.file("override/override_roi_mask_overlay.png").async("text")).resolves.toBe("1x1");
-  expect(contexts.flatMap((context) => context.fillStyles)).toEqual(expect.arrayContaining(["#788692", "#e7474f"]));
-  expect(contexts.flatMap((context) => context.strokeStyles)).toContain("#ff6b72");
+  expect(contexts.flatMap((context) => context.fillStyles)).toEqual(expect.arrayContaining([
+    "#788692",
+    "#e7474f",
+    "rgb(100 214 255 / 12%)",
+  ]));
+  expect(contexts.flatMap((context) => context.strokeStyles)).toEqual(expect.arrayContaining([
+    "#64d6ff",
+    "#ff6b72",
+  ]));
   expect(contexts.flatMap((context) => context.fillText.mock.calls.map(([text]) => text))).toEqual(expect.arrayContaining([
     "Threshold 0.500",
     "Whole image area fraction",
