@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   createSubimageDimensionsCsv,
   percentileDisplayRange,
@@ -129,6 +129,111 @@ describe("readExportRaster", () => {
 
     await expect(readExportRaster({ imagePath, maxImagePixels: 5 })).rejects.toThrow();
   });
+
+  test("cancels the active source decode and detaches its abort listener", async () => {
+    const rootDir = await createTempRoot();
+    const imagePath = path.join(rootDir, "source.tif");
+    const pixelCount = 256 * 256;
+    await writeFile(imagePath, uint16Tiff({
+      width: 256,
+      height: 256,
+      pixels: Uint16Array.from({ length: pixelCount }, (_, index) => index),
+    }));
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+
+    const reading = readExportRaster({
+      imagePath,
+      maxImagePixels: pixelCount,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(reading).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+
+  test("detaches the source decode abort listener after success", async () => {
+    const rootDir = await createTempRoot();
+    const imagePath = path.join(rootDir, "source.tif");
+    await writeFile(imagePath, uint16Tiff({ width: 2, height: 1, pixels: [0, 65535] }));
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+
+    await readExportRaster({ imagePath, maxImagePixels: 2, signal: controller.signal });
+
+    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
+});
+
+test.each([
+  ["original", (raster, crop, signal) => renderOriginalPreview(raster, { signal })],
+  ["annotated original", (raster, crop, signal) => renderAnnotatedOriginal(raster, crop, { signal })],
+  ["Subimage", (raster, crop, signal) => renderSubimagePreview(raster, crop, { signal })],
+])("rejects a pre-aborted %s PNG render", async (_name, render) => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await expect(render(
+    fixtureRaster(6, 4),
+    { sourceWidth: 6, sourceHeight: 4, x: 1, y: 1, width: 2, height: 2 },
+    controller.signal,
+  )).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+});
+
+test("observes an abort during normalization without caching partial pixels", async () => {
+  const controller = new AbortController();
+  const sourcePixels = Uint16Array.from({ length: 10_000 }, (_, index) => index);
+  let reads = 0;
+  const pixels = new Proxy(sourcePixels, {
+    get(target, property) {
+      if (typeof property === "string" && /^\d+$/.test(property)) {
+        reads += 1;
+        if (reads === 10) controller.abort();
+      }
+      return Reflect.get(target, property, target);
+    },
+  });
+  const raster = {
+    width: 10_000,
+    height: 1,
+    pixels,
+    displayMin: 0,
+    displayMax: 9_999,
+  };
+
+  await expect(renderOriginalPreview(raster, { signal: controller.signal })).rejects.toMatchObject({
+    name: "AbortError",
+    code: "ABORT_ERR",
+  });
+  expect(reads).toBeGreaterThanOrEqual(10);
+  expect(reads).toBeLessThanOrEqual(4_096);
+
+  const decoded = await sharp(await renderOriginalPreview(raster)).greyscale().raw().toBuffer();
+  expect(decoded.at(-1)).toBe(255);
+});
+
+test("cancels an active Subimage Sharp pipeline and detaches its abort listener", async () => {
+  const controller = new AbortController();
+  const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+  const rendering = renderSubimagePreview(
+    fixtureRaster(256, 256),
+    { sourceWidth: 256, sourceHeight: 256, x: 0, y: 0, width: 256, height: 256 },
+    { signal: controller.signal },
+  );
+  controller.abort();
+
+  await expect(rendering).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+  expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+});
+
+test("detaches the original preview abort listener after success", async () => {
+  const controller = new AbortController();
+  const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+
+  await renderOriginalPreview(fixtureRaster(2, 2), { signal: controller.signal });
+
+  expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
 });
 
 test("renders representative normalized pixels", async () => {

@@ -1,7 +1,9 @@
 import sharp from "sharp";
-import { readGrey16RawFromImage } from "./imageProcessing.js";
+import { resolveMaxImagePixels } from "./imageProcessing.js";
+import { runSharpWithSignal } from "./sharpRender.js";
 
 const MAX_GREY16 = 65_535;
+const NORMALIZATION_ABORT_CHECK_INTERVAL = 4_096;
 const normalizedPixelsByRaster = new WeakMap();
 const originalPreviewByRaster = new WeakMap();
 
@@ -36,28 +38,44 @@ export function percentileDisplayRange(pixels) {
     : { displayMin: MAX_GREY16 - 1, displayMax: MAX_GREY16 };
 }
 
-export async function readExportRaster({ imagePath, maxImagePixels }) {
-  const raw = await readGrey16RawFromImage(imagePath, { maxImagePixels });
-  const pixels = new Uint16Array(raw.buffer.buffer, raw.buffer.byteOffset, raw.buffer.byteLength / 2);
-  return { width: raw.width, height: raw.height, pixels, ...percentileDisplayRange(pixels) };
+export async function readExportRaster({ imagePath, maxImagePixels, signal }) {
+  throwIfAborted(signal);
+  const pipeline = sharp(imagePath, {
+    limitInputPixels: resolveMaxImagePixels(maxImagePixels),
+  })
+    .toColourspace("grey16")
+    .raw({ depth: "ushort" });
+  const { data, info } = await runSharpWithSignal(
+    pipeline,
+    () => pipeline.toBuffer({ resolveWithObject: true }),
+    signal,
+  );
+  throwIfAborted(signal);
+  const pixels = new Uint16Array(data.buffer, data.byteOffset, data.byteLength / 2);
+  const displayRange = percentileDisplayRange(pixels);
+  throwIfAborted(signal);
+  return { width: info.width, height: info.height, pixels, ...displayRange };
 }
 
-function normalizedPixelsFor(raster) {
+function normalizedPixelsFor(raster, signal) {
+  throwIfAborted(signal);
   const cached = normalizedPixelsByRaster.get(raster);
   if (cached) return cached;
 
   const normalized = Buffer.alloc(raster.pixels.length);
   const range = raster.displayMax - raster.displayMin;
   for (let index = 0; index < raster.pixels.length; index += 1) {
+    if (index % NORMALIZATION_ABORT_CHECK_INTERVAL === 0) throwIfAborted(signal);
     const fraction = Math.min(Math.max((raster.pixels[index] - raster.displayMin) / range, 0), 1);
     normalized[index] = Math.round(fraction * 255);
   }
+  throwIfAborted(signal);
   normalizedPixelsByRaster.set(raster, normalized);
   return normalized;
 }
 
-function sharpFromNormalizedRaster(raster) {
-  return sharp(normalizedPixelsFor(raster), {
+function sharpFromNormalizedRaster(raster, signal) {
+  return sharp(normalizedPixelsFor(raster, signal), {
     raw: {
       width: raster.width,
       height: raster.height,
@@ -66,18 +84,21 @@ function sharpFromNormalizedRaster(raster) {
   });
 }
 
-export function renderOriginalPreview(raster) {
+export async function renderOriginalPreview(raster, { signal } = {}) {
+  throwIfAborted(signal);
   const cached = originalPreviewByRaster.get(raster);
   if (cached) return cached;
 
-  const preview = sharpFromNormalizedRaster(raster)
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
+  const pipeline = sharpFromNormalizedRaster(raster, signal)
+    .png({ compressionLevel: 9, adaptiveFiltering: true });
+  const preview = await runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
+  throwIfAborted(signal);
   originalPreviewByRaster.set(raster, preview);
   return preview;
 }
 
-export async function renderAnnotatedOriginal(raster, crop) {
+export async function renderAnnotatedOriginal(raster, crop, { signal } = {}) {
+  throwIfAborted(signal);
   const right = crop.x + crop.width - 0.5;
   const bottom = crop.y + crop.height - 0.5;
   const rectangleMarkup = crop.width === 1 || crop.height === 1
@@ -87,17 +108,18 @@ export async function renderAnnotatedOriginal(raster, crop) {
   ${rectangleMarkup}
 </svg>`);
 
-  return sharp(await renderOriginalPreview(raster))
+  const pipeline = sharp(await renderOriginalPreview(raster, { signal }))
     .composite([{ input: rectangle }])
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
+    .png({ compressionLevel: 9, adaptiveFiltering: true });
+  return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
 
-export function renderSubimagePreview(raster, crop) {
-  return sharpFromNormalizedRaster(raster)
+export async function renderSubimagePreview(raster, crop, { signal } = {}) {
+  throwIfAborted(signal);
+  const pipeline = sharpFromNormalizedRaster(raster, signal)
     .extract({ left: crop.x, top: crop.y, width: crop.width, height: crop.height })
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
+    .png({ compressionLevel: 9, adaptiveFiltering: true });
+  return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
 
 function csvValue(value) {
@@ -122,4 +144,12 @@ export function createSubimageDimensionsCsv({ imageFolder, source, crop }) {
     ["subimage_8bit_filename", "subimage_8bit.png"],
   ];
   return Buffer.from(`${rows.map((row) => row.map(csvValue).join(",")).join("\r\n")}\r\n`, "utf8");
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error("Raster export aborted.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  throw error;
 }

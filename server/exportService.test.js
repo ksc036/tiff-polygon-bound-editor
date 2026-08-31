@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Transform } from "node:stream";
 import ExcelJS from "exceljs";
 import sharp from "sharp";
 import unzipper from "unzipper";
@@ -39,6 +39,22 @@ async function openWorkbookEntry(archive, suffix) {
   return workbook;
 }
 
+async function moveWhenReleased(filePath) {
+  const releasedPath = `${filePath}.released`;
+  let lastError;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await rename(filePath, releasedPath);
+      return releasedPath;
+    } catch (error) {
+      if (error?.code !== "EBUSY" && error?.code !== "EPERM") throw error;
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw lastError;
+}
+
 async function imageDimensions(archive, name) {
   const entry = archive.files.find((file) => file.path === name);
   const metadata = await sharp(await entry.buffer()).metadata();
@@ -52,6 +68,31 @@ async function exportFixtureArchive(fixture) {
     storage: fixture.storage,
     output,
     calibration: { slope: 0.1, intercept: 0 },
+  });
+  const archive = await unzipper.Open.buffer(await zipPromise);
+  await writePromise;
+  return archive;
+}
+
+async function exportFixtureArchiveAfterStart(fixture, onArchiveStart) {
+  let started = false;
+  const output = new Transform({
+    transform(chunk, _encoding, callback) {
+      if (started) {
+        callback(null, chunk);
+        return;
+      }
+      started = true;
+      Promise.resolve()
+        .then(onArchiveStart)
+        .then(() => callback(null, chunk), callback);
+    },
+  });
+  const zipPromise = collectStream(output);
+  const writePromise = writeDatasetZip({
+    storage: fixture.storage,
+    output,
+    maxImagePixels: 1_000_000,
   });
   const archive = await unzipper.Open.buffer(await zipPromise);
   await writePromise;
@@ -500,6 +541,65 @@ test.each([
     expect(names).not.toContain("fixture_export/T02/compare/100x100/full_current_minus_previous.png");
     expect(names).toContain("fixture_export/T02/compare/20x20/full_current_minus_previous.png");
   }
+});
+
+test("reports a saved Subimage TIFF that disappears after validation as skipped", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+    subimagesByImage: { T01: equalSubimages().T01 },
+  });
+  const subimagePath = fixture.storage.imagePaths("T01").subimagePath;
+
+  const archive = await exportFixtureArchiveAfterStart(fixture, () => rm(subimagePath));
+  const names = archive.files.map((file) => file.path);
+  const workbook = await openWorkbookEntry(archive, "/export_report.xlsx");
+  const subimageRow = workbook.getWorksheet("Subimages").getRow(2);
+  const report = workbook.getWorksheet("Export Report");
+  const reportRows = Array.from(
+    { length: report.rowCount - 1 },
+    (_, index) => report.getRow(index + 2),
+  );
+
+  expect(names).not.toContain("fixture_export/T01/subimage/subimage_16bit.tif");
+  expect(subimageRow.getCell(8).value).toBe("Skipped");
+  expect(subimageRow.getCell(9).value).toBe("Saved Subimage TIFF could not be included.");
+  expect(reportRows.some((row) =>
+    row.getCell(2).value === "Skipped" &&
+    row.getCell(3).value === "Subimage 16-bit TIFF" &&
+    row.getCell(8).value === "Saved Subimage TIFF could not be included."
+  )).toBe(true);
+});
+
+test("reports a heatmap that disappears after planning as missing during hydration", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const heatmapPath = path.join(
+    fixture.storage.imagePaths("T01").heatmapDir,
+    "20x20",
+    "T01.heatmap.json",
+  );
+
+  const archive = await exportFixtureArchiveAfterStart(fixture, () => rm(heatmapPath));
+  const names = archive.files.map((file) => file.path);
+  const workbook = await openWorkbookEntry(archive, "/export_report.xlsx");
+  const report = workbook.getWorksheet("Export Report");
+  const reportRows = Array.from(
+    { length: report.rowCount - 1 },
+    (_, index) => report.getRow(index + 2),
+  );
+  const missingFullHeatmap = reportRows.find((row) =>
+    row.getCell(3).value === "Full heatmap" &&
+    row.getCell(4).value === "T01" &&
+    row.getCell(6).value === 20
+  );
+
+  expect(names).not.toContain("fixture_export/T01/heatmap/20x20/full.png");
+  expect(names).toContain("fixture_export/T01/heatmap/50x50/full.png");
+  expect(missingFullHeatmap?.getCell(2).value).toBe("Skipped");
+  expect(missingFullHeatmap?.getCell(8).value).toBe("Saved heatmap is missing.");
 });
 
 test("keeps saved heatmaps after file times change and skips incompatible adjacent grids", async () => {
@@ -980,6 +1080,68 @@ test("uses a safe text fallback when workbook generation fails", async () => {
     expect(archive.files.some((file) => file.path.endsWith(".xlsx"))).toBe(false);
   } finally {
     writeBuffer.mockRestore();
+  }
+});
+
+test("aborts and detaches the active derived-raster Sharp pipeline", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const controller = new AbortController();
+  const output = new PassThrough();
+  output.resume();
+  const originalAddEventListener = AbortSignal.prototype.addEventListener;
+  let resolveRasterStage;
+  const rasterStage = new Promise((resolve) => {
+    resolveRasterStage = resolve;
+  });
+  const addEventListener = vi.spyOn(AbortSignal.prototype, "addEventListener").mockImplementation(
+    function addEventListenerSpy(type, listener, options) {
+      const stack = new Error().stack ?? "";
+      const result = originalAddEventListener.call(this, type, listener, options);
+      if (
+        type === "abort" &&
+        stack.includes("runSharpWithSignal") &&
+        stack.includes("exportRasterAssets")
+      ) {
+        resolveRasterStage(this);
+      }
+      return result;
+    },
+  );
+  const removeEventListener = vi.spyOn(AbortSignal.prototype, "removeEventListener");
+  let writePromise;
+
+  try {
+    writePromise = writeDatasetZip({
+      storage: fixture.storage,
+      output,
+      signal: controller.signal,
+      maxImagePixels: 40 * 40,
+    });
+    const activeSignal = await Promise.race([
+      rasterStage,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("Derived raster stage did not become cancellable.")),
+        1_000,
+      )),
+    ]);
+    controller.abort();
+
+    await expect(writePromise).rejects.toMatchObject({ name: "AbortError", code: "ABORT_ERR" });
+    expect(activeSignal.aborted).toBe(true);
+    expect(removeEventListener.mock.calls.some((args, index) =>
+      removeEventListener.mock.contexts[index] === activeSignal && args[0] === "abort"
+    )).toBe(true);
+    expect(output.destroyed).toBe(true);
+    const releasedPath = await moveWhenReleased(fixture.storage.imagePaths("T01").imagePath);
+    await expect(stat(releasedPath)).resolves.toBeDefined();
+  } finally {
+    controller.abort();
+    await writePromise?.catch(() => {});
+    addEventListener.mockRestore();
+    removeEventListener.mockRestore();
   }
 });
 

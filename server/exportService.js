@@ -58,6 +58,13 @@ const NUMERIC_METRIC_FIELDS = new Set([
   "orientationDispersion",
 ]);
 const DEFAULT_ROI_LIMITS = Object.freeze({ near: 20, mid: 50, far: 100 });
+const HEATMAP_COMPATIBILITY_REASONS = new Set([
+  "Heatmaps have incompatible dimensions.",
+  "Heatmaps have incompatible cell sizes.",
+  "Heatmaps have incompatible rows.",
+  "Heatmaps have incompatible columns.",
+  "Heatmaps have incompatible cell count.",
+]);
 
 class StaleAnalysisError extends Error {
   constructor() {
@@ -470,6 +477,7 @@ async function appendDatasetEntries({
 }
 
 async function appendDerivedRasterEntries({ archive, base, record, maxImagePixels, abortState }) {
+  const validatedCrop = record.subimage.status === "Included" ? record.subimage.crop : null;
   await appendDerivedPathEntry({
     archive,
     record,
@@ -481,7 +489,7 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
     failureReason: "Original TIFF could not be included.",
     abortState,
   });
-  await appendDerivedPathEntry({
+  const subimageTiffEntry = await appendDerivedPathEntry({
     archive,
     record,
     sourcePath: record.subimage.status === "Included" ? record.subimage.sourcePath : null,
@@ -492,6 +500,14 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
     failureReason: "Saved Subimage TIFF could not be included.",
     abortState,
   });
+  if (record.subimage.status === "Included" && subimageTiffEntry.status === "Skipped") {
+    const { path: _includedPath, ...validatedSubimage } = record.subimage;
+    record.subimage = {
+      ...validatedSubimage,
+      status: "Skipped",
+      reason: subimageTiffEntry.reason,
+    };
+  }
 
   let raster = null;
   let rasterReason = null;
@@ -502,6 +518,7 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
       raster = await abortState.race(readExportRaster({
         imagePath: record.imageSource.path,
         maxImagePixels,
+        signal: abortState.signal,
       }));
     } catch (error) {
       if (isAbortError(error)) throw error;
@@ -514,7 +531,7 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
     await appendDerivedBufferEntry({
       archive,
       record,
-      render: () => renderOriginalPreview(raster),
+      render: () => renderOriginalPreview(raster, { signal: abortState.signal }),
       archivePath: archiveName(...base, "original", "original_8bit.png"),
       publicPath: `${record.imageFolder}/original/original_8bit.png`,
       artifact: "Original 8-bit preview",
@@ -529,13 +546,13 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
     });
   }
 
-  const crop = record.subimage.status === "Included" ? record.subimage.crop : null;
+  const crop = validatedCrop;
   const subimageReason = record.subimage.reason ?? "Saved Subimage is unavailable.";
   if (raster && crop) {
     await appendDerivedBufferEntry({
       archive,
       record,
-      render: () => renderAnnotatedOriginal(raster, crop),
+      render: () => renderAnnotatedOriginal(raster, crop, { signal: abortState.signal }),
       archivePath: archiveName(...base, "original", "original_with_subimage.png"),
       publicPath: `${record.imageFolder}/original/original_with_subimage.png`,
       artifact: "Annotated original",
@@ -545,7 +562,7 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
     await appendDerivedBufferEntry({
       archive,
       record,
-      render: () => renderSubimagePreview(raster, crop),
+      render: () => renderSubimagePreview(raster, crop, { signal: abortState.signal }),
       archivePath: archiveName(...base, "subimage", "subimage_8bit.png"),
       publicPath: `${record.imageFolder}/subimage/subimage_8bit.png`,
       artifact: "Subimage 8-bit preview",
@@ -596,16 +613,21 @@ async function appendDerivedPathEntry({
   abortState,
 }) {
   if (!sourcePath) {
-    recordDerivedEntry(record, { status: "Skipped", artifact, reason: unavailableReason });
-    return;
+    const entry = { status: "Skipped", artifact, reason: unavailableReason };
+    recordDerivedEntry(record, entry);
+    return entry;
   }
   try {
     await appendPathAndWait(archive, sourcePath, archivePath, abortState);
-    recordDerivedEntry(record, { status: "Included", artifact, path: publicPath });
+    const entry = { status: "Included", artifact, path: publicPath };
+    recordDerivedEntry(record, entry);
+    return entry;
   } catch (error) {
     if (isAbortError(error)) throw error;
     abortState.throwIfAborted();
-    recordDerivedEntry(record, { status: "Skipped", artifact, reason: failureReason });
+    const entry = { status: "Skipped", artifact, reason: failureReason };
+    recordDerivedEntry(record, entry);
+    return entry;
   }
 }
 
@@ -641,16 +663,40 @@ async function appendEstimatedHeatmapEntry({
 }) {
   const relativeSegments = estimatedHeatmapRelativeSegments(asset);
   const publicPath = [record.imageFolder, ...relativeSegments].join("/");
+  let hydrated;
 
   try {
-    const hydrated = await abortState.race(hydrateEstimatedHeatmapAsset(asset, {
+    hydrated = await abortState.race(hydrateEstimatedHeatmapAsset(asset, {
       storage,
       signal: abortState.signal,
     }));
-    const buffer = await abortState.render(renderEstimatedHeatmapAsset(hydrated, {
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    abortState.throwIfAborted();
+    record.derivedEntries.push(estimatedHeatmapDerivedEntry(asset, {
+      status: "Skipped",
+      reason: estimatedHeatmapHydrationReason(error),
+    }));
+    return;
+  }
+
+  let buffer;
+  try {
+    buffer = await abortState.render(renderEstimatedHeatmapAsset(hydrated, {
       signal: abortState.signal,
       maxImagePixels,
     }));
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    abortState.throwIfAborted();
+    record.derivedEntries.push(estimatedHeatmapDerivedEntry(asset, {
+      status: "Skipped",
+      reason: "Estimated heatmap could not be rendered.",
+    }));
+    return;
+  }
+
+  try {
     await appendBufferAndWait(
       archive,
       buffer,
@@ -666,7 +712,7 @@ async function appendEstimatedHeatmapEntry({
     abortState.throwIfAborted();
     record.derivedEntries.push(estimatedHeatmapDerivedEntry(asset, {
       status: "Skipped",
-      reason: "Estimated heatmap could not be rendered.",
+      reason: "Estimated heatmap could not be included.",
     }));
   }
 }
@@ -777,6 +823,17 @@ function estimatedHeatmapDerivedEntry(asset, details) {
     sourceCellSize: asset.sourceCellSize,
     cellSize: asset.cellSize ?? asset.sourceCellSize,
   };
+}
+
+function estimatedHeatmapHydrationReason(error) {
+  const reasonsByCode = {
+    MISSING_HEATMAP: "Saved heatmap is missing.",
+    STALE_HEATMAP: "Saved heatmap is stale.",
+    INVALID_HEATMAP: "Saved heatmap is invalid.",
+  };
+  if (reasonsByCode[error?.code]) return reasonsByCode[error.code];
+  if (HEATMAP_COMPATIBILITY_REASONS.has(error?.message)) return error.message;
+  return "Saved heatmap is unavailable.";
 }
 
 function recordDerivedEntry(record, details) {
