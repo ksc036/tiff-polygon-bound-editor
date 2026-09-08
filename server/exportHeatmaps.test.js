@@ -62,6 +62,34 @@ describe("heatmap export", () => {
     expect(buildHeatmapFigureSvg(collagenComparison)).toContain("Delta Collagen Density (mg/ml)");
   });
 
+  test("uses a custom color maximum only for absolute estimated-density figures", () => {
+    const images = [{ id: "T01", imageFolder: "T01" }, { id: "T02", imageFolder: "T02" }];
+    const sources = new Map([
+      ["T01:20", { status: "Included", heatmap: map("T01", [0.1, 0.2]) }],
+      ["T02:20", { status: "Included", heatmap: map("T02", [0.2, 0.3]) }],
+    ]);
+
+    const plan = planHeatmapFigures({
+      images,
+      sources,
+      calibration,
+      estimatedCollagenColorMax: 4,
+    });
+    const absolute = plan.figures.find(
+      (figure) => figure.kind === "absolute" && figure.metric === "estimated-collagen-density",
+    );
+    const comparison = plan.figures.find(
+      (figure) => figure.kind === "comparison" && figure.metric === "estimated-collagen-density",
+    );
+
+    expect(absolute.colorRange).toEqual({ min: 0, max: 4 });
+    expect(comparison.colorRange).toEqual({
+      min: -comparison.colorRange.max,
+      max: comparison.colorRange.max,
+    });
+    expect(comparison.colorRange.max).not.toBe(4);
+  });
+
   test("keeps an all-zero comparison on its true zero range", () => {
     const images = [{ id: "T01", imageFolder: "T01" }, { id: "T02", imageFolder: "T02" }];
     const sources = new Map([
@@ -105,7 +133,7 @@ describe("heatmap export", () => {
       "0", "0", "2", "2", "4", "4", "6", "6", "8", "8",
       "0.5", "0.25", "0", "-0.25", "-0.5",
     ]);
-    expect(svg).toContain("Density model: Pixel Density = 0.4394 + (-0.005983 - 0.4394) * exp(-0.3587 * Collagen Density)");
+    expect(svg).toContain("Density model: Pixel Density = -0.3768 * exp(-0.0841 * Collagen Density) + 0.4337");
     expect(svg).toContain("Range -0.5 to +0.5");
     expect(svg).toContain("Color range: -0.5 to +0.5 ratio");
   });
@@ -176,7 +204,7 @@ describe("heatmap export", () => {
     };
     const svg = buildHeatmapFigureSvg(figure);
     expect(svg).toContain("T01 | Estimated Collagen Density | Cell 20x20 px | Grid 2x1");
-    expect(svg).toContain("Density model: Pixel Density = 0.4394 + (-0.005983 - 0.4394) * exp(-0.3587 * Collagen Density)");
+    expect(svg).toContain("Density model: Pixel Density = -0.3768 * exp(-0.0841 * Collagen Density) + 0.4337");
     expect(svg).toContain("Grid X");
     expect(svg).toContain("Grid Y");
     expect(svg).toContain("Estimated Collagen Density (mg/ml)");

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import sharp from "sharp";
+import { sharpPath } from "./sharpPath.js";
 
 export const DEFAULT_MAX_IMAGE_PIXELS = 536_870_912;
 
@@ -132,9 +133,9 @@ async function readImageJDisplayRangeFromTiff(inputPath) {
 }
 
 export async function readGrey16RawFromImage(inputPath, { maxImagePixels } = {}) {
-  const image = sharp(inputPath, sharpInputOptions(maxImagePixels));
+  const image = sharp(sharpPath(inputPath), sharpInputOptions(maxImagePixels));
   const metadata = await image.metadata();
-  const { data, info } = await sharp(inputPath, sharpInputOptions(maxImagePixels))
+  const { data, info } = await sharp(sharpPath(inputPath), sharpInputOptions(maxImagePixels))
     .toColourspace("grey16")
     .raw({ depth: "ushort" })
     .toBuffer({ resolveWithObject: true });

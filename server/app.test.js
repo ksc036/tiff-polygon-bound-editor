@@ -387,6 +387,39 @@ describe("createApp", () => {
     await expect(response.json()).resolves.toEqual({ error: "Export image id is invalid." });
   });
 
+  test("accepts an estimated collagen maximum of 10", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+
+    const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+      method: "POST",
+      body: { estimatedCollagenColorMax: 10 },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/zip");
+  });
+
+  test.each([0, 0.09, 10.1, "4", null])(
+    "rejects invalid estimated collagen color maximum %j before streaming",
+    async (estimatedCollagenColorMax) => {
+      const appRoot = await createTempRoot();
+      const imageRoot = await createTempRoot();
+      await writeImage(imageRoot, "T01", "frame001.tif");
+
+      const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+        method: "POST",
+        body: { estimatedCollagenColorMax },
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "Estimated collagen color max must be between 0.1 and 10 mg/ml.",
+      });
+    },
+  );
+
   test("serves health status", async () => {
     const rootDir = await createTempRoot();
     const response = await request(createApp({ rootDir }), "/api/health");

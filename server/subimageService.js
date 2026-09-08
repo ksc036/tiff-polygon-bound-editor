@@ -9,6 +9,7 @@ import {
 import path from "node:path";
 import sharp from "sharp";
 import { resolveMaxImagePixels } from "./imageProcessing.js";
+import { sharpPath } from "./sharpPath.js";
 
 export class SubimageError extends Error {
   constructor(code, message, { status = 422, details = null, cause } = {}) {
@@ -25,11 +26,11 @@ function sharpInputOptions(maxImagePixels) {
 }
 
 async function defaultRenderCropTiff({ sourcePath, tempPath, crop, maxImagePixels }) {
-  await sharp(sourcePath, sharpInputOptions(maxImagePixels))
+  await sharp(sharpPath(sourcePath), sharpInputOptions(maxImagePixels))
     .extract({ left: crop.x, top: crop.y, width: crop.width, height: crop.height })
     .toColourspace("grey16")
     .tiff({ compression: "lzw" })
-    .toFile(tempPath);
+    .toFile(sharpPath(tempPath));
 }
 
 function dependencies(options = {}) {
@@ -133,7 +134,7 @@ async function readSupportedSource(imagePath, options = {}) {
 
   let metadata;
   try {
-    metadata = await sharp(imagePath, sharpInputOptions(options.maxImagePixels)).metadata();
+    metadata = await sharp(sharpPath(imagePath), sharpInputOptions(options.maxImagePixels)).metadata();
   } catch (error) {
     throw new SubimageError("UNSUPPORTED_SOURCE", "Source image must be a 16-bit grayscale TIFF.", { cause: error });
   }
@@ -156,7 +157,7 @@ async function validateOutputMetadata(outputPath, crop, options = {}, errorCode 
 
   let metadata;
   try {
-    metadata = await sharp(outputPath, sharpInputOptions(options.maxImagePixels)).metadata();
+    metadata = await sharp(sharpPath(outputPath), sharpInputOptions(options.maxImagePixels)).metadata();
   } catch (error) {
     throw new SubimageError(errorCode, "Saved subimage TIFF is invalid.", { cause: error });
   }

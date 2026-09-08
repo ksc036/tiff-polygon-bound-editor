@@ -21,9 +21,9 @@ test("exports the canonical comparison heatmap gradient", () => {
 });
 
 test("keeps both metrics and renders a detached estimated-density scale", () => {
-  render(<HeatmapScale metric="estimated-collagen-density" comparison={null} />);
+  render(<HeatmapScale metric="estimated-collagen-density" comparison={null} collagenDensityColorMax={4} />);
   expect(screen.getByLabelText("Heatmap scale")).toHaveTextContent("0");
-  expect(screen.getByLabelText("Heatmap scale")).toHaveTextContent("8 mg/ml");
+  expect(screen.getByLabelText("Heatmap scale")).toHaveTextContent("4 mg/ml");
 });
 
 test("renders a symmetric comparison scale", () => {

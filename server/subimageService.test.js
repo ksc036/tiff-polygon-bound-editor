@@ -129,6 +129,33 @@ describe("validateCrop", () => {
 });
 
 describe("saveSubimage", () => {
+  test.skipIf(process.platform !== "win32")(
+    "saves a subimage when the source and destination paths exceed legacy MAX_PATH",
+    async () => {
+      const rootDir = await createTempRoot();
+      const folderName = `T01-${"long-path-".repeat(18)}`;
+      const pixels = Array.from({ length: 64 }, (_, index) => index * 997);
+      await writeGrey16Tiff(rootDir, folderName, 8, 8, pixels);
+      const storage = createStorage({ initialRoot: rootDir });
+      const paths = storage.imagePaths(folderName);
+
+      expect(paths.imagePath.length).toBeGreaterThan(260);
+      expect(paths.subimagePath.length).toBeGreaterThan(260);
+
+      await expect(saveSubimage(storage, folderName, {
+        sourceWidth: 8,
+        sourceHeight: 8,
+        x: 2,
+        y: 1,
+        width: 4,
+        height: 4,
+      })).resolves.toMatchObject({ crop: { x: 2, y: 1, width: 4, height: 4 } });
+
+      const metadata = await sharp(await readFile(paths.subimagePath)).metadata();
+      expect(metadata).toMatchObject({ format: "tiff", width: 4, height: 4, depth: "ushort" });
+    },
+  );
+
   test("writes an exact ushort grey16 crop and commits JSON last", async () => {
     const rootDir = await createTempRoot();
     const pixels = Array.from({ length: 64 }, (_, index) => index * 997);

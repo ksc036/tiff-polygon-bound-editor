@@ -1,9 +1,11 @@
 import sharp from "sharp";
 import { resolveMaxImagePixels } from "./imageProcessing.js";
 import { createRoiMarkerSvg } from "./exportRoiMarker.js";
+import { sharpPath } from "./sharpPath.js";
 import { runSharpWithSignal } from "./sharpRender.js";
 
 const MAX_GREY16 = 65_535;
+const MASK_OVERLAY_OPACITY = 0.55;
 const NORMALIZATION_ABORT_CHECK_INTERVAL = 4_096;
 const HISTOGRAM_ABORT_CHECK_INTERVAL = 4_096;
 const normalizedPixelsByRaster = new WeakMap();
@@ -73,7 +75,7 @@ export async function percentileDisplayRange(pixels, { signal } = {}) {
 
 export async function readExportRaster({ imagePath, maxImagePixels, signal }) {
   throwIfAborted(signal);
-  const pipeline = sharp(imagePath, {
+  const pipeline = sharp(sharpPath(imagePath), {
     limitInputPixels: resolveMaxImagePixels(maxImagePixels),
   })
     .toColourspace("grey16")
@@ -93,7 +95,7 @@ export async function readExportRaster({ imagePath, maxImagePixels, signal }) {
 export async function readExportImageDimensions({ imagePath, maxImagePixels, signal }) {
   throwIfAborted(signal);
   const pixelLimit = resolveMaxImagePixels(maxImagePixels);
-  const pipeline = sharp(imagePath, { limitInputPixels: pixelLimit });
+  const pipeline = sharp(sharpPath(imagePath), { limitInputPixels: pixelLimit });
   const metadata = await runSharpWithSignal(pipeline, () => pipeline.metadata(), signal);
   throwIfAborted(signal);
   const width = metadata?.width;
@@ -166,6 +168,92 @@ export async function renderSubimagePreview(raster, crop, { signal } = {}) {
     .extract({ left: crop.x, top: crop.y, width: crop.width, height: crop.height })
     .png({ compressionLevel: 9, adaptiveFiltering: true });
   return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
+}
+
+export async function renderMaskSubimage(mask, crop, { signal } = {}) {
+  const region = checkedRegion(mask, crop);
+  const pixels = Buffer.alloc(region.width * region.height);
+
+  for (let index = 0; index < pixels.length; index += 1) {
+    const x = index % region.width;
+    const y = Math.floor(index / region.width);
+    const sourceIndex = (region.top + y) * mask.width + region.left + x;
+    pixels[index] = mask.data[sourceIndex] ? 255 : 0;
+    if ((index + 1) % NORMALIZATION_ABORT_CHECK_INTERVAL === 0) {
+      await yieldAfterChunk(signal);
+    }
+  }
+
+  throwIfAborted(signal);
+  const pipeline = sharp(pixels, {
+    raw: { width: region.width, height: region.height, channels: 1 },
+  }).png({ compressionLevel: 9, adaptiveFiltering: true });
+  return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
+}
+
+export async function renderMaskOverlay(raster, mask, { crop = null, signal } = {}) {
+  if (mask.width !== raster.width || mask.height !== raster.height) {
+    throw new Error("Mask dimensions must match the original raster.");
+  }
+
+  const region = checkedRegion(raster, crop);
+  const normalized = await normalizedPixelsFor(raster, signal);
+  const pixels = Buffer.alloc(region.width * region.height * 3);
+
+  const originalWeight = 1 - MASK_OVERLAY_OPACITY;
+  const pixelCount = region.width * region.height;
+  for (let index = 0; index < pixelCount; index += 1) {
+    const x = index % region.width;
+    const y = Math.floor(index / region.width);
+    const sourceIndex = (region.top + y) * raster.width + region.left + x;
+    const targetOffset = index * 3;
+    const grey = normalized[sourceIndex];
+    if (mask.data[sourceIndex]) {
+      pixels[targetOffset] = Math.round(grey * originalWeight + 255 * MASK_OVERLAY_OPACITY);
+      pixels[targetOffset + 1] = Math.round(grey * originalWeight);
+      pixels[targetOffset + 2] = Math.round(grey * originalWeight);
+    } else {
+      pixels[targetOffset] = grey;
+      pixels[targetOffset + 1] = grey;
+      pixels[targetOffset + 2] = grey;
+    }
+    if ((index + 1) % NORMALIZATION_ABORT_CHECK_INTERVAL === 0) {
+      await yieldAfterChunk(signal);
+    }
+  }
+
+  throwIfAborted(signal);
+  const pipeline = sharp(pixels, {
+    raw: { width: region.width, height: region.height, channels: 3 },
+  }).png({ compressionLevel: 9, adaptiveFiltering: true });
+  return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
+}
+
+function checkedRegion(source, crop) {
+  if (
+    !source ||
+    !Number.isSafeInteger(source.width) ||
+    !Number.isSafeInteger(source.height) ||
+    source.width <= 0 ||
+    source.height <= 0
+  ) {
+    throw new TypeError("Image dimensions are invalid.");
+  }
+  if (!(source.data instanceof Uint8Array) || source.data.length !== source.width * source.height) {
+    if (!source.pixels || source.pixels.length !== source.width * source.height) {
+      throw new TypeError("Image pixels do not match its dimensions.");
+    }
+  }
+
+  if (!crop) return { left: 0, top: 0, width: source.width, height: source.height };
+  const values = [crop.x, crop.y, crop.width, crop.height];
+  if (!values.every(Number.isSafeInteger) || crop.x < 0 || crop.y < 0 || crop.width <= 0 || crop.height <= 0) {
+    throw new TypeError("Subimage crop is invalid.");
+  }
+  if (crop.x + crop.width > source.width || crop.y + crop.height > source.height) {
+    throw new RangeError("Subimage crop exceeds image dimensions.");
+  }
+  return { left: crop.x, top: crop.y, width: crop.width, height: crop.height };
 }
 
 function csvValue(value) {

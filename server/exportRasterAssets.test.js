@@ -361,7 +361,7 @@ test("renders matching parent and Subimage previews", async () => {
   expect([...subimage.data]).toEqual([89, 100, 111, 155, 166, 177]);
 });
 
-test("marks the crop with a high-contrast black and yellow outline", async () => {
+test("marks the crop with a one-pixel yellow outline", async () => {
   const raster = fixtureRaster(24, 24);
   const crop = { sourceWidth: 24, sourceHeight: 24, x: 6, y: 6, width: 12, height: 12 };
   const original = await sharp(await renderOriginalPreview(raster)).ensureAlpha().raw().toBuffer({
@@ -379,8 +379,8 @@ test("marks the crop with a high-contrast black and yellow outline", async () =>
       if (pixel.join(",") !== pixelAt(original, x, y).join(",")) changedPixels.push(pixel);
     }
   }
-  expect(changedPixels).toContainEqual([0, 0, 0, 255]);
   expect(changedPixels).toContainEqual([255, 234, 0, 255]);
+  expect(changedPixels).not.toContainEqual([0, 0, 0, 255]);
   expect(changedPixels).not.toContainEqual([255, 0, 0, 255]);
   expect(pixelAt(annotated, 12, 12)).toEqual(pixelAt(original, 12, 12));
   expect(pixelAt(annotated, 0, 0)).toEqual(pixelAt(original, 0, 0));

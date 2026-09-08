@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { estimateHeatmapCollagenDensity, infernoColor } from "../lib/heatmap.js";
 import HeatmapOverlay from "./HeatmapOverlay.jsx";
 
 const heatmap = {
@@ -61,7 +62,7 @@ describe("HeatmapOverlay", () => {
     expect(context.fillRect).toHaveBeenNthCalledWith(2, 5, 0, 5, 5);
     expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 1 / 25");
     expect(screen.getByRole("status")).toHaveTextContent("Pixel Density 0.0400");
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.3038 mg/ml");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.0000 mg/ml");
     expect(screen.getByRole("status")).toHaveTextContent("Previous 0.0200, Current 0.0400, Change 0.0200");
   });
 
@@ -84,17 +85,21 @@ describe("HeatmapOverlay", () => {
   });
 
   test("draws estimated collagen density cells with the fixed model", () => {
+    const colors = [];
+    context.fillRect.mockImplementation(() => colors.push(context.fillStyle));
     render(
       <HeatmapOverlay
         heatmap={heatmap}
         metric="estimated-collagen-density"
         comparison={null}
         pointer={null}
+        collagenDensityColorMax={4}
       />,
     );
 
     expect(context.clearRect).toHaveBeenCalledWith(0, 0, 10, 5);
     expect(context.fillRect).toHaveBeenCalledTimes(2);
+    expect(colors[1]).toBe(infernoColor(estimateHeatmapCollagenDensity(0.2), 0, 4));
   });
 
   test("shows fixed-model estimated density at the pointer", () => {
@@ -107,6 +112,51 @@ describe("HeatmapOverlay", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.3038 mg/ml");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.0000 mg/ml");
+  });
+
+  test("uses the selected maximum for estimated-density colors and the pointer value", () => {
+    const customHeatmap = {
+      ...heatmap,
+      cells: [{ ...heatmap.cells[0], pixelDensity: 0.5 }],
+      width: 5,
+      columns: 1,
+    };
+    const colors = [];
+    context.fillRect.mockImplementation(() => colors.push(context.fillStyle));
+
+    render(
+      <HeatmapOverlay
+        heatmap={customHeatmap}
+        metric="estimated-collagen-density"
+        comparison={null}
+        pointer={{ x: 1, y: 1 }}
+        collagenDensityColorMax={10}
+      />,
+    );
+
+    expect(colors).toEqual([infernoColor(10, 0, 10)]);
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 10.0000 mg/ml");
+  });
+
+  test("keeps the selected density maximum in the pointer while viewing pixel density", () => {
+    const customHeatmap = {
+      ...heatmap,
+      cells: [{ ...heatmap.cells[0], pixelDensity: 0.5 }],
+      width: 5,
+      columns: 1,
+    };
+
+    render(
+      <HeatmapOverlay
+        heatmap={customHeatmap}
+        metric="pixel-density"
+        comparison={null}
+        pointer={{ x: 1, y: 1 }}
+        collagenDensityColorMax={10}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 10.0000 mg/ml");
   });
 });

@@ -21,6 +21,8 @@ import {
   readExportImageDimensions,
   readExportRaster,
   renderAnnotatedOriginal,
+  renderMaskOverlay,
+  renderMaskSubimage,
   renderOriginalPreview,
   renderSubimagePreview,
 } from "./exportRasterAssets.js";
@@ -28,7 +30,13 @@ import { createDatasetExportWorkbook } from "./exportDatasetWorkbook.js";
 import { renderRoiOverview } from "./exportRoiOverview.js";
 import { createImageWorkbook, workbookFailureText } from "./exportWorkbook.js";
 import { loadSubimage } from "./subimageService.js";
-import { COLLAGEN_DENSITY_MODEL } from "../shared/collagenDensity.js";
+import { readBinaryMask } from "./maskSkeleton.js";
+import {
+  COLLAGEN_DENSITY_COLOR_MAX_MAX,
+  COLLAGEN_DENSITY_DISPLAY_MAX,
+  COLLAGEN_DENSITY_MODEL,
+  isCollagenDensityColorMax,
+} from "../shared/collagenDensity.js";
 
 const ANALYSIS_MODES = new Set(["outside", "inside"]);
 const REQUIRED_BAND_IDS = ["near", "mid", "far"];
@@ -118,10 +126,18 @@ export async function writeDatasetZip({
   storage,
   output,
   autoSavedImageId = null,
+  estimatedCollagenColorMax = COLLAGEN_DENSITY_DISPLAY_MAX,
   maxImagePixels,
   now = () => new Date(),
   signal,
 }) {
+  if (!isCollagenDensityColorMax(estimatedCollagenColorMax)) {
+    throw new ExportError(
+      "INVALID_COLOR_MAX",
+      `Estimated collagen color max must be between 0.1 and ${COLLAGEN_DENSITY_COLOR_MAX_MAX} mg/ml.`,
+      400,
+    );
+  }
   const densityModel = densityModelForExport();
   const exportStorage = storage?.createSnapshot?.() ?? storage;
   const rootPath = exportStorage?.getRoot?.();
@@ -144,6 +160,7 @@ export async function writeDatasetZip({
         storage: exportStorage,
         images,
         calibration: densityModel,
+        estimatedCollagenColorMax,
         signal,
       }),
       signal,
@@ -174,6 +191,7 @@ export async function writeDatasetZip({
         images,
         cropsByImage,
         sourceDimensionsByImage,
+        estimatedCollagenColorMax,
         signal,
       }),
       signal,
@@ -199,6 +217,7 @@ export async function writeDatasetZip({
       exportedAt,
       maxImagePixels,
       estimatedHeatmapRanges,
+      estimatedCollagenColorMax,
       storage: exportStorage,
       abortState,
     });
@@ -411,6 +430,7 @@ async function appendDatasetEntries({
   exportedAt,
   maxImagePixels,
   estimatedHeatmapRanges,
+  estimatedCollagenColorMax,
   storage,
   abortState,
 }) {
@@ -497,6 +517,7 @@ async function appendDatasetEntries({
     archive,
     rootDirectory,
     ranges: estimatedHeatmapRanges,
+    estimatedCollagenColorMax,
     abortState,
   });
   await appendDatasetWorkbookEntry({
@@ -579,6 +600,45 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
     });
   }
 
+  let mask = null;
+  let maskReason = null;
+  if (!record.maskSource) {
+    maskReason = "Selected source mask is unavailable for derived image rendering.";
+  } else {
+    try {
+      mask = await abortState.race(readBinaryMask(record.maskSource.path, { maxImagePixels }));
+      const expectedWidth = raster?.width ?? validatedCrop?.sourceWidth;
+      const expectedHeight = raster?.height ?? validatedCrop?.sourceHeight;
+      if (expectedWidth && (mask.width !== expectedWidth || mask.height !== expectedHeight)) {
+        mask = null;
+        maskReason = "Selected source mask dimensions do not match the original image.";
+      }
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      abortState.throwIfAborted();
+      maskReason = "Selected source mask could not be read for derived image rendering.";
+    }
+  }
+
+  if (raster && mask) {
+    await appendDerivedBufferEntry({
+      archive,
+      record,
+      render: () => renderMaskOverlay(raster, mask, { signal: abortState.signal }),
+      archivePath: archiveName(...base, "original", "original_with_mask_overlay.png"),
+      publicPath: `${record.imageFolder}/original/original_with_mask_overlay.png`,
+      artifact: "Original with mask overlay",
+      failureReason: "Original mask overlay could not be rendered.",
+      abortState,
+    });
+  } else {
+    recordDerivedEntry(record, {
+      status: "Skipped",
+      artifact: "Original with mask overlay",
+      reason: raster ? maskReason : rasterReason,
+    });
+  }
+
   const crop = validatedCrop;
   const subimageReason = record.subimage.reason ?? "Saved Subimage is unavailable.";
   if (raster && crop) {
@@ -606,6 +666,44 @@ async function appendDerivedRasterEntries({ archive, base, record, maxImagePixel
     const reason = crop ? rasterReason : subimageReason;
     recordDerivedEntry(record, { status: "Skipped", artifact: "Annotated original", reason });
     recordDerivedEntry(record, { status: "Skipped", artifact: "Subimage 8-bit preview", reason });
+  }
+
+  if (mask && crop) {
+    await appendDerivedBufferEntry({
+      archive,
+      record,
+      render: () => renderMaskSubimage(mask, crop, { signal: abortState.signal }),
+      archivePath: archiveName(...base, "mask", "subimage_mask.png"),
+      publicPath: `${record.imageFolder}/mask/subimage_mask.png`,
+      artifact: "Subimage mask",
+      failureReason: "Subimage mask could not be rendered.",
+      abortState,
+    });
+  } else {
+    recordDerivedEntry(record, {
+      status: "Skipped",
+      artifact: "Subimage mask",
+      reason: crop ? maskReason : subimageReason,
+    });
+  }
+
+  if (raster && mask && crop) {
+    await appendDerivedBufferEntry({
+      archive,
+      record,
+      render: () => renderMaskOverlay(raster, mask, { crop, signal: abortState.signal }),
+      archivePath: archiveName(...base, "subimage", "subimage_with_mask_overlay.png"),
+      publicPath: `${record.imageFolder}/subimage/subimage_with_mask_overlay.png`,
+      artifact: "Subimage with mask overlay",
+      failureReason: "Subimage mask overlay could not be rendered.",
+      abortState,
+    });
+  } else {
+    recordDerivedEntry(record, {
+      status: "Skipped",
+      artifact: "Subimage with mask overlay",
+      reason: !raster ? rasterReason : !mask ? maskReason : subimageReason,
+    });
   }
 
   if (crop) {
@@ -807,10 +905,16 @@ async function appendEstimatedHeatmapRoiEntry({
   }
 }
 
-async function appendEstimatedHeatmapScales({ archive, rootDirectory, ranges, abortState }) {
+async function appendEstimatedHeatmapScales({
+  archive,
+  rootDirectory,
+  ranges,
+  estimatedCollagenColorMax,
+  abortState,
+}) {
   const definitions = [
     {
-      input: { kind: "absolute" },
+      input: { kind: "absolute", estimatedCollagenColorMax },
       artifact: "Estimated Density scale",
       file: "estimated_collagen_density.png",
       path: "scales/estimated_collagen_density.png",

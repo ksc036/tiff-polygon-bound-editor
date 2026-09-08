@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
 import { readBinaryMask } from "./maskSkeleton.js";
+import { sharpPath } from "./sharpPath.js";
 
 const DEFAULT_COMMON_MIN = 13_350;
 const DEFAULT_COMMON_MAX = 13_410;
@@ -129,7 +130,7 @@ async function findSourceTiff(bundlePath, expectedWidth, expectedHeight) {
       .sort((left, right) => left.name.localeCompare(right.name));
     for (const candidate of candidates) {
       const candidatePath = path.join(childPath, candidate.name);
-      const metadata = await sharp(candidatePath).metadata();
+      const metadata = await sharp(sharpPath(candidatePath)).metadata();
       if (metadata.width === expectedWidth && metadata.height === expectedHeight) return candidatePath;
     }
   }

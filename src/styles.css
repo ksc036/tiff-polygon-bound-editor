@@ -593,6 +593,20 @@ input[type="range"] {
   width: 100%;
 }
 
+.heatmap-display-actions input[type="number"] {
+  justify-self: end;
+  width: 78px;
+  min-width: 0;
+}
+
+.heatmap-display-actions .heatmap-density-saturation {
+  grid-column: 1 / -1;
+  color: #8fa0ae;
+  font-size: 0.72rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
 .heatmap-view-state {
   display: block;
   width: 100%;

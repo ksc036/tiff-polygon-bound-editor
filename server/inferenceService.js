@@ -4,6 +4,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { polygonSelfIntersects } from "./analysisGeometry.js";
 import { readGrey16RawFromImage, resolveMaxImagePixels } from "./imageProcessing.js";
+import { sharpPath } from "./sharpPath.js";
 import {
   closestThreshold,
   createProbabilityOverlayPng,
@@ -285,7 +286,7 @@ function polygonForRectangle({ x, y, width, height }) {
 }
 
 function sourceDimensions(imagePath, maxImagePixels) {
-  return sharp(imagePath, { limitInputPixels: resolveMaxImagePixels(maxImagePixels) })
+  return sharp(sharpPath(imagePath), { limitInputPixels: resolveMaxImagePixels(maxImagePixels) })
     .metadata()
     .then((metadata) => {
       if (!Number.isInteger(metadata.width) || !Number.isInteger(metadata.height) || metadata.width <= 0 || metadata.height <= 0) {

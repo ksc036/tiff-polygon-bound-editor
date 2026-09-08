@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import { groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
 import { assignOutwardRoiPixels, visitOutwardRoiPixels } from "./analysisGeometry.js";
+import { sharpPath } from "./sharpPath.js";
 import { runSharpWithSignal } from "./sharpRender.js";
 
 const DEFAULT_ROI_LIMITS = Object.freeze({ near: 20, mid: 50, far: 100 });
@@ -79,7 +80,7 @@ export function buildRoiOverviewSvg({
 
 export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, signal }) {
   const pixelLimit = inputPixelLimitFor(maxImagePixels);
-  const source = sharp(imagePath, { limitInputPixels: pixelLimit });
+  const source = sharp(sharpPath(imagePath), { limitInputPixels: pixelLimit });
   try {
     const metadata = await runSharpWithSignal(source, () => source.metadata(), signal);
     const { width, height } = imageDimensions(metadata);

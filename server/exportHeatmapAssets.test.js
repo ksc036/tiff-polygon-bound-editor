@@ -118,6 +118,42 @@ describe("estimated collagen heatmap asset planning", () => {
     expect(loadHeatmap).toHaveBeenCalledTimes(21);
   });
 
+  test("plans assets with a custom estimated-density calculation and color maximum", async () => {
+    const images = [image("T01")];
+    const plan = await planEstimatedHeatmapAssets({
+      storage: {},
+      images,
+      cropsByImage: new Map([["T01", crop(20)]]),
+      sourceDimensionsByImage: sourceDimensionsFor(images),
+      loadHeatmap: loaderFor(completeSources(["T01"])),
+      estimatedCollagenColorMax: 10,
+    });
+
+    expect(plan.descriptors.filter((entry) => entry.kind.startsWith("absolute"))
+      .every((entry) => entry.colorRange.max === 10)).toBe(true);
+    expect(plan.descriptors.filter((entry) => entry.kind.startsWith("comparison"))).toHaveLength(0);
+  });
+
+  test("hydrates absolute values with the selected estimated-density maximum", async () => {
+    const source = heatmap(20, [10], { width: 20, height: 20 });
+    const descriptor = {
+      kind: "absolute-full",
+      currentImageId: "T01",
+      sourceCellSize: 20,
+      width: 20,
+      height: 20,
+      estimatedCollagenMax: 10,
+      colorRange: { min: 0, max: 10 },
+    };
+
+    const asset = await hydrateEstimatedHeatmapAsset(descriptor, {
+      storage: {},
+      loadHeatmap: loaderFor([["T01:20", source]]),
+    });
+
+    expect(asset.valueAt(0, 0)).toBeCloseTo(10, 10);
+  });
+
   test("compares equal-sized crops at independent source coordinates", async () => {
     const current = heatmap(20, [0, 6, 0, 0, 0, 0]);
     const previous = heatmap(20, [2, 0, 0, 0, 0, 0]);
@@ -367,6 +403,19 @@ describe("estimated collagen heatmap asset rendering", () => {
     expect(pixelAt(decoded, 1, 0)).not.toEqual(rgb(infernoColor(source.cells[1].pixelDensity, 0, 8)));
   });
 
+  test("renders absolute heatmap colors with the descriptor color maximum", async () => {
+    const decoded = await sharp(await renderEstimatedHeatmapAsset({
+      kind: "absolute-full",
+      width: 1,
+      height: 1,
+      isComparison: false,
+      colorRange: { min: 0, max: 4 },
+      valueAt: () => 2,
+    })).raw().toBuffer({ resolveWithObject: true });
+
+    expect(pixelAt(decoded, 0, 0)).toEqual(rgb(infernoColor(2, 0, 4)));
+  });
+
   test("renders a Subimage PNG at exact crop dimensions and source coordinates", async () => {
     const source = heatmap(1, [8, 0, 8, 0, 0, 8, 0, 8], { width: 4, height: 2 });
     const descriptor = {
@@ -419,7 +468,7 @@ describe("estimated collagen heatmap asset rendering", () => {
     expect(pixelAt(decoded, 2, 0)).toEqual(rgb(differenceColor(2, 2)));
   });
 
-  test("renders a separate high-contrast ROI-marked full heatmap", async () => {
+  test("renders a separate one-pixel yellow ROI-marked full heatmap", async () => {
     const asset = {
       kind: "absolute-full",
       width: 24,
@@ -442,8 +491,8 @@ describe("estimated collagen heatmap asset rendering", () => {
         }
       }
     }
-    expect(markedColors).toContainEqual([0, 0, 0]);
     expect(markedColors).toContainEqual([255, 234, 0]);
+    expect(markedColors).not.toContainEqual([0, 0, 0]);
   });
 
   test("rejects an asset above the configured image-pixel limit before sampling", async () => {
@@ -586,6 +635,16 @@ describe("estimated collagen heatmap asset rendering", () => {
     expect(pixelAt(decoded, 28, 40)).toEqual(rgb(infernoColor(8, 0, 8)));
     expect(pixelAt(decoded, 28, 319)).toEqual(rgb(infernoColor(0, 0, 8)));
     expect(pixelAt(decoded, 0, 0)).toEqual([255, 255, 255]);
+  });
+
+  test("renders a distinct absolute scale label for a custom color maximum", async () => {
+    const defaultScale = await renderHeatmapScaleAsset({ kind: "absolute" });
+    const customScale = await renderHeatmapScaleAsset({
+      kind: "absolute",
+      estimatedCollagenColorMax: 4,
+    });
+
+    expect(customScale).not.toEqual(defaultScale);
   });
 
   test("renders a detached horizontal comparison scale with shared range colors", async () => {

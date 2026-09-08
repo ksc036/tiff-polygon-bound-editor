@@ -36,7 +36,14 @@ import {
   sameCrop,
 } from "./lib/subimageCrop.js";
 import { buildAnalysisRows, groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
-import { estimateCollagenDensity } from "../shared/collagenDensity.js";
+import {
+  COLLAGEN_DENSITY_COLOR_MAX_MAX,
+  COLLAGEN_DENSITY_COLOR_MAX_MIN,
+  COLLAGEN_DENSITY_DISPLAY_MAX,
+  estimateCollagenDensity,
+  isCollagenDensityColorMax,
+  pixelDensityFromCollagenDensity,
+} from "../shared/collagenDensity.js";
 
 const OPACITY_KEY = "raw16-editor-point-opacity";
 const DEFAULT_OPACITY = 0.85;
@@ -62,6 +69,7 @@ const LEGACY_HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
 const HEATMAP_SELECTED_PRESET_KEY = "raw16-editor-heatmap-selected-preset";
 const HEATMAP_METRIC_KEY = "raw16-editor-heatmap-metric";
 const HEATMAP_ORIGINAL_OPACITY_KEY = "raw16-editor-heatmap-original-opacity";
+const HEATMAP_COLLAGEN_COLOR_MAX_KEY = "raw16-editor-heatmap-collagen-color-max";
 const MAX_HEATMAP_CELLS = 1_000_000;
 const HEATMAP_PRESET_LABELS = { small: "Small", medium: "Medium", large: "Large" };
 const ANALYSIS_COLUMNS = [
@@ -177,6 +185,10 @@ export default function App() {
   });
   const [heatmapPreset, setHeatmapPreset] = useState(loadSelectedHeatmapPreset);
   const [heatmapMetric, setHeatmapMetric] = useState(loadHeatmapMetric);
+  const [heatmapCollagenColorMax, setHeatmapCollagenColorMax] = useState(loadHeatmapCollagenColorMax);
+  const [heatmapCollagenColorMaxInput, setHeatmapCollagenColorMaxInput] = useState(() =>
+    String(loadHeatmapCollagenColorMax()),
+  );
   const [heatmapOriginalOpacity, setHeatmapOriginalOpacity] = useState(() =>
     readStoredOpacity(HEATMAP_ORIGINAL_OPACITY_KEY, 0.5),
   );
@@ -239,6 +251,10 @@ export default function App() {
   });
   const matchingHeatmap = heatmapSourceKey === activeHeatmapSourceKey ? heatmap : null;
   const activeStageAspect = activeImageAspect;
+  const heatmapCollagenColorMaxValue = Number(heatmapCollagenColorMaxInput);
+  const heatmapSaturationAreaFraction = isCollagenDensityColorMax(heatmapCollagenColorMaxValue)
+    ? pixelDensityFromCollagenDensity(heatmapCollagenColorMaxValue)
+    : null;
   const heatmapComparison = useMemo(() => {
     if (!heatmapComparePrevious || !matchingHeatmap || !previousHeatmap) {
       return { value: null, error: "" };
@@ -250,13 +266,14 @@ export default function App() {
           current: matchingHeatmap,
           previous: previousHeatmap,
           metric: heatmapMetric,
+          collagenDensityMax: heatmapCollagenColorMax,
         }),
         error: "",
       };
     } catch (error) {
       return { value: null, error: error.message };
     }
-  }, [matchingHeatmap, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
+  }, [matchingHeatmap, heatmapCollagenColorMax, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
   const heatmapViewStatus = heatmapLoading
     ? "Loading heatmap"
     : heatmapError
@@ -489,6 +506,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(HEATMAP_ORIGINAL_OPACITY_KEY, String(heatmapOriginalOpacity));
   }, [heatmapOriginalOpacity]);
+
+  useEffect(() => {
+    localStorage.setItem(HEATMAP_COLLAGEN_COLOR_MAX_KEY, String(heatmapCollagenColorMax));
+  }, [heatmapCollagenColorMax]);
 
   useEffect(() => {
     localStorage.removeItem(LEGACY_HEATMAP_PRESETS_KEY);
@@ -1072,6 +1093,17 @@ export default function App() {
     localStorage.setItem(HEATMAP_METRIC_KEY, metric);
   }
 
+  function handleHeatmapCollagenColorMaxChange(event) {
+    const input = event.target.value;
+    const value = Number(input);
+    setHeatmapCollagenColorMaxInput(input);
+    if (isCollagenDensityColorMax(value)) setHeatmapCollagenColorMax(value);
+  }
+
+  function restoreHeatmapCollagenColorMaxInput() {
+    setHeatmapCollagenColorMaxInput(String(heatmapCollagenColorMax));
+  }
+
   async function handleSelectHeatmapFolder() {
     if (heatmapGenerationInFlightRef.current || heatmapBatchLoading) return;
     const requestId = (heatmapBatchRequestRef.current += 1);
@@ -1371,7 +1403,10 @@ export default function App() {
       const response = await fetch("/api/export", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ autoSavedImageId }),
+        body: JSON.stringify({
+          autoSavedImageId,
+          estimatedCollagenColorMax: heatmapCollagenColorMax,
+        }),
       });
       if (!response.ok) {
         throw new Error(await responseError(response, "Export failed."));
@@ -1748,6 +1783,26 @@ export default function App() {
                   Compare Previous
                 </button>
               ) : null}
+              <label className="heatmap-density-max-control" htmlFor="heatmap-collagen-color-max">
+                Estimated density max (mg/ml)
+                <input
+                  id="heatmap-collagen-color-max"
+                  aria-label="Estimated density max (mg/ml)"
+                  type="number"
+                  min={COLLAGEN_DENSITY_COLOR_MAX_MIN}
+                  max={COLLAGEN_DENSITY_COLOR_MAX_MAX}
+                  step="0.1"
+                  value={heatmapCollagenColorMaxInput}
+                  aria-invalid={!isCollagenDensityColorMax(Number(heatmapCollagenColorMaxInput))}
+                  onChange={handleHeatmapCollagenColorMaxChange}
+                  onBlur={restoreHeatmapCollagenColorMaxInput}
+                />
+                {heatmapSaturationAreaFraction !== null ? (
+                  <span className="heatmap-density-saturation" aria-live="polite">
+                    {`Area Fraction >= ${(heatmapSaturationAreaFraction * 100).toFixed(2)}% uses max color`}
+                  </span>
+                ) : null}
+              </label>
               <label htmlFor="heatmap-original-opacity">
                 Original opacity
                 <input
@@ -1767,7 +1822,11 @@ export default function App() {
           </section>
         ) : null}
         {imageLayer === "heatmap" ? (
-          <HeatmapScale metric={heatmapMetric} comparison={heatmapComparison.value} />
+          <HeatmapScale
+            metric={heatmapMetric}
+            comparison={heatmapComparison.value}
+            collagenDensityColorMax={heatmapCollagenColorMax}
+          />
         ) : null}
         <section className="heatmap-batch" aria-labelledby="heatmap-batch-heading">
           <div className="heatmap-batch-heading">
@@ -2097,6 +2156,7 @@ export default function App() {
                 previousImageName={imageDisplayName(previousImage)}
                 originalCanvasRef={canvasRef}
                 originalOpacity={heatmapOriginalOpacity}
+                collagenDensityColorMax={heatmapCollagenColorMax}
               />
             ) : null}
             {activeImage && hasActiveImageDimensions && bounds && isBoundsLayer ? (
@@ -2783,6 +2843,11 @@ function loadSelectedHeatmapPreset() {
 function loadHeatmapMetric() {
   const stored = localStorage.getItem(HEATMAP_METRIC_KEY);
   return stored === "estimated-collagen-density" ? stored : "pixel-density";
+}
+
+function loadHeatmapCollagenColorMax() {
+  const value = Number(localStorage.getItem(HEATMAP_COLLAGEN_COLOR_MAX_KEY));
+  return isCollagenDensityColorMax(value) ? value : COLLAGEN_DENSITY_DISPLAY_MAX;
 }
 
 function readStoredOpacity(key, fallback) {

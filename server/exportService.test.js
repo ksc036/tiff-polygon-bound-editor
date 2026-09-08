@@ -7,6 +7,7 @@ import sharp from "sharp";
 import unzipper from "unzipper";
 import { afterEach, expect, test, vi } from "vitest";
 import { generateHeatmapBatch } from "./heatmapService.js";
+import { renderHeatmapScaleAsset } from "./exportHeatmapAssets.js";
 import { createStorage } from "./storage.js";
 import { saveSubimage } from "./subimageService.js";
 import {
@@ -17,6 +18,8 @@ import {
   safeArchiveSegment,
   writeDatasetZip,
 } from "./exportService.js";
+import { estimateCollagenDensity } from "../shared/collagenDensity.js";
+import { infernoColor } from "../src/lib/heatmap.js";
 
 const tempRoots = [];
 
@@ -59,6 +62,20 @@ async function imageDimensions(archive, name) {
   const entry = archive.files.find((file) => file.path === name);
   const metadata = await sharp(await entry.buffer()).metadata();
   return { width: metadata.width, height: metadata.height };
+}
+
+async function rgbaImage(archive, name) {
+  const entry = archive.files.find((file) => file.path === name);
+  return sharp(await entry.buffer())
+    .toColourspace("srgb")
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+}
+
+function rgbaPixel(image, x, y) {
+  const offset = (y * image.info.width + x) * 4;
+  return [...image.data.subarray(offset, offset + 4)];
 }
 
 async function exportFixtureArchive(fixture) {
@@ -310,7 +327,7 @@ afterEach(async () => {
 });
 
 test("uses the fixed density model and creates deterministic safe names", () => {
-  expect(densityModelForExport()).toMatchObject({ y0: -0.005983, plateau: 0.4394, k: 0.3587 });
+  expect(densityModelForExport()).toMatchObject({ y0: 0.0569, plateau: 0.4337, k: 0.0841 });
   expect(datasetExportFilename("/data/Study A", new Date("2026-07-27T01:02:03Z"))).toBe(
     "Study_A_export_20260727-010203.zip",
   );
@@ -429,8 +446,11 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
     "fixture_export/T01/original/original_16bit.tif",
     "fixture_export/T01/original/original_8bit.png",
     "fixture_export/T01/original/original_with_subimage.png",
+    "fixture_export/T01/original/original_with_mask_overlay.png",
+    "fixture_export/T01/mask/subimage_mask.png",
     "fixture_export/T01/subimage/subimage_16bit.tif",
     "fixture_export/T01/subimage/subimage_8bit.png",
+    "fixture_export/T01/subimage/subimage_with_mask_overlay.png",
     "fixture_export/T01/subimage/dimensions.csv",
     "fixture_export/T01/heatmap/20x20/full.png",
     "fixture_export/T01/heatmap/20x20/full_with_subimage.png",
@@ -471,6 +491,48 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
     archive,
     "fixture_export/T01/subimage/subimage_8bit.png",
   )).resolves.toEqual({ width: 20, height: 20 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T01/original/original_with_mask_overlay.png",
+  )).resolves.toEqual({ width: 40, height: 40 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T01/mask/subimage_mask.png",
+  )).resolves.toEqual({ width: 20, height: 20 });
+  await expect(imageDimensions(
+    archive,
+    "fixture_export/T01/subimage/subimage_with_mask_overlay.png",
+  )).resolves.toEqual({ width: 20, height: 20 });
+
+  const original = await rgbaImage(archive, "fixture_export/T01/original/original_8bit.png");
+  const overlay = await rgbaImage(
+    archive,
+    "fixture_export/T01/original/original_with_mask_overlay.png",
+  );
+  const maskedGrey = rgbaPixel(original, 0, 0)[0];
+  expect(rgbaPixel(overlay, 0, 0)).toEqual([
+    Math.round(maskedGrey * 0.45 + 255 * 0.55),
+    Math.round(maskedGrey * 0.45),
+    Math.round(maskedGrey * 0.45),
+    255,
+  ]);
+  expect(rgbaPixel(overlay, 0, 10)).toEqual(rgbaPixel(original, 0, 10));
+
+  const subimageMask = await rgbaImage(archive, "fixture_export/T01/mask/subimage_mask.png");
+  expect(rgbaPixel(subimageMask, 0, 0)).toEqual([255, 255, 255, 255]);
+  expect(rgbaPixel(subimageMask, 0, 10)).toEqual([0, 0, 0, 255]);
+
+  const subimageOverlay = await rgbaImage(
+    archive,
+    "fixture_export/T01/subimage/subimage_with_mask_overlay.png",
+  );
+  const cropGrey = rgbaPixel(original, 2, 3)[0];
+  expect(rgbaPixel(subimageOverlay, 0, 0)).toEqual([
+    Math.round(cropGrey * 0.45 + 255 * 0.55),
+    Math.round(cropGrey * 0.45),
+    Math.round(cropGrey * 0.45),
+    255,
+  ]);
   await expect(imageDimensions(
     archive,
     "fixture_export/T01/heatmap/20x20/full.png",
@@ -522,6 +584,39 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   )).toHaveLength(6);
   expect(JSON.stringify(datasetWorkbook.worksheets.map((sheet) => sheet.getSheetValues())))
     .not.toContain(fixture.rootDir);
+});
+
+test("uses the requested estimated-density calculation and color maximum in ZIP heatmaps and scale", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01"],
+    heatmapSizes: { T01: [20, 50, 100] },
+  });
+  const output = new PassThrough();
+  const zipPromise = collectStream(output);
+  const writePromise = writeDatasetZip({
+    storage: fixture.storage,
+    output,
+    estimatedCollagenColorMax: 10,
+  });
+  const archive = await unzipper.Open.buffer(await zipPromise);
+  await writePromise;
+
+  const fullEntry = archive.files.find(
+    (file) => file.path === "fixture_export/T01/heatmap/50x50/full.png",
+  );
+  const full = await sharp(await fullEntry.buffer()).raw().toBuffer();
+  const expectedColor = infernoColor(estimateCollagenDensity(200 / 1600, 10), 0, 10);
+  expect([...full.subarray(0, 3)]).toEqual(
+    [1, 3, 5].map((offset) => Number.parseInt(expectedColor.slice(offset, offset + 2), 16)),
+  );
+
+  const scaleEntry = archive.files.find(
+    (file) => file.path === "fixture_export/scales/estimated_collagen_density.png",
+  );
+  expect(await scaleEntry.buffer()).toEqual(await renderHeatmapScaleAsset({
+    kind: "absolute",
+    estimatedCollagenColorMax: 10,
+  }));
 });
 
 test.each([

@@ -5,9 +5,9 @@ import {
   heatmapGradientCss,
 } from "../lib/heatmap.js";
 
-export default function HeatmapScale({ metric, comparison }) {
+export default function HeatmapScale({ metric, comparison, collagenDensityColorMax }) {
   const isComparison = Boolean(comparison);
-  const range = heatmapDisplayRange(metric);
+  const range = heatmapDisplayRange(metric, collagenDensityColorMax);
   const maxAbs = Number.isFinite(comparison?.maxAbs) ? comparison.maxAbs : 0;
   const labels = isComparison
     ? [`-${formatScale(maxAbs)}`, "0", `+${formatScale(maxAbs)}`]

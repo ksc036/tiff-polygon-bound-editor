@@ -1,6 +1,7 @@
 import {
   COLLAGEN_DENSITY_DISPLAY_MAX,
   estimateCollagenDensity,
+  isCollagenDensityColorMax,
 } from "../../shared/collagenDensity.js";
 
 const INFERNO_STOPS = [
@@ -15,17 +16,20 @@ const DIFFERENCE_BLUE = "#2563eb";
 const DIFFERENCE_WHITE = "#f8fafc";
 const DIFFERENCE_RED = "#dc2626";
 
-export function estimateHeatmapCollagenDensity(pixelDensity) {
-  return estimateCollagenDensity(pixelDensity);
+export function estimateHeatmapCollagenDensity(
+  pixelDensity,
+  collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX,
+) {
+  return estimateCollagenDensity(pixelDensity, collagenDensityMax);
 }
 
-export function heatmapMetricValue(cell, metric) {
+export function heatmapMetricValue(cell, metric, collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX) {
   if (metric === "pixel-density") {
     return Number.isFinite(cell?.pixelDensity) ? cell.pixelDensity : null;
   }
 
   if (metric === "estimated-collagen-density" || metric === "collagen-density") {
-    return estimateHeatmapCollagenDensity(cell?.pixelDensity);
+    return estimateHeatmapCollagenDensity(cell?.pixelDensity, collagenDensityMax);
   }
 
   return null;
@@ -55,14 +59,19 @@ export function heatmapCompatibilityError(current, previous) {
   return null;
 }
 
-export function buildHeatmapDifference({ current, previous, metric }) {
+export function buildHeatmapDifference({
+  current,
+  previous,
+  metric,
+  collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX,
+}) {
   const compatibilityError = heatmapCompatibilityError(current, previous);
   if (compatibilityError) {
     throw new Error(compatibilityError);
   }
 
-  const currentValues = current.cells.map((cell) => heatmapMetricValue(cell, metric));
-  const previousValues = previous.cells.map((cell) => heatmapMetricValue(cell, metric));
+  const currentValues = current.cells.map((cell) => heatmapMetricValue(cell, metric, collagenDensityMax));
+  const previousValues = previous.cells.map((cell) => heatmapMetricValue(cell, metric, collagenDensityMax));
   let maxAbs = 0;
   const values = currentValues.map((value, index) => {
     const previousValue = previousValues[index];
@@ -85,9 +94,12 @@ export function buildHeatmapDifference({ current, previous, metric }) {
   };
 }
 
-export function heatmapDisplayRange(metric) {
+export function heatmapDisplayRange(metric, collagenDensityColorMax = COLLAGEN_DENSITY_DISPLAY_MAX) {
   if (metric === "estimated-collagen-density" || metric === "collagen-density") {
-    return { min: 0, max: COLLAGEN_DENSITY_DISPLAY_MAX, unit: "mg/ml" };
+    const max = isCollagenDensityColorMax(collagenDensityColorMax)
+      ? collagenDensityColorMax
+      : COLLAGEN_DENSITY_DISPLAY_MAX;
+    return { min: 0, max, unit: "mg/ml" };
   }
 
   return { min: 0, max: 1, unit: "" };

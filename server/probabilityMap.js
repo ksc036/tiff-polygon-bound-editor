@@ -1,5 +1,6 @@
 import sharp from "sharp";
 import { pointInPolygon } from "./analysisGeometry.js";
+import { sharpPath } from "./sharpPath.js";
 
 const NPY_MAGIC = Buffer.from([0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59]);
 const HISTOGRAM_SIZE = 1001;
@@ -139,7 +140,7 @@ export async function writeThresholdMaskPng(outputPath, { probabilityMap, thresh
   await sharp(mask, { raw: { width: probabilityMap.width, height: probabilityMap.height, channels: 1 } })
     .greyscale()
     .png()
-    .toFile(outputPath);
+    .toFile(sharpPath(outputPath));
 }
 
 function parseHeader(text) {

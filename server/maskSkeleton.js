@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
+import { sharpPath } from "./sharpPath.js";
 
 const DEFAULT_MAX_IMAGE_PIXELS = 536_870_912;
 
@@ -34,7 +35,7 @@ function assertBinaryImage({ data, width, height }) {
 }
 
 export async function readBinaryMask(maskPath, { maxImagePixels } = {}) {
-  const { data, info } = await sharp(maskPath, sharpInputOptions(maxImagePixels))
+  const { data, info } = await sharp(sharpPath(maskPath), sharpInputOptions(maxImagePixels))
     .raw()
     .toBuffer({ resolveWithObject: true });
   const pixelCount = info.width * info.height;
@@ -231,5 +232,5 @@ export async function writeSkeletonPng(outputPath, skeleton) {
     },
   })
     .png()
-    .toFile(outputPath);
+    .toFile(sharpPath(outputPath));
 }

@@ -18,6 +18,7 @@ export default function HeatmapReport(props) {
           metric={props.metric}
           comparison={props.comparison}
           pointer={props.pointer}
+          collagenDensityColorMax={props.collagenDensityColorMax}
         />
         <canvas
           ref={props.originalCanvasRef}

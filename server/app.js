@@ -21,6 +21,11 @@ import {
   saveSubimage,
 } from "./subimageService.js";
 import { createInferenceService, InferenceError } from "./inferenceService.js";
+import {
+  COLLAGEN_DENSITY_COLOR_MAX_MAX,
+  COLLAGEN_DENSITY_DISPLAY_MAX,
+  isCollagenDensityColorMax,
+} from "../shared/collagenDensity.js";
 
 const CONNECTION_MODE = "input-order-cycle";
 const SUBIMAGE_ERROR_MESSAGES = {
@@ -137,6 +142,7 @@ function safeErrorResponse(error) {
     const messages = {
       ROOT_UNSET: "Storage root has not been set.",
       INVALID_IMAGE: "Export image id is invalid.",
+      INVALID_COLOR_MAX: `Estimated collagen color max must be between 0.1 and ${COLLAGEN_DENSITY_COLOR_MAX_MAX} mg/ml.`,
       EXPORT_ABORTED: "Dataset export was cancelled.",
       EXPORT_FAILED: "Dataset export failed.",
     };
@@ -742,6 +748,18 @@ export function createApp({
         }
       }
 
+      const requestedColorMax = request.body?.estimatedCollagenColorMax;
+      const estimatedCollagenColorMax = requestedColorMax === undefined
+        ? COLLAGEN_DENSITY_DISPLAY_MAX
+        : requestedColorMax;
+      if (!isCollagenDensityColorMax(estimatedCollagenColorMax)) {
+        throw new ExportError(
+          "INVALID_COLOR_MAX",
+          `Estimated collagen color max must be between 0.1 and ${COLLAGEN_DENSITY_COLOR_MAX_MAX} mg/ml.`,
+          400,
+        );
+      }
+
       const now = new Date();
       const filename = datasetExportFilename(rootPath, now);
       const abortController = new AbortController();
@@ -758,6 +776,7 @@ export function createApp({
         storage: exportStorage,
         output: response,
         autoSavedImageId,
+        estimatedCollagenColorMax,
         maxImagePixels,
         now: () => now,
         signal: abortController.signal,

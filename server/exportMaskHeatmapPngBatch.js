@@ -5,6 +5,7 @@ import sharp from "sharp";
 import { renderHeatmapFigure } from "./exportHeatmaps.js";
 import { discoverHeatmapBundles, generateHeatmapBatch } from "./heatmapService.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
+import { sharpPath } from "./sharpPath.js";
 import { infernoColor } from "../src/lib/heatmap.js";
 
 const DEFAULT_CELL_SIZES = Object.freeze([20, 50, 100]);
@@ -153,7 +154,7 @@ async function findMatchingOriginal(bundle, width, height) {
   }
 
   for (const candidate of candidates) {
-    const metadata = await sharp(candidate).metadata();
+    const metadata = await sharp(sharpPath(candidate)).metadata();
     if (metadata.width === width && metadata.height === height) return candidate;
   }
 

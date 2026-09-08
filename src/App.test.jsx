@@ -753,8 +753,42 @@ describe("App", () => {
     expect(downloadedFilename).toBe("study_export_20260727-090000.zip");
     expect(screen.getByRole("status")).toHaveTextContent("ZIP downloaded");
     const exportCall = fetchMock.mock.calls.find(([url]) => url === "/api/export");
-    expect(JSON.parse(exportCall[1].body)).toEqual({ autoSavedImageId: null });
+    expect(JSON.parse(exportCall[1].body)).toEqual({
+      autoSavedImageId: null,
+      estimatedCollagenColorMax: 8,
+    });
     await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:export"));
+  });
+
+  test("defaults the estimated-density maximum to 8 and persists 10 for heatmaps and ZIP exports", async () => {
+    mockApi();
+    const first = render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.click(screen.getByRole("button", { name: "Estimated Collagen Density" }));
+    const colorMax = screen.getByLabelText("Estimated density max (mg/ml)");
+    expect(colorMax).toHaveValue(8);
+    expect(colorMax).toHaveAttribute("max", "10");
+    expect(screen.getByText("Area Fraction >= 24.14% uses max color")).toBeInTheDocument();
+
+    fireEvent.change(colorMax, { target: { value: "10" } });
+    expect(screen.getByLabelText("Heatmap scale")).toHaveTextContent("10 mg/ml");
+    expect(screen.getByText("Area Fraction >= 27.12% uses max color")).toBeInTheDocument();
+    await waitFor(() => expect(localStorage.getItem("raw16-editor-heatmap-collagen-color-max")).toBe("10"));
+
+    first.unmount();
+    const { fetchMock: remountFetchMock } = mockApi();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(screen.getByLabelText("Estimated density max (mg/ml)")).toHaveValue(10);
+
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+    await waitFor(() => expect(remountFetchMock).toHaveBeenCalledWith("/api/export", expect.any(Object)));
+    const exportCall = remountFetchMock.mock.calls.find(([url]) => url === "/api/export");
+    expect(JSON.parse(exportCall[1].body)).toEqual({
+      autoSavedImageId: null,
+      estimatedCollagenColorMax: 10,
+    });
   });
 
   test("uses an RFC 5987 ZIP filename when the export response provides one", async () => {
@@ -1361,7 +1395,10 @@ describe("App", () => {
   });
 
   test("derives estimated collagen density from the fixed one-phase model", async () => {
-    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true } });
+    const modelAnalysis = structuredClone(savedAnalysis);
+    modelAnalysis.groups[0].bands.near.density = 0.1;
+    modelAnalysis.groups[0].allBands.density = 0.1;
+    mockApi({ analysisResponse: { analysis: modelAnalysis, hasAnalysis: true } });
 
     render(<App />);
 
@@ -1370,7 +1407,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Estimated Collagen Density" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Density calibration a")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Density calibration b")).not.toBeInTheDocument();
-    expect(within(screen.getByRole("table")).getAllByText("1.7307 mg/ml").length).toBeGreaterThan(0);
+    expect(within(screen.getByRole("table")).getAllByText("1.4444 mg/ml").length).toBeGreaterThan(0);
   });
 
   test("calculates analysis after automatically saving edited bounds", async () => {

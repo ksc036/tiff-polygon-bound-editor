@@ -53,19 +53,20 @@ function heatmapWithDensities(values) {
 
 describe("heatmap calculations", () => {
   test("uses the fixed one-phase density model", () => {
-    expect(estimateHeatmapCollagenDensity(0.2)).toBeCloseTo(1.7306908086);
+    expect(estimateHeatmapCollagenDensity(0.1)).toBeCloseTo(1.4443776093);
   });
 
   test("saturates values outside the displayed model range", () => {
     expect(estimateHeatmapCollagenDensity(0.5)).toBe(8);
+    expect(estimateHeatmapCollagenDensity(0.5, 10)).toBe(10);
     expect(estimateHeatmapCollagenDensity(Number.NaN)).toBeNull();
   });
 
   test("reads raw and estimated metric values without rescaling", () => {
-    const cell = { pixelDensity: 0.2 };
+    const cell = { pixelDensity: 0.1 };
 
-    expect(heatmapMetricValue(cell, "pixel-density")).toBe(0.2);
-    expect(heatmapMetricValue(cell, "estimated-collagen-density")).toBeCloseTo(1.7306908086);
+    expect(heatmapMetricValue(cell, "pixel-density")).toBe(0.1);
+    expect(heatmapMetricValue(cell, "estimated-collagen-density")).toBeCloseTo(1.4443776093);
   });
 
   test("calculates signed previous-image changes without rescaling values", () => {
@@ -140,6 +141,21 @@ describe("heatmap calculations", () => {
   test("provides metric display ranges", () => {
     expect(heatmapDisplayRange("pixel-density")).toEqual({ min: 0, max: 1, unit: "" });
     expect(heatmapDisplayRange("estimated-collagen-density")).toEqual({ min: 0, max: 8, unit: "mg/ml" });
+    expect(heatmapDisplayRange("estimated-collagen-density", 4)).toEqual({ min: 0, max: 4, unit: "mg/ml" });
+  });
+
+  test("uses the requested maximum for estimated-density comparisons", () => {
+    const current = heatmapWithDensities([0.5]);
+    const previous = heatmapWithDensities([0.2]);
+
+    expect(buildHeatmapDifference({
+      current,
+      previous,
+      metric: "estimated-collagen-density",
+      collagenDensityMax: 10,
+    })).toMatchObject({
+      currentValues: [10],
+    });
   });
 
   test("resolves cells at image coordinates including partial edge cells", () => {

@@ -4,6 +4,7 @@ import sharp from "sharp";
 import { assignOutwardRoiPixels, validateRoiBands } from "./analysisGeometry.js";
 import { AnalysisError, selectMaskSource } from "./analysisService.js";
 import { readBinaryMask } from "./maskSkeleton.js";
+import { sharpPath } from "./sharpPath.js";
 
 const DEFAULT_MAX_IMAGE_PIXELS = 536_870_912;
 const ROI_COLORS = {
@@ -24,7 +25,7 @@ function sharpInputOptions(maxImagePixels) {
 }
 
 async function imageDimensions(imagePath, maxImagePixels) {
-  const metadata = await sharp(imagePath, sharpInputOptions(maxImagePixels)).metadata();
+  const metadata = await sharp(sharpPath(imagePath), sharpInputOptions(maxImagePixels)).metadata();
   const width = metadata.width;
   const height = metadata.height;
 

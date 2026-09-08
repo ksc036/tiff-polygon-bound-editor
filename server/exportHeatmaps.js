@@ -63,7 +63,12 @@ export async function collectSavedHeatmaps({ storage, images }) {
   return sources;
 }
 
-export function planHeatmapFigures({ images, sources, calibration }) {
+export function planHeatmapFigures({
+  images,
+  sources,
+  calibration,
+  estimatedCollagenColorMax,
+}) {
   const figures = [];
   const reportEntries = [];
   const comparisonCandidates = [];
@@ -87,7 +92,14 @@ export function planHeatmapFigures({ images, sources, calibration }) {
       }
 
       for (const metric of EXPORT_METRICS) {
-        figures.push(createAbsoluteFigure({ image, heatmap: source.heatmap, cellSize, metric, calibration }));
+        figures.push(createAbsoluteFigure({
+          image,
+          heatmap: source.heatmap,
+          cellSize,
+          metric,
+          calibration,
+          estimatedCollagenColorMax,
+        }));
       }
     }
   }
@@ -123,7 +135,7 @@ export function planHeatmapFigures({ images, sources, calibration }) {
           current: currentSource.heatmap,
           previous: previousSource.heatmap,
           metric,
-          calibration,
+          collagenDensityMax: estimatedCollagenColorMax,
         });
         comparisonCandidates.push(
           createComparisonFigure({
@@ -134,6 +146,7 @@ export function planHeatmapFigures({ images, sources, calibration }) {
             metric,
             calibration,
             difference,
+            estimatedCollagenColorMax,
           }),
         );
       }
@@ -163,6 +176,7 @@ export async function planSavedHeatmapFigures({
   storage,
   images,
   calibration,
+  estimatedCollagenColorMax,
   loadHeatmap = loadImageHeatmap,
   signal,
 }) {
@@ -187,6 +201,7 @@ export async function planSavedHeatmapFigures({
             cellSize,
             metric,
             calibration,
+            estimatedCollagenColorMax,
           }));
         }
       } catch (error) {
@@ -251,6 +266,7 @@ export async function planSavedHeatmapFigures({
           cellSize,
           metric,
           calibration,
+          estimatedCollagenColorMax,
         });
         const rangeKey = `${metric}:${descriptor.cellWidth}`;
         const maxAbs = comparisonMaxAbsFor({
@@ -258,6 +274,7 @@ export async function planSavedHeatmapFigures({
           previous: previousHeatmap,
           metric,
           calibration,
+          estimatedCollagenColorMax,
         });
         comparisonMaxAbs.set(
           rangeKey,
@@ -293,7 +310,7 @@ export async function hydrateHeatmapFigure(
     return {
       ...figure,
       values: current.cells.map((cell) =>
-        heatmapMetricValue(cell, figure.metric, figure.calibration)
+        heatmapMetricValue(cell, figure.metric, figure.estimatedCollagenMax)
       ),
     };
   }
@@ -310,6 +327,7 @@ export async function hydrateHeatmapFigure(
       previous,
       metric: figure.metric,
       calibration: figure.calibration,
+      estimatedCollagenMax: figure.estimatedCollagenMax,
     }),
   };
 }
@@ -418,8 +436,15 @@ export async function renderHeatmapFigure(figure, { signal } = {}) {
   return runSharpWithSignal(pipeline, () => pipeline.toBuffer(), signal);
 }
 
-function createAbsoluteFigure({ image, heatmap, cellSize, metric, calibration }) {
-  const displayRange = heatmapDisplayRange(metric);
+function createAbsoluteFigure({
+  image,
+  heatmap,
+  cellSize,
+  metric,
+  calibration,
+  estimatedCollagenColorMax,
+}) {
+  const displayRange = heatmapDisplayRange(metric, estimatedCollagenColorMax);
   const details = METRIC_DETAILS[metric];
   const currentImage = imageLabel(image);
 
@@ -434,14 +459,24 @@ function createAbsoluteFigure({ image, heatmap, cellSize, metric, calibration })
     cellHeight: heatmap.cellHeight,
     columns: heatmap.columns,
     rows: heatmap.rows,
-    values: heatmap.cells.map((cell) => heatmapMetricValue(cell, metric, calibration)),
+    values: heatmap.cells.map((cell) => heatmapMetricValue(cell, metric, estimatedCollagenColorMax)),
     colorRange: { min: displayRange.min, max: displayRange.max },
     calibration,
+    estimatedCollagenMax: estimatedCollagenColorMax,
     archiveName: `${currentImage}_cell_${cellSize}px_${details.archiveName}.png`,
   };
 }
 
-function createComparisonFigure({ currentImage, previousImage, heatmap, cellSize, metric, calibration, difference }) {
+function createComparisonFigure({
+  currentImage,
+  previousImage,
+  heatmap,
+  cellSize,
+  metric,
+  calibration,
+  difference,
+  estimatedCollagenColorMax,
+}) {
   const details = METRIC_DETAILS[metric];
   const currentLabel = imageLabel(currentImage);
   const previousLabel = imageLabel(previousImage);
@@ -461,12 +496,20 @@ function createComparisonFigure({ currentImage, previousImage, heatmap, cellSize
     values: difference.values,
     colorRange: null,
     calibration,
+    estimatedCollagenMax: estimatedCollagenColorMax,
     archiveName: `${currentLabel}_cell_${cellSize}px_${details.archiveName}_vs_${previousLabel}.png`,
   };
 }
 
-function createAbsoluteDescriptor({ image, heatmap, cellSize, metric, calibration }) {
-  const displayRange = heatmapDisplayRange(metric);
+function createAbsoluteDescriptor({
+  image,
+  heatmap,
+  cellSize,
+  metric,
+  calibration,
+  estimatedCollagenColorMax,
+}) {
+  const displayRange = heatmapDisplayRange(metric, estimatedCollagenColorMax);
   const details = METRIC_DETAILS[metric];
   const currentImage = imageLabel(image);
   return {
@@ -482,6 +525,7 @@ function createAbsoluteDescriptor({ image, heatmap, cellSize, metric, calibratio
     ...heatmapMetadata(heatmap),
     colorRange: { min: displayRange.min, max: displayRange.max },
     calibration,
+    estimatedCollagenMax: estimatedCollagenColorMax,
     archiveName: `${currentImage}_cell_${cellSize}px_${details.archiveName}.png`,
   };
 }
@@ -493,6 +537,7 @@ function createComparisonDescriptor({
   cellSize,
   metric,
   calibration,
+  estimatedCollagenColorMax,
 }) {
   const details = METRIC_DETAILS[metric];
   const currentLabel = imageLabel(currentImage);
@@ -511,6 +556,7 @@ function createComparisonDescriptor({
     ...heatmapMetadata(heatmap),
     colorRange: null,
     calibration,
+    estimatedCollagenMax: estimatedCollagenColorMax,
     archiveName: `${currentLabel}_cell_${cellSize}px_${details.archiveName}_vs_${previousLabel}.png`,
   };
 }
@@ -524,21 +570,21 @@ function heatmapMetadata(heatmap) {
   };
 }
 
-function comparisonMaxAbsFor({ current, previous, metric, calibration }) {
+function comparisonMaxAbsFor({ current, previous, metric, estimatedCollagenColorMax }) {
   let maximum = 0;
   for (let index = 0; index < current.cells.length; index += 1) {
-    const currentValue = heatmapMetricValue(current.cells[index], metric, calibration);
-    const previousValue = heatmapMetricValue(previous.cells[index], metric, calibration);
+    const currentValue = heatmapMetricValue(current.cells[index], metric, estimatedCollagenColorMax);
+    const previousValue = heatmapMetricValue(previous.cells[index], metric, estimatedCollagenColorMax);
     if (!Number.isFinite(currentValue) || !Number.isFinite(previousValue)) continue;
     maximum = Math.max(maximum, Math.abs(cleanDifference(currentValue - previousValue)));
   }
   return maximum;
 }
 
-function comparisonValues({ current, previous, metric, calibration }) {
+function comparisonValues({ current, previous, metric, estimatedCollagenMax }) {
   return current.cells.map((cell, index) => {
-    const currentValue = heatmapMetricValue(cell, metric, calibration);
-    const previousValue = heatmapMetricValue(previous.cells[index], metric, calibration);
+    const currentValue = heatmapMetricValue(cell, metric, estimatedCollagenMax);
+    const previousValue = heatmapMetricValue(previous.cells[index], metric, estimatedCollagenMax);
     return Number.isFinite(currentValue) && Number.isFinite(previousValue)
       ? cleanDifference(currentValue - previousValue)
       : null;
