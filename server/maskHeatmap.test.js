@@ -6,7 +6,7 @@ import {
   validateHeatmapPayload,
 } from "./maskHeatmap.js";
 
-test("includes partial right and bottom cells using actual area", () => {
+test("puts an indivisible single leftover pixel on the right and bottom using actual area", () => {
   const mask = { width: 5, height: 3, data: new Uint8Array(15) };
   mask.data[0] = 1;
   mask.data[4] = 1;
@@ -25,6 +25,53 @@ test("includes partial right and bottom cells using actual area", () => {
     pixelDensity: 0.5,
   });
   expect(grid.cells.at(-1)).toMatchObject({ width: 1, height: 1, areaPx: 1, pixelDensity: 1 });
+});
+
+test("centers full cells on both axes and measures each partial cell's actual area", () => {
+  const mask = { width: 10, height: 10, data: new Uint8Array(100) };
+  for (const index of [0, 11, 44, 99]) mask.data[index] = 1;
+  const grid = buildMaskHeatmapGrid({ mask, cellSize: 4 });
+
+  expect(grid).toMatchObject({ columns: 4, rows: 4, gridAlignment: "center" });
+  expect(grid.cells.slice(0, 4).map(({ x, width }) => [x, width])).toEqual([[0, 1], [1, 4], [5, 4], [9, 1]]);
+  expect(grid.cells.filter(({ column }) => column === 0).map(({ y, height }) => [y, height]))
+    .toEqual([[0, 1], [1, 4], [5, 4], [9, 1]]);
+  expect(grid.cells[0]).toMatchObject({ areaPx: 1, maskPixelCount: 1, pixelDensity: 1 });
+  expect(grid.cells[5]).toMatchObject({ areaPx: 16, maskPixelCount: 2, pixelDensity: 0.125 });
+  expect(grid.cells.at(-1)).toMatchObject({ areaPx: 1, maskPixelCount: 1, pixelDensity: 1 });
+  const coverage = new Uint8Array(100);
+  for (const cell of grid.cells) {
+    for (let y = cell.y; y < cell.y + cell.height; y += 1) {
+      for (let x = cell.x; x < cell.x + cell.width; x += 1) coverage[y * 10 + x] += 1;
+    }
+  }
+  expect([...coverage]).toEqual(Array(100).fill(1));
+});
+
+test.each([
+  [11, 4, [1, 4, 4, 2]],
+  [9, 4, [4, 4, 1]],
+  [8, 4, [4, 4]],
+  [3, 4, [3]],
+  [1, 4, [1]],
+])("centers length %s at cell size %s without fractional or empty cells", (length, cellSize, expected) => {
+  const grid = buildMaskHeatmapGrid({ mask: { width: length, height: length, data: new Uint8Array(length * length) }, cellSize });
+  expect(grid.cells.filter(({ row }) => row === 0).map(({ width }) => width)).toEqual(expected);
+  expect(grid.cells.filter(({ column }) => column === 0).map(({ height }) => height)).toEqual(expected);
+});
+
+test("round-trips centered payloads and still reads legacy top-left grids", () => {
+  const centered = createHeatmapPayload({ imageFolder: "sample", maskSource: { file: "mask.png" },
+    mask: { width: 10, height: 1, data: new Uint8Array(10) }, cellSize: 4 });
+  expect(validateHeatmapPayload(centered, { cellSize: 4 })).toEqual(centered);
+  const legacy = { ...centered, schemaVersion: 1, columns: 3,
+    cells: [4, 4, 2].map((width, column) => ({ row: 0, column, x: column * 4, y: 0,
+      width, height: 1, areaPx: width, maskPixelCount: 0, pixelDensity: 0 })) };
+  delete legacy.gridAlignment;
+  expect(validateHeatmapPayload(legacy, { cellSize: 4 })).toEqual(legacy);
+  const misplaced = { ...centered, cells: centered.cells.map((cell, index) => index === 1 ? { ...cell, x: cell.x + 1 } : cell) };
+  expect(() => validateHeatmapPayload(misplaced, { cellSize: 4 })).toThrow("coordinates");
+  expect(() => validateHeatmapPayload({ ...centered, gridAlignment: "unknown" }, { cellSize: 4 })).toThrow("schema");
 });
 
 test("keeps rectangular masks in row-major order", () => {
@@ -52,6 +99,11 @@ test("rejects generated grids above the one-million-cell budget", () => {
   expect(() => buildMaskHeatmapGrid({ mask, cellSize: 1 })).toThrow(
     "Heatmap grid exceeds the 1,000,000 cell limit.",
   );
+});
+
+test("includes additional centered edge cells in the one-million-cell budget", () => {
+  const mask = { width: 2999, height: 2999, data: new Uint8Array(2999 * 2999) };
+  expect(() => buildMaskHeatmapGrid({ mask, cellSize: 3 })).toThrow("1,000,000 cell limit");
 });
 
 test("rejects saved payload dimensions above the one-million-cell budget", () => {
@@ -84,7 +136,8 @@ test("creates and validates a relative heatmap payload", () => {
   });
 
   expect(payload).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    gridAlignment: "center",
     imageFolder: "images/sample",
     maskSource: { file: "masks/sample.png" },
     width: 2,

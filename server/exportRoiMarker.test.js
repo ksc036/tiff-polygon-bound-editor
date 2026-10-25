@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { createRoiMarkerSvg } from "./exportRoiMarker.js";
 
-test("draws the ROI marker as a fixed one-pixel yellow outline", () => {
+test("draws the ROI marker as a five-pixel dashed yellow outline", () => {
   const marker = createRoiMarkerSvg(1008, 1008, {
     sourceWidth: 1008,
     sourceHeight: 1008,
@@ -11,7 +11,7 @@ test("draws the ROI marker as a fixed one-pixel yellow outline", () => {
     height: 500,
   }).toString("utf8");
 
-  expect(marker).toContain('stroke="#ffea00" stroke-width="1"');
+  expect(marker).toContain('stroke="#ffea00" stroke-width="5" stroke-dasharray="15 10"');
   expect(marker).not.toContain('stroke="#000000"');
   expect(marker.match(/<path /g)).toHaveLength(1);
 });

@@ -16,8 +16,11 @@ import { findNearestSegment } from "./lib/geometry.js";
 import { downloadAllInferenceOutputs } from "./lib/inferenceDownloads.js";
 import { THRESHOLD_GRID, histogramAreaPath } from "./lib/inferenceHistogram.js";
 import { renderRaw16ToCanvas } from "./lib/raw16Renderer.js";
+import CollagenCalibrationControl from "./components/CollagenCalibrationControl.jsx";
+import { useCollagenCalibration } from "./lib/useCollagenCalibration.js";
+import { concentrationLabel, concentrationResult } from "./lib/collagenPresentation.js";
 
-const DEFAULT_SERVER_URL = "http://localhost:8000";
+const DEFAULT_SERVER_URL = "http://192.168.1.157:8001/";
 const TERMINAL_JOB_STATES = new Set(["complete", "partial", "failed"]);
 const CELL_BOUNDARY_POINT_OPACITY_KEY = "inference-cell-boundary-point-opacity";
 const SEGMENT_INSERT_SCREEN_THRESHOLD = 8;
@@ -185,6 +188,7 @@ function ProbabilityHistogram({ label, histogram, threshold, disabled, onThresho
 }
 
 export default function InferencePage() {
+  const calibration = useCollagenCalibration();
   const [rootPath, setRootPath] = useState("");
   const [activeRootPath, setActiveRootPath] = useState("");
   const [images, setImages] = useState([]);
@@ -643,10 +647,12 @@ export default function InferencePage() {
   }
 
   function commitThreshold() {
+    if (downloadingOutputs) return;
     void persistThreshold();
   }
 
   function handleHistogramThresholdChange(value) {
+    if (downloadingOutputs) return;
     const threshold = normalizeThreshold(value);
     if (threshold === null) return;
     setOverlay(null);
@@ -654,6 +660,7 @@ export default function InferencePage() {
   }
 
   function commitHistogramThreshold(value) {
+    if (downloadingOutputs) return;
     void persistThreshold({ thresholdValue: value });
   }
 
@@ -703,14 +710,18 @@ export default function InferencePage() {
   }
 
   async function handleDownloadInferenceZip() {
+    if (!calibration.snapshot || calibration.saving) return;
+    if (loadingRoot || inferenceRunning || savingRoi || savingCellBoundaries || propagating || generating) return;
     if (completeImages.length === 0 || !inferenceRoi || cellBoundaryDirty || downloadingOutputs) return;
     setDownloadingOutputs(true);
     setDownloadProgress(null);
     setError("");
     setActionMessage("");
     try {
+      const exportCalibration = await calibration.preflight();
       if (activeCompleteImage && reviewReady && !await persistThreshold({ showMessage: false })) return;
       await downloadAllInferenceOutputs({
+        calibration: exportCalibration,
         images: completeImages,
         onProgress: setDownloadProgress,
         loadImageOutputs: async (image) => {
@@ -744,6 +755,7 @@ export default function InferencePage() {
               roi: histogramMetrics(histograms.roi, threshold),
             },
             threshold,
+            imageId: image.id,
             imageFile: image.imageFile,
           };
         },
@@ -790,6 +802,7 @@ export default function InferencePage() {
   });
 
   function mutateCellBounds(mutator) {
+    if (downloadingOutputs) return;
     setCellBounds((current) => {
       if (!current) return current;
       const next = mutator(current);
@@ -917,6 +930,7 @@ export default function InferencePage() {
   }
 
   function handleRoiPointerDown(event) {
+    if (downloadingOutputs) return;
     if (stageView === "mask" && stageTool !== "boundary") return;
     const point = stagePixelPoint(event);
     if (!point) return;
@@ -928,6 +942,7 @@ export default function InferencePage() {
   }
 
   function handleRoiPointerMove(event) {
+    if (downloadingOutputs) return;
     const point = stagePixelPoint(event);
     if (point) cellPointerRef.current = point;
     if (dragCellPoint && point) {
@@ -942,6 +957,7 @@ export default function InferencePage() {
   }
 
   function commitRoiPointer(event) {
+    if (downloadingOutputs) return;
     if (dragCellPoint) {
       setDragCellPoint(null);
       event.currentTarget.releasePointerCapture?.(event.pointerId);
@@ -967,12 +983,12 @@ export default function InferencePage() {
         <h1>Inference mask setting</h1>
         <label>
           Root path
-          <input value={rootPath} disabled={inferenceRunning} onChange={(event) => setRootPath(event.target.value)} />
+          <input value={rootPath} disabled={inferenceRunning || downloadingOutputs} onChange={(event) => setRootPath(event.target.value)} />
         </label>
-        <button type="button" onClick={() => applyRoot("/api/inference/root", { rootPath })} disabled={loadingRoot || inferenceRunning || !rootPath.trim()}>
+        <button type="button" onClick={() => applyRoot("/api/inference/root", { rootPath })} disabled={loadingRoot || inferenceRunning || !rootPath.trim() || downloadingOutputs}>
           Set root
         </button>
-        <button type="button" onClick={() => applyRoot("/api/inference/root/select")} disabled={loadingRoot || inferenceRunning}>
+        <button type="button" onClick={() => applyRoot("/api/inference/root/select")} disabled={loadingRoot || inferenceRunning || downloadingOutputs}>
           Find root
         </button>
         <label>
@@ -982,11 +998,12 @@ export default function InferencePage() {
         <button
           type="button"
           onClick={handleStartInference}
-          disabled={!rootPath || !serverUrl || job?.status === "running"}
+          disabled={!rootPath || !serverUrl || job?.status === "running" || downloadingOutputs}
         >
           Run inference
         </button>
         {jobMessage ? <p role="status">{jobMessage}</p> : null}
+        <CollagenCalibrationControl calibration={calibration} disabled={downloadingOutputs} />
       </header>
 
       <aside className="inference-status-panel">
@@ -997,6 +1014,7 @@ export default function InferencePage() {
               <button
                 type="button"
                 aria-current={image.id === activeImageId ? "true" : undefined}
+                disabled={downloadingOutputs}
                 onClick={() => {
                   setOverlay(null);
                   setActiveImageId(image.id);
@@ -1119,7 +1137,7 @@ export default function InferencePage() {
             max="1"
             step="0.001"
             value={thresholdDraft}
-            disabled={!reviewReady || savingThreshold}
+            disabled={!reviewReady || savingThreshold || downloadingOutputs}
             onChange={(event) => {
               setOverlay(null);
               setThresholdDraft(event.target.value);
@@ -1136,7 +1154,7 @@ export default function InferencePage() {
             label="Whole image"
             histogram={clientHistograms.wholeImage}
             threshold={activeThreshold}
-            disabled={!reviewReady || savingThreshold}
+            disabled={!reviewReady || savingThreshold || downloadingOutputs}
             onThresholdChange={handleHistogramThresholdChange}
             onThresholdCommit={commitHistogramThreshold}
           />
@@ -1145,7 +1163,7 @@ export default function InferencePage() {
               label="ROI"
               histogram={clientHistograms.roi}
               threshold={activeThreshold}
-              disabled={!reviewReady || savingThreshold}
+              disabled={!reviewReady || savingThreshold || downloadingOutputs}
               onThresholdChange={handleHistogramThresholdChange}
               onThresholdCommit={commitHistogramThreshold}
             />
@@ -1157,22 +1175,30 @@ export default function InferencePage() {
             <dt>Whole image area fraction</dt>
             <dd>{fractionLabel(clientAreaMetrics.wholeImage?.areaFraction ?? review?.wholeImage?.areaFraction)}</dd>
           </div>
+          <div>
+            <dt>Whole image estimated collagen density</dt>
+            <dd>{concentrationLabel(concentrationResult(clientHistograms.wholeImage ? clientAreaMetrics.wholeImage : review?.wholeImage, calibration.snapshot?.model))}</dd>
+          </div>
           {review?.roi ? (
             <div>
               <dt>ROI area fraction</dt>
               <dd>{fractionLabel(clientAreaMetrics.roi?.areaFraction ?? review.roi.metrics?.areaFraction)}</dd>
             </div>
           ) : null}
+          {inferenceRoi ? <div>
+            <dt>ROI estimated collagen density</dt>
+            <dd>{concentrationLabel(concentrationResult(clientHistograms.roi ? clientAreaMetrics.roi : review?.roi?.metrics, calibration.snapshot?.model))}</dd>
+          </div> : null}
         </dl>
 
         <div className="inference-roi-status">
           <span>{inferenceRoi ? "Common rectangle ROI" : "Whole image"}</span>
           {inferenceRoi ? (
-            <button type="button" onClick={() => { setInferenceRoi(null); setRoiDirty(true); }}>
+            <button type="button" disabled={downloadingOutputs} onClick={() => { setInferenceRoi(null); setRoiDirty(true); }}>
               Clear ROI
             </button>
           ) : null}
-          <button type="button" onClick={saveRoi} disabled={!roiDirty || savingRoi}>
+          <button type="button" onClick={saveRoi} disabled={!roiDirty || savingRoi || downloadingOutputs}>
             {savingRoi ? "Saving ROI" : inferenceRoi ? "Save ROI" : "Clear saved ROI"}
           </button>
         </div>
@@ -1186,8 +1212,8 @@ export default function InferencePage() {
             </label>
           </div>
           <div className="inference-cell-boundary-actions">
-            <button type="button" onClick={addCellBoundary} disabled={!cellBounds}>Add boundary</button>
-            <button type="button" onClick={saveCellBoundaries} disabled={!cellBounds || !cellBoundaryDirty || savingCellBoundaries}>
+            <button type="button" onClick={addCellBoundary} disabled={!cellBounds || downloadingOutputs}>Add boundary</button>
+            <button type="button" onClick={saveCellBoundaries} disabled={!cellBounds || !cellBoundaryDirty || savingCellBoundaries || downloadingOutputs}>
               {savingCellBoundaries ? "Saving" : "Save cell boundaries"}
             </button>
           </div>
@@ -1239,7 +1265,7 @@ export default function InferencePage() {
         <button
           type="button"
           onClick={handleSetOtherThresholds}
-          disabled={!reviewReady || propagating}
+          disabled={!reviewReady || propagating || downloadingOutputs}
         >
           Set other thresholds from reference
         </button>
@@ -1253,7 +1279,7 @@ export default function InferencePage() {
             type="button"
             aria-label="Previous complete image"
             onClick={() => navigateComplete(-1)}
-            disabled={activeCompleteIndex <= 0}
+            disabled={activeCompleteIndex <= 0 || downloadingOutputs}
           >
             Previous
           </button>
@@ -1262,13 +1288,13 @@ export default function InferencePage() {
             type="button"
             aria-label="Next complete image"
             onClick={() => navigateComplete(1)}
-            disabled={activeCompleteIndex < 0 || activeCompleteIndex >= completeImages.length - 1}
+            disabled={activeCompleteIndex < 0 || activeCompleteIndex >= completeImages.length - 1 || downloadingOutputs}
           >
             Next
           </button>
         </nav>
         <div className="inference-footer-actions">
-          <button type="button" onClick={handleGenerateMasks} disabled={!reviewReady || generating}>
+          <button type="button" onClick={handleGenerateMasks} disabled={!reviewReady || generating || downloadingOutputs}>
             Generate masks
           </button>
           <button
@@ -1276,7 +1302,7 @@ export default function InferencePage() {
             onClick={handleDownloadInferenceZip}
             aria-busy={downloadingOutputs}
             title={!inferenceRoi ? "Set an ROI before downloading" : cellBoundaryDirty ? "Save cell boundaries before downloading" : completeImages.length === 0 ? "No completed images to download" : undefined}
-            disabled={completeImages.length === 0 || !inferenceRoi || cellBoundaryDirty || downloadingOutputs}
+            disabled={completeImages.length === 0 || !inferenceRoi || cellBoundaryDirty || downloadingOutputs || !calibration.snapshot || calibration.saving || loadingRoot || inferenceRunning || savingRoi || savingCellBoundaries || propagating || generating}
           >
             {downloadingOutputs && downloadProgress
               ? `Preparing ${downloadProgress.current} / ${downloadProgress.total}...`

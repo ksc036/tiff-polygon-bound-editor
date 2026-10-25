@@ -1,7 +1,5 @@
 export default function SubimagePanel({
   activeImageName,
-  templateOwnerName,
-  isTemplateOwner,
   hasSubimage,
   crop,
   dirty,
@@ -29,7 +27,6 @@ export default function SubimagePanel({
         <h2 id="subimage-heading">Subimage</h2>
         <div className="subimage-identity">
           <strong>{activeImageName}</strong>
-          {!isTemplateOwner ? <span>{`Template: ${templateOwnerName}`}</span> : null}
           <span>{hasSubimage ? "Saved" : "Missing"}</span>
           {dirty ? <span className="subimage-dirty">Unsaved changes</span> : null}
         </div>

@@ -1,5 +1,7 @@
-const SCHEMA_VERSION = 1;
-const MAX_CELL_SIZE = 4096;
+import { isHeatmapCellSize } from "../shared/heatmapSettings.js";
+import { heatmapAxisCellBounds, heatmapAxisCellCount } from "../shared/heatmapGrid.js";
+
+const SCHEMA_VERSION = 2;
 const MAX_CELL_COUNT = 1_000_000;
 
 function assertPositiveSafeInteger(value, label) {
@@ -102,10 +104,8 @@ function assertGridCell(cell, index, grid) {
 
   const expectedRow = Math.floor(index / grid.columns);
   const expectedColumn = index % grid.columns;
-  const expectedX = expectedColumn * grid.cellWidth;
-  const expectedY = expectedRow * grid.cellHeight;
-  const expectedWidth = Math.min(grid.cellWidth, grid.width - expectedX);
-  const expectedHeight = Math.min(grid.cellHeight, grid.height - expectedY);
+  const { start: expectedX, size: expectedWidth } = heatmapAxisCellBounds(expectedColumn, grid.width, grid.cellWidth, grid.gridAlignment);
+  const { start: expectedY, size: expectedHeight } = heatmapAxisCellBounds(expectedRow, grid.height, grid.cellHeight, grid.gridAlignment);
 
   if (
     cell.row !== expectedRow ||
@@ -121,7 +121,7 @@ function assertGridCell(cell, index, grid) {
 
 export function validateCellSize(value) {
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_CELL_SIZE) {
+  if (!isHeatmapCellSize(parsed)) {
     throw new Error("Heatmap cell size must be a positive integer no greater than 4096.");
   }
   return parsed;
@@ -130,17 +130,16 @@ export function validateCellSize(value) {
 export function buildMaskHeatmapGrid({ mask, cellSize }) {
   assertMask(mask);
   const size = validateCellSize(cellSize);
-  const columns = Math.ceil(mask.width / size);
-  const rows = Math.ceil(mask.height / size);
+  const gridAlignment = "center";
+  const columns = heatmapAxisCellCount(mask.width, size, gridAlignment);
+  const rows = heatmapAxisCellCount(mask.height, size, gridAlignment);
   assertCellBudget(columns, rows);
   const cells = [];
 
   for (let row = 0; row < rows; row += 1) {
+    const { start: y, size: height } = heatmapAxisCellBounds(row, mask.height, size, gridAlignment);
     for (let column = 0; column < columns; column += 1) {
-      const x = column * size;
-      const y = row * size;
-      const width = Math.min(size, mask.width - x);
-      const height = Math.min(size, mask.height - y);
+      const { start: x, size: width } = heatmapAxisCellBounds(column, mask.width, size, gridAlignment);
       let maskPixelCount = 0;
 
       for (let cellY = y; cellY < y + height; cellY += 1) {
@@ -169,6 +168,7 @@ export function buildMaskHeatmapGrid({ mask, cellSize }) {
     height: mask.height,
     cellWidth: size,
     cellHeight: size,
+    gridAlignment,
     columns,
     rows,
     cells,
@@ -194,7 +194,9 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
   if (
     !payload ||
     typeof payload !== "object" ||
-    payload.schemaVersion !== SCHEMA_VERSION ||
+    ![1, SCHEMA_VERSION].includes(payload.schemaVersion) ||
+    (payload.schemaVersion === SCHEMA_VERSION && payload.gridAlignment !== "center") ||
+    (payload.schemaVersion === 1 && payload.gridAlignment !== undefined && payload.gridAlignment !== "top-left") ||
     !("imageFolder" in payload) ||
     !("maskSource" in payload)
   ) {
@@ -214,8 +216,8 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
   if (
     payload.cellWidth !== expectedCellSize ||
     payload.cellHeight !== expectedCellSize ||
-    payload.columns !== Math.ceil(payload.width / expectedCellSize) ||
-    payload.rows !== Math.ceil(payload.height / expectedCellSize) ||
+    payload.columns !== heatmapAxisCellCount(payload.width, expectedCellSize, payload.gridAlignment) ||
+    payload.rows !== heatmapAxisCellCount(payload.height, expectedCellSize, payload.gridAlignment) ||
     !Array.isArray(payload.cells) ||
     payload.cells.length !== payload.columns * payload.rows
   ) {
@@ -225,6 +227,7 @@ export function validateHeatmapPayload(payload, { cellSize } = {}) {
   payload.cells.forEach((cell, index) => assertGridCell(cell, index, payload));
   return {
     schemaVersion: payload.schemaVersion,
+    ...(payload.gridAlignment ? { gridAlignment: payload.gridAlignment } : {}),
     imageFolder: payload.imageFolder,
     maskSource: publicMaskSource(payload.maskSource),
     width: payload.width,

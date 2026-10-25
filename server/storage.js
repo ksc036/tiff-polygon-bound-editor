@@ -5,10 +5,11 @@ import path from "node:path";
 
 const DEFAULT_CONNECTION_MODE = "input-order-cycle";
 const SETTINGS_FILE_NAME = "settings.json";
+const boundaryOperations = new Map();
 
 function destinationWriteKey(destinationPath) {
   const resolvedPath = path.resolve(destinationPath);
-  return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
+  return process.platform === "win32" ? path.toNamespacedPath(resolvedPath).toLowerCase() : resolvedPath;
 }
 
 function isTiffFile(fileName) {
@@ -81,6 +82,29 @@ function emptyBoundsPayload() {
   };
 }
 
+function boundsPayload(bounds) {
+  return {
+    schemaVersion: 1,
+    width: bounds?.width ?? null,
+    height: bounds?.height ?? null,
+    connectionMode: DEFAULT_CONNECTION_MODE,
+    groups: bounds?.groups ?? [],
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function readBoundsFile(boundsPath, imageFolder) {
+  try {
+    return withoutImageIdentity(JSON.parse(await readFile(boundsPath, "utf8")));
+  } catch (error) {
+    if (error.code === "ENOENT") return emptyBoundsPayload();
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid bounds JSON for ${imageFolder}: ${error.message}`, { cause: error });
+    }
+    throw error;
+  }
+}
+
 function withoutImageIdentity(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return value;
@@ -143,9 +167,12 @@ export function createStorage(
       const tempPath = path.join(directoryPath, tempFileName);
 
       try {
+        // Resolve mutations inside the destination queue, before writing anything.
+        const nextPayload = typeof payload === "function" ? await payload() : payload;
         await mkdir(directoryPath, { recursive: true });
-        await writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`);
+        await writeFile(tempPath, `${JSON.stringify(nextPayload, null, 2)}\n`);
         await rename(tempPath, destinationPath);
+        return nextPayload;
       } catch (error) {
         await rm(tempPath, { force: true }).catch(() => {});
         throw error;
@@ -219,33 +246,13 @@ export function createStorage(
   async function loadBounds(id) {
     const image = resolveImage(id);
     const { boundsPath } = imagePaths(image);
-
-    try {
-      return withoutImageIdentity(JSON.parse(await readFile(boundsPath, "utf8")));
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return emptyBoundsPayload();
-      }
-
-      if (error instanceof SyntaxError) {
-        throw new Error(`Invalid bounds JSON for ${image.imageFolder}: ${error.message}`, { cause: error });
-      }
-
-      throw error;
-    }
+    return readBoundsFile(boundsPath, image.imageFolder);
   }
 
   async function saveBounds(id, bounds) {
     const image = resolveImage(id);
     const { boundDir, boundsPath } = imagePaths(image);
-    const payload = {
-      schemaVersion: 1,
-      width: bounds?.width ?? null,
-      height: bounds?.height ?? null,
-      connectionMode: DEFAULT_CONNECTION_MODE,
-      groups: bounds?.groups ?? [],
-      updatedAt: new Date().toISOString(),
-    };
+    const payload = boundsPayload(bounds);
     await writeJsonAtomically(
       boundDir,
       boundsPath,
@@ -324,6 +331,17 @@ export function createStorage(
     return payload;
   }
 
+  async function updateBounds(id, update) {
+    const image = resolveImage(id);
+    const { boundDir, boundsPath } = imagePaths(image);
+    return writeJsonAtomically(
+      boundDir,
+      boundsPath,
+      `${image.imageFolder}.bounds.json.tmp-${randomUUID()}`,
+      async () => boundsPayload(await update(await readBoundsFile(boundsPath, image.imageFolder))),
+    );
+  }
+
   async function importPreviousBounds(id) {
     const image = resolveImage(id);
     const imageIndex = images.findIndex((candidate) => candidate.id === image.id);
@@ -359,6 +377,33 @@ export function createStorage(
       loadAnalysis: snapshotStorage.loadAnalysis,
       loadSubimageCrop: snapshotStorage.loadSubimageCrop,
       imagePaths: snapshotStorage.imagePaths,
+    });
+  }
+
+  function createBoundaryMutationContext() {
+    ensureRoot();
+    const snapshotStorage = createStorage({ initialRoot: rootDir }, destinationWrites);
+
+    return Object.freeze({
+      getRoot: snapshotStorage.getRoot,
+      scanImages: snapshotStorage.scanImages,
+      getImage: snapshotStorage.getImage,
+      loadBounds: snapshotStorage.loadBounds,
+      saveBounds: snapshotStorage.saveBounds,
+      updateBounds: snapshotStorage.updateBounds,
+      serializeBoundaryOperation: snapshotStorage.serializeBoundaryOperation,
+      imagePaths: snapshotStorage.imagePaths,
+    });
+  }
+
+  function serializeBoundaryOperation(operation) {
+    ensureRoot();
+    const key = destinationWriteKey(rootDir);
+    const previous = boundaryOperations.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    boundaryOperations.set(key, current);
+    return current.finally(() => {
+      if (boundaryOperations.get(key) === current) boundaryOperations.delete(key);
     });
   }
 
@@ -402,6 +447,7 @@ export function createStorage(
     getImage,
     loadBounds,
     saveBounds,
+    updateBounds,
     loadAnalysis,
     saveAnalysis,
     loadSubimageCrop,
@@ -409,6 +455,8 @@ export function createStorage(
     importPreviousBounds,
     imagePaths,
     createSnapshot,
+    createBoundaryMutationContext,
+    serializeBoundaryOperation,
     createSubimageMutationContext,
   };
 }

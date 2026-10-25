@@ -10,7 +10,6 @@ import {
   renderHeatmapFigure,
 } from "./exportHeatmaps.js";
 import {
-  ESTIMATED_HEATMAP_CELL_SIZES,
   hydrateEstimatedHeatmapAsset,
   planEstimatedHeatmapAssets,
   renderEstimatedHeatmapAsset,
@@ -31,10 +30,12 @@ import { renderRoiOverview } from "./exportRoiOverview.js";
 import { createImageWorkbook, workbookFailureText } from "./exportWorkbook.js";
 import { loadSubimage } from "./subimageService.js";
 import { readBinaryMask } from "./maskSkeleton.js";
+import { exportCalibrationSnapshot, exportDatasetCalibration } from "./exportCalibration.js";
+import { HEATMAP_DATA_README, createHeatmapDataExport } from "./exportHeatmapData.js";
+import { DEFAULT_HEATMAP_CELL_SIZES, isHeatmapCellSize } from "../shared/heatmapSettings.js";
 import {
   COLLAGEN_DENSITY_COLOR_MAX_MAX,
   COLLAGEN_DENSITY_DISPLAY_MAX,
-  COLLAGEN_DENSITY_MODEL,
   isCollagenDensityColorMax,
 } from "../shared/collagenDensity.js";
 
@@ -91,8 +92,8 @@ export class ExportError extends Error {
   }
 }
 
-export function densityModelForExport() {
-  return COLLAGEN_DENSITY_MODEL;
+export function densityModelForExport(calibration) {
+  return exportCalibrationSnapshot(calibration).model;
 }
 
 export function safeArchiveSegment(value) {
@@ -122,15 +123,44 @@ export function datasetExportFilename(rootPath, date) {
   return `${datasetExportDirectory(rootPath)}_${timestamp}.zip`;
 }
 
+export function validateExportGroupExclusions({ excludedGroupIdsByImage, rootPath, snapshotRootPath }) {
+  if (excludedGroupIdsByImage === undefined) return undefined;
+  if (
+    !isPlainObject(excludedGroupIdsByImage) ||
+    Object.entries(excludedGroupIdsByImage).some(([imageId, groupIds]) =>
+      !imageId.trim() || !Array.isArray(groupIds) ||
+      groupIds.some((id) => typeof id !== "string" || !id.trim()),
+    )
+  ) {
+    throw new ExportError("INVALID_GROUP_EXCLUSIONS", "Export group exclusions are invalid.", 400);
+  }
+  if (typeof rootPath !== "string" || rootPath !== snapshotRootPath) {
+    throw new ExportError("ROOT_MISMATCH", "Export root no longer matches the active root.", 409);
+  }
+  return Object.fromEntries(Object.entries(excludedGroupIdsByImage).map(([imageId, ids]) => [imageId, [...ids]]));
+}
+
+export function validateExportHeatmapCellSizes(value = DEFAULT_HEATMAP_CELL_SIZES) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 3 || !value.every(isHeatmapCellSize)) {
+    throw new ExportError("INVALID_CELL_SIZES", "Choose one to three heatmap cell sizes, each an integer from 1 to 4096 px.", 400);
+  }
+  return [...new Set(value)];
+}
+
 export async function writeDatasetZip({
   storage,
   output,
   autoSavedImageId = null,
+  excludedGroupIdsByImage,
+  rootPath: requestedRootPath,
   estimatedCollagenColorMax = COLLAGEN_DENSITY_DISPLAY_MAX,
+  heatmapCellSizes,
+  calibration,
   maxImagePixels,
   now = () => new Date(),
   signal,
 }) {
+  const cellSizes = validateExportHeatmapCellSizes(heatmapCellSizes);
   if (!isCollagenDensityColorMax(estimatedCollagenColorMax)) {
     throw new ExportError(
       "INVALID_COLOR_MAX",
@@ -138,12 +168,18 @@ export async function writeDatasetZip({
       400,
     );
   }
-  const densityModel = densityModelForExport();
+  const calibrationSnapshot = exportCalibrationSnapshot(calibration);
+  const densityModel = calibrationSnapshot.model;
   const exportStorage = storage?.createSnapshot?.() ?? storage;
   const rootPath = exportStorage?.getRoot?.();
   if (!rootPath) {
     throw new ExportError("ROOT_UNSET", "Storage root has not been set.", 400);
   }
+  const groupExclusions = validateExportGroupExclusions({
+    excludedGroupIdsByImage,
+    rootPath: requestedRootPath,
+    snapshotRootPath: rootPath,
+  });
   throwIfAborted(signal);
 
   let images;
@@ -151,6 +187,7 @@ export async function writeDatasetZip({
   let exportedAt;
   let records;
   let estimatedHeatmapRanges;
+  let comparisonHasFiniteValues;
   try {
     images = await raceWithSignal(exportStorage.scanImages(), signal);
     rootDirectory = safeArchiveSegment(datasetExportDirectory(rootPath));
@@ -159,6 +196,7 @@ export async function writeDatasetZip({
       planSavedHeatmapFigures({
         storage: exportStorage,
         images,
+        cellSizes,
         calibration: densityModel,
         estimatedCollagenColorMax,
         signal,
@@ -171,6 +209,7 @@ export async function writeDatasetZip({
         images,
         plan: legacyHeatmapPlan,
         autoSavedImageId,
+        excludedGroupIdsByImage: groupExclusions,
         maxImagePixels,
         signal,
       }),
@@ -189,15 +228,18 @@ export async function writeDatasetZip({
       planEstimatedHeatmapAssets({
         storage: exportStorage,
         images,
+        cellSizes,
         cropsByImage,
         sourceDimensionsByImage,
         estimatedCollagenColorMax,
+        calibration: densityModel,
         signal,
       }),
       signal,
     );
     attachEstimatedHeatmapPlan(records, estimatedHeatmapPlan);
     estimatedHeatmapRanges = estimatedHeatmapPlan.ranges;
+    comparisonHasFiniteValues = estimatedHeatmapPlan.comparisonHasFiniteValues;
   } catch (error) {
     throw publicExportError(error, signal);
   }
@@ -206,18 +248,24 @@ export async function writeDatasetZip({
   const outputFinished = finished(output);
   const abortState = attachAbort(signal, archive, output);
   outputFinished.catch((error) => abortState.fail(error, { destroyOutput: false }));
+  let heatmapData;
 
   try {
+    heatmapData = await createHeatmapDataExport({ cellSizes, calibration: calibrationSnapshot,
+      colorMax: estimatedCollagenColorMax, exportedAt: exportedAt.toISOString(), signal: abortState.signal });
     archive.pipe(output);
     await appendDatasetEntries({
       archive,
       rootDirectory,
       records,
-      calibration: densityModel,
+      calibration: calibrationSnapshot,
       exportedAt,
       maxImagePixels,
       estimatedHeatmapRanges,
+      comparisonHasFiniteValues,
       estimatedCollagenColorMax,
+      heatmapData,
+      cellSizes,
       storage: exportStorage,
       abortState,
     });
@@ -231,6 +279,7 @@ export async function writeDatasetZip({
     throw publicExportError(error, signal);
   } finally {
     abortState.detach();
+    await heatmapData?.dispose();
   }
 }
 
@@ -266,6 +315,7 @@ async function collectImageExportRecords({
   images,
   plan,
   autoSavedImageId,
+  excludedGroupIdsByImage,
   maxImagePixels,
   signal,
 }) {
@@ -284,6 +334,9 @@ async function collectImageExportRecords({
       maskSource: null,
       bounds: null,
       analysis: null,
+      excludedGroupIds: excludedGroupIdsByImage && Object.hasOwn(excludedGroupIdsByImage, image.id)
+        ? excludedGroupIdsByImage[image.id]
+        : [],
       dimensions: {},
       sourceFiles: {},
       roiEntry: null,
@@ -407,7 +460,7 @@ function attachEstimatedHeatmapPlan(records, plan) {
 
   const firstRecord = records[0];
   if (!firstRecord) return;
-  for (const cellSize of ESTIMATED_HEATMAP_CELL_SIZES) {
+  for (const cellSize of plan.ranges.keys()) {
     for (const kind of ["comparison-full", "comparison-subimage"]) {
       firstRecord.derivedEntries.push(estimatedHeatmapDerivedEntry({
         kind,
@@ -430,7 +483,10 @@ async function appendDatasetEntries({
   exportedAt,
   maxImagePixels,
   estimatedHeatmapRanges,
+  comparisonHasFiniteValues,
   estimatedCollagenColorMax,
+  heatmapData,
+  cellSizes,
   storage,
   abortState,
 }) {
@@ -497,10 +553,19 @@ async function appendDatasetEntries({
         base,
         record,
         asset,
+        heatmapData,
         storage,
         maxImagePixels,
         abortState,
       });
+    }
+
+    for (const cellSize of cellSizes) {
+      if (heatmapData.hasImage(cellSize, record.image.id)) continue;
+      const reason = record.derivedEntries.find((entry) => entry.artifact === "Full heatmap" &&
+        entry.sourceCellSize === cellSize && entry.status === "Skipped")?.reason ?? "Saved heatmap is unavailable.";
+      await heatmapData.appendImage({ cellSize, image: record.image, reason });
+      record.reportEntries.push(report("Skipped", "Heatmap cell data", `${cellSize}x${cellSize}: ${reason}`));
     }
 
     await appendWorkbookEntry({
@@ -509,15 +574,22 @@ async function appendDatasetEntries({
       record,
       calibration,
       exportedAt,
-    abortState,
-  });
-}
+      estimatedCollagenColorMax,
+      abortState,
+    });
+  }
+
+  for (const file of await heatmapData.finalize()) {
+    await appendPathAndWait(archive, file.path, archiveName(rootDirectory, "heatmap_data", file.name), abortState);
+  }
 
   const scaleEntries = await appendEstimatedHeatmapScales({
     archive,
     rootDirectory,
     ranges: estimatedHeatmapRanges,
+    comparisonHasFiniteValues,
     estimatedCollagenColorMax,
+    calibration,
     abortState,
   });
   await appendDatasetWorkbookEntry({
@@ -526,8 +598,16 @@ async function appendDatasetEntries({
     records,
     scaleEntries,
     exportedAt,
+    calibration,
+    estimatedCollagenColorMax,
     abortState,
   });
+  const metadata = exportDatasetCalibration({ calibration, colorMax: estimatedCollagenColorMax,
+    exportedAt: exportedAt.toISOString(), records });
+  await appendBufferAndWait(archive, Buffer.from(HEATMAP_DATA_README),
+    archiveName(rootDirectory, "heatmap_data_README.txt"), abortState);
+  await appendBufferAndWait(archive, Buffer.from(JSON.stringify(metadata, null, 2)),
+    archiveName(rootDirectory, "calibration_metadata.json"), abortState);
 }
 
 async function appendDerivedRasterEntries({ archive, base, record, maxImagePixels, abortState }) {
@@ -788,6 +868,7 @@ async function appendEstimatedHeatmapEntry({
   base,
   record,
   asset,
+  heatmapData,
   storage,
   maxImagePixels,
   abortState,
@@ -809,6 +890,14 @@ async function appendEstimatedHeatmapEntry({
       reason: estimatedHeatmapHydrationReason(error),
     }));
     return;
+  }
+
+  if (asset.kind === "absolute-full") {
+    await heatmapData.appendImage({ cellSize: asset.sourceCellSize, image: record.image, source: hydrated.sourceHeatmap });
+    const dataPath = `heatmap_data/${asset.sourceCellSize}x${asset.sourceCellSize}.json`;
+    record.derivedEntries.push({ artifact: "Heatmap cell data", status: "Included", cellSize: asset.sourceCellSize,
+      currentImage: record.imageFolder, sourceCellSize: asset.sourceCellSize, path: dataPath });
+    record.reportEntries.push(report("Included", "Heatmap cell data", dataPath));
   }
 
   let buffer;
@@ -838,6 +927,9 @@ async function appendEstimatedHeatmapEntry({
       status: "Included",
       path: publicPath,
     }));
+    if (asset.kind === "absolute-full" && hydrated.gridCalibration) {
+      (record.calibrationGrids ??= []).push(hydrated.gridCalibration);
+    }
   } catch (error) {
     if (isAbortError(error)) throw error;
     abortState.throwIfAborted();
@@ -909,18 +1001,21 @@ async function appendEstimatedHeatmapScales({
   archive,
   rootDirectory,
   ranges,
+  comparisonHasFiniteValues,
   estimatedCollagenColorMax,
+  calibration,
   abortState,
 }) {
   const definitions = [
     {
-      input: { kind: "absolute", estimatedCollagenColorMax },
+      input: { kind: "absolute", estimatedCollagenColorMax, calibration },
       artifact: "Estimated Density scale",
       file: "estimated_collagen_density.png",
       path: "scales/estimated_collagen_density.png",
     },
-    ...ESTIMATED_HEATMAP_CELL_SIZES.map((cellSize) => ({
-      input: { kind: "comparison", cellSize, maxAbs: ranges?.get(cellSize) ?? 0 },
+    ...[...ranges.keys()].map((cellSize) => ({
+      input: { kind: "comparison", cellSize, maxAbs: ranges?.get(cellSize) ?? 0, calibration,
+        hasFiniteValues: comparisonHasFiniteValues?.get(cellSize) ?? false },
       artifact: "Comparison scale",
       cellSize,
       file: `comparison_${cellSize}x${cellSize}.png`,
@@ -964,6 +1059,8 @@ async function appendDatasetWorkbookEntry({
   records,
   scaleEntries,
   exportedAt,
+  calibration,
+  estimatedCollagenColorMax,
   abortState,
 }) {
   try {
@@ -971,6 +1068,8 @@ async function appendDatasetWorkbookEntry({
       records,
       scaleEntries,
       exportedAt,
+      calibration,
+      estimatedCollagenColorMax,
     }));
     await appendBufferAndWait(
       archive,
@@ -1069,6 +1168,14 @@ async function appendRoiEntry({ archive, base, record, maxImagePixels, abortStat
     record.reportEntries.push(report("Skipped", "ROI", reason));
   };
 
+  const excluded = new Set(record.excludedGroupIds);
+  if (record.bounds?.groups.every((group) => excluded.has(group.id))) {
+    const reason = "ROI overview omitted because all saved groups are disabled for export.";
+    skipped(reason);
+    record.derivedEntries.push({ status: "Skipped", artifact: "ROI overview", currentImage: record.imageFolder, reason });
+    return;
+  }
+
   if (!record.imageSource || !record.bounds) {
     skipped("ROI overview requires a readable source image and valid saved bounds.");
     return;
@@ -1079,6 +1186,7 @@ async function appendRoiEntry({ archive, base, record, maxImagePixels, abortStat
       renderRoiOverview({
         imagePath: record.imageSource.path,
         bounds: record.bounds,
+        excludedGroupIds: record.excludedGroupIds,
         maxImagePixels,
         signal: abortState.signal,
       }),
@@ -1141,6 +1249,7 @@ async function appendWorkbookEntry({
   record,
   calibration,
   exportedAt,
+  estimatedCollagenColorMax,
   abortState,
 }) {
   const workbookFile = `${record.imageFolder}_statistics.xlsx`;
@@ -1153,7 +1262,9 @@ async function appendWorkbookEntry({
       sourceFiles: record.sourceFiles,
       bounds: record.bounds,
       analysis: record.analysis,
+      excludedGroupIds: record.excludedGroupIds,
       calibration,
+      estimatedCollagenColorMax,
       autoSavedBounds: record.autoSavedBounds,
       roiEntry: record.roiEntry,
       heatmapEntries: record.heatmapEntries,

@@ -1,12 +1,13 @@
 import React, { useLayoutEffect, useRef } from "react";
 import {
   differenceColor,
-  estimateHeatmapCollagenDensity,
   heatmapCellAtPoint,
   heatmapDisplayRange,
-  heatmapMetricValue,
+  heatmapDisplayValue,
   infernoColor,
 } from "../lib/heatmap.js";
+import { COLLAGEN_DENSITY_MODEL } from "../../shared/collagenDensity.js";
+import { concentrationLabel, concentrationResult } from "../lib/collagenPresentation.js";
 
 export default function HeatmapOverlay({
   heatmap,
@@ -14,6 +15,7 @@ export default function HeatmapOverlay({
   comparison,
   pointer,
   collagenDensityColorMax,
+  model = COLLAGEN_DENSITY_MODEL,
 }) {
   const canvasRef = useRef(null);
   const hovered = heatmapCellAtPoint(heatmap, pointer);
@@ -23,9 +25,7 @@ export default function HeatmapOverlay({
     "estimated-collagen-density",
     collagenDensityColorMax,
   ).max;
-  const hoveredEstimated = hovered
-    ? estimateHeatmapCollagenDensity(hovered.pixelDensity, collagenDensityMax)
-    : null;
+  const hoveredEstimated = concentrationResult(hovered && { density: hovered.pixelDensity, areaPx: hovered.areaPx, empty: hovered.empty }, model, collagenDensityMax);
   const pointerX = pointer ? (pointer.x / heatmap.width) * 100 : 0;
   const pointerY = pointer ? (pointer.y / heatmap.height) * 100 : 0;
 
@@ -39,10 +39,10 @@ export default function HeatmapOverlay({
     heatmap.cells.forEach((cell, index) => {
       context.fillStyle = comparison
         ? differenceColor(comparison.values[index], comparison.maxAbs)
-        : infernoColor(heatmapMetricValue(cell, metric, collagenDensityMax), range.min, range.max);
+        : infernoColor(heatmapDisplayValue(cell, metric, collagenDensityMax, model), range.min, range.max);
       context.fillRect(cell.x, cell.y, cell.width, cell.height);
     });
-  }, [collagenDensityMax, comparison, heatmap, metric, range.max, range.min]);
+  }, [collagenDensityMax, comparison, heatmap, metric, range.max, range.min, model]);
 
   return (
     <>
@@ -69,7 +69,7 @@ export default function HeatmapOverlay({
           <span>{`Pixel Density ${formatValue(hovered.pixelDensity)}`}</span>
           <span>
             {`Estimated Collagen Density ${
-              Number.isFinite(hoveredEstimated) ? `${formatValue(hoveredEstimated)} mg/ml` : "Unavailable"
+              concentrationLabel(hoveredEstimated)
             }`}
           </span>
           {comparison ? (
@@ -86,5 +86,5 @@ export default function HeatmapOverlay({
 }
 
 function formatValue(value) {
-  return Number.isFinite(value) ? value.toFixed(4) : "Unavailable";
+  return Number.isFinite(value) ? value.toFixed(4) : "No data";
 }

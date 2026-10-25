@@ -29,22 +29,24 @@ export function buildRoiOverviewSvg({
   outsideOverlayDataUrl = null,
   bounds,
   legendBounds = bounds,
+  excludedGroupIds = [],
 }) {
   validateRoiBounds(bounds, width, height);
   if (typeof normalizedImageDataUrl !== "string" || normalizedImageDataUrl.length === 0) {
     throw new TypeError("A normalized image data URL is required.");
   }
 
-  const labelPadding = Math.max(IMAGE_MARGIN, maximumOutsideDistance(bounds.groups) + 24);
+  const excluded = new Set(excludedGroupIds);
+  const labelPadding = Math.max(IMAGE_MARGIN, maximumOutsideDistance(bounds.groups.filter((group) => !excluded.has(group.id))) + 24);
   const imageX = labelPadding;
   const imageY = Math.max(IMAGE_TOP, labelPadding);
   const legendX = imageX + width + labelPadding;
   const normalizedGroups = bounds.groups.map((group, index) =>
     normalizeGroup(group, index, { imageWidth: width, imageHeight: height, imageX, imageY }),
-  );
+  ).filter((group) => !excluded.has(group.id));
   const legendGroups = legendBounds.groups.map((group, index) =>
     normalizeGroup(group, index, { imageWidth: width, imageHeight: height, imageX, imageY }),
-  );
+  ).filter((group) => !excluded.has(group.id));
   const legendHeight = legendHeightFor(legendGroups);
   const svgWidth = legendX + LEGEND_WIDTH + IMAGE_MARGIN;
   const svgHeight = Math.max(imageY + height + labelPadding, imageY + legendHeight);
@@ -56,7 +58,7 @@ export function buildRoiOverviewSvg({
     : "";
   const outsideAssignmentRuns = outsideOverlayDataUrl
     ? ""
-    : renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY });
+    : renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY, excluded });
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${svgWidth}" height="${svgHeight}" viewBox="0 0 ${svgWidth} ${svgHeight}">
   <rect width="100%" height="100%" fill="#ffffff"/>
@@ -78,7 +80,7 @@ export function buildRoiOverviewSvg({
 </svg>`;
 }
 
-export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, signal }) {
+export async function renderRoiOverview({ imagePath, bounds, excludedGroupIds = [], maxImagePixels, signal }) {
   const pixelLimit = inputPixelLimitFor(maxImagePixels);
   const source = sharp(sharpPath(imagePath), { limitInputPixels: pixelLimit });
   try {
@@ -103,6 +105,7 @@ export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, sig
       width: frame.width,
       height: frame.height,
       bounds: frame.renderBounds,
+      excludedGroupIds,
       signal,
     });
     const svg = buildRoiOverviewSvg({
@@ -112,6 +115,7 @@ export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, sig
       outsideOverlayDataUrl: `data:image/png;base64,${outsideOverlay.toString("base64")}`,
       bounds: frame.renderBounds,
       legendBounds: frame.legendBounds,
+      excludedGroupIds,
     });
 
     const outputPipeline = sharp(Buffer.from(svg))
@@ -122,9 +126,10 @@ export async function renderRoiOverview({ imagePath, bounds, maxImagePixels, sig
   }
 }
 
-export async function buildOutsideRoiOverlay({ width, height, bounds, signal }) {
+export async function buildOutsideRoiOverlay({ width, height, bounds, excludedGroupIds = [], signal }) {
   validateRoiBounds(bounds, width, height);
   const groups = outsideGroupsForAssignment(bounds);
+  const excluded = new Set(excludedGroupIds);
   const data = new Uint8Array(width * height * 4);
 
   visitOutwardRoiPixels({
@@ -132,6 +137,8 @@ export async function buildOutsideRoiOverlay({ width, height, bounds, signal }) 
     height,
     groups,
     visit: (x, y, assignment) => {
+      // Keep canonical ownership so filtering does not enlarge other groups' ROIs.
+      if (excluded.has(assignment.groupId)) return;
       const color = OUTSIDE_BAND_COLORS[assignment.bandId];
       if (!color) return;
 
@@ -206,12 +213,12 @@ function scaledRoiLimits(roiLimits, scale) {
   };
 }
 
-function renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY }) {
+function renderOutsideAssignmentRuns({ width, height, bounds, imageX, imageY, excluded }) {
   const assignments = assignOutwardRoiPixels({ width, height, groups: outsideGroupsForAssignment(bounds) });
   const runsByOwner = new Map();
 
   function appendRun(assignment, startX, endX, y) {
-    if (!assignment || startX === endX) return;
+    if (!assignment || startX === endX || excluded.has(assignment.groupId)) return;
     const color = OUTSIDE_BAND_COLORS[assignment.bandId];
     if (!color) return;
 

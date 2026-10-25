@@ -18,10 +18,161 @@ import {
   safeArchiveSegment,
   writeDatasetZip,
 } from "./exportService.js";
-import { estimateCollagenDensity } from "../shared/collagenDensity.js";
+import { estimateCollagenDensity, getCollagenDensityModel } from "../shared/collagenDensity.js";
 import { infernoColor } from "../src/lib/heatmap.js";
 
 const tempRoots = [];
+
+test("exports one heatmap JSON per grid size containing all images and no duplicate cell CSV", async () => {
+  const fixture = await createExportFixture({ imageFolders: ["T01", "T02"], heatmapSizes: { T01: [20], T02: [20] } });
+  await generateHeatmapBatch({ rootPath: fixture.rootDir, cellSizes: [30] });
+  const source = JSON.parse(await readFile(path.join(fixture.rootDir, "T01/heatmap/30x30/T01.heatmap.json"), "utf8"));
+  const archive = await exportFixtureArchive(fixture, { heatmapCellSizes: [30],
+    calibration: { modelId: "low-density", revision: 7 }, estimatedCollagenColorMax: 3 });
+  const jsonEntry = archive.files.find((file) => file.path === "fixture_export/heatmap_data/30x30.json");
+  expect(jsonEntry).toBeDefined();
+  expect(archive.files.some((file) => /\/(data\.json|cells\.csv)$/.test(file.path))).toBe(false);
+  const dataset = JSON.parse((await jsonEntry.buffer()).toString("utf8"));
+  expect(dataset).toMatchObject({ formatVersion: 1, cellWidth: 30, cellHeight: 30,
+    calibration: { modelId: "low-density", revision: 7, colorMax: 3 },
+    coordinateSystem: "zero-based top-left; x right, y down", indexOrder: "row-major",
+    display: { metric: "estimated-collagen-density", min: 0, max: 3, unit: "mg/mL" } });
+  expect(dataset.images.map((image) => image.id)).toEqual(["T01", "T02"]);
+  expect(dataset.images.every((image) => image.status === "included")).toBe(true);
+  expect(dataset.images[1].cells).not.toEqual(dataset.images[0].cells);
+  const data = dataset.images[0];
+  expect(data).toMatchObject({ imageFolder: "T01", imageFile: "T01.tif", width: 40, height: 40,
+    gridAlignment: "center", columns: 3, rows: 3 });
+  expect(data.cells).toHaveLength(9);
+  source.cells.forEach((cell, index) => expect(data.cells[index]).toMatchObject(cell));
+  expect(data.cells[0]).toMatchObject({ x: 0, y: 0, width: 5, height: 5, pixelDensity: 1,
+    estimatedCollagenDensity: null, heatmapValue: 3, displayValue: 3, displayColor: "#fcffa4", concentrationStatus: "model-range-exceeded" });
+  expect(data.cells[8]).toMatchObject({ x: 35, y: 35, width: 5, height: 5, pixelDensity: 0,
+    estimatedCollagenDensity: 0, heatmapValue: 0, displayValue: 0, concentrationStatus: "below-baseline" });
+  const png = await rgbaImage(archive, "fixture_export/T01/heatmap/30x30/full.png");
+  expect(rgbaPixel(png, 2, 2)).toEqual([252, 255, 164, 255]);
+  expect(archive.files.some((file) => file.path.endsWith("/heatmap_data_README.txt"))).toBe(true);
+  const workbook = await openWorkbookEntry(archive, "/export_report.xlsx");
+  const dataRows = [];
+  workbook.getWorksheet("Export Report").eachRow((row) => {
+    if (row.getCell(3).value === "Heatmap cell data") dataRows.push([row.getCell(4).value, row.getCell(7).value]);
+  });
+  expect(dataRows).toEqual([["T01", "heatmap_data/30x30.json"], ["T02", "heatmap_data/30x30.json"]]);
+});
+
+test("heatmap data separates uncapped estimates from color-clipped values and respects the selected model", async () => {
+  const fixture = await createExportFixture({ imageFolders: ["T01"], heatmapSizes: { T01: [20] } });
+  const sourcePath = path.join(fixture.rootDir, "T01/heatmap/20x20/T01.heatmap.json");
+  const source = JSON.parse(await readFile(sourcePath, "utf8"));
+  for (const cell of source.cells) {
+    cell.maskPixelCount = 42;
+    cell.pixelDensity = 0.105;
+  }
+  await writeFile(sourcePath, JSON.stringify(source));
+  const estimates = [];
+  for (const [modelId, max] of [["low-density", 1], ["low-density", 3], ["high-density", 1]]) {
+    const archive = await exportFixtureArchive(fixture, { heatmapCellSizes: [20],
+      calibration: { modelId, revision: 4 }, estimatedCollagenColorMax: max });
+    const entry = archive.files.find((file) => file.path.endsWith("/heatmap_data/20x20.json"));
+    expect(entry).toBeDefined();
+    const data = JSON.parse((await entry.buffer()).toString("utf8"));
+    expect(data.calibration).toMatchObject({ modelId, revision: 4, colorMax: max });
+    estimates.push(data.images[0].cells[0]);
+  }
+  expect(estimates[0].estimatedCollagenDensity).toBeCloseTo(-Math.log(0.0037 / 0.107) / 1.63, 12);
+  expect(estimates[0]).toMatchObject({ displayValue: 1, concentrationStatus: "color-max-exceeded" });
+  expect(estimates[0].heatmapValue).toBe(estimates[0].estimatedCollagenDensity);
+  expect(estimates[1].estimatedCollagenDensity).toBe(estimates[0].estimatedCollagenDensity);
+  expect(estimates[1].displayValue).toBe(estimates[1].estimatedCollagenDensity);
+  expect(estimates[1].concentrationStatus).toBe("ok");
+  expect(estimates[2].estimatedCollagenDensity).toBeCloseTo(-Math.log(0.1581 / 0.2431) / 0.2662, 12);
+});
+
+test("heatmap JSON keeps every image with an explicit status for invalid and missing grids", async () => {
+  const fixture = await createExportFixture({ imageFolders: ["T01", "T02"], heatmapSizes: { T01: [20], T02: [20] } });
+  const sourcePath = path.join(fixture.rootDir, "T01/heatmap/20x20/T01.heatmap.json");
+  const source = JSON.parse(await readFile(sourcePath, "utf8"));
+  source.cells[0].pixelDensity = -1;
+  await writeFile(sourcePath, JSON.stringify(source));
+  const archive = await exportFixtureArchive(fixture, { heatmapCellSizes: [20, 50] });
+  const files = archive.files.filter((file) => /\/heatmap_data\/.*\.json$/.test(file.path));
+  expect(files.map((file) => file.path)).toEqual(["fixture_export/heatmap_data/20x20.json", "fixture_export/heatmap_data/50x50.json"]);
+  const small = JSON.parse((await files[0].buffer()).toString("utf8"));
+  expect(small.images).toHaveLength(2);
+  expect(small.images[0]).toMatchObject({ id: "T01", status: "unavailable", reason: expect.stringMatching(/invalid/i), cells: [] });
+  expect(small.images[1]).toMatchObject({ id: "T02", status: "included", cells: expect.any(Array) });
+  const large = JSON.parse((await files[1].buffer()).toString("utf8"));
+  expect(large.images.map((image) => image.id)).toEqual(["T01", "T02"]);
+  for (const image of large.images) {
+    expect(image).toMatchObject({ status: "unavailable", reason: expect.stringMatching(/missing/i), cells: [] });
+  }
+});
+
+test("exports custom heatmap sizes with matching crops, comparisons, scales and metadata", async () => {
+  const fixture = await createExportFixture({ imageFolders: ["T01", "T02"], heatmapSizes: { T01: [20], T02: [20] },
+    subimagesByImage: equalSubimages() });
+  await generateHeatmapBatch({ rootPath: fixture.storage.getRoot(), cellSizes: [30, 60, 120] });
+  const output = new PassThrough();
+  const zip = collectStream(output);
+  const writing = writeDatasetZip({ storage: fixture.storage, output, heatmapCellSizes: [30, 60, 120] });
+  const archive = await unzipper.Open.buffer(await zip);
+  await writing;
+  const names = archive.files.map((file) => file.path);
+  expect(names.some((name) => name.includes("/heatmap/20x20/"))).toBe(false);
+  for (const size of [30, 60, 120]) {
+    const dataEntry = archive.files.find((file) => file.path === `fixture_export/heatmap_data/${size}x${size}.json`);
+    expect(dataEntry).toBeDefined();
+    const data = JSON.parse((await dataEntry.buffer()).toString("utf8"));
+    expect(data.cellWidth).toBe(size);
+    expect(data.images.map((image) => image.id)).toEqual(["T01", "T02"]);
+    expect(names).toContain(`fixture_export/T01/heatmap/${size}x${size}/full.png`);
+    expect(names).toContain(`fixture_export/T01/heatmap/${size}x${size}/T01_cell_${size}px_collagen_density.png`);
+    expect(names).toContain(`fixture_export/T01/heatmap/${size}x${size}/subimage.png`);
+    expect(names).toContain(`fixture_export/T02/compare/${size}x${size}/full_current_minus_previous.png`);
+    expect(names).toContain(`fixture_export/T02/compare/${size}x${size}/subimage_current_minus_previous.png`);
+    expect(names).toContain(`fixture_export/scales/comparison_${size}x${size}.png`);
+  }
+  expect(names).not.toContain("fixture_export/scales/comparison_20x20.png");
+  const metadataEntry = archive.files.find((file) => file.path.endsWith("/calibration_metadata.json"));
+  const metadata = JSON.parse((await metadataEntry.buffer()).toString());
+  expect(metadata.images[0].grids.map((grid) => grid.cellWidth)).toEqual([30, 60, 120]);
+});
+
+test("pins one calibration snapshot across ZIP metadata, both workbook types and assets", async () => {
+  const fixture = await createExportFixture({ imageFolders: ["T01"], heatmapSizes: { T01: [20] } });
+  const calibration = { modelId: "low-density", model: getCollagenDensityModel("low-density"), revision: 7 };
+  const output = new PassThrough();
+  output.once("data", () => {
+    calibration.model = getCollagenDensityModel("high-density");
+    calibration.modelId = "high-density";
+    calibration.revision = 8;
+  });
+  const zip = collectStream(output);
+  const write = writeDatasetZip({ storage: fixture.storage, output, calibration, estimatedCollagenColorMax: 3 });
+  const archive = await unzipper.Open.buffer(await zip);
+  await write;
+  const entry = archive.files.find((file) => file.path.endsWith("/calibration_metadata.json"));
+  expect(entry).toBeDefined();
+  const metadata = JSON.parse((await entry.buffer()).toString());
+  expect(metadata).toMatchObject({ modelId: "low-density", revision: 7, colorMax: 3,
+    coefficients: { amplitude: -0.107, plateau: 0.1087, k: 1.63 } });
+  expect(metadata.images[0].rois.length).toBeGreaterThan(0);
+  expect(metadata.images[0].rois[0]).toHaveProperty("areaFraction");
+  expect(metadata.images[0].rois[0]).toHaveProperty("status");
+  expect(metadata.images[0].grids[0]).toMatchObject({ indexOrder: "row-major", cellWidth: 20,
+    exceptionalCellIndices: { "model-range-exceeded": expect.any(Array), "no-data": expect.any(Array) } });
+  const gridEntry = archive.files.find((file) => file.path.endsWith("/heatmap_data/20x20.json"));
+  const gridData = JSON.parse((await gridEntry.buffer()).toString("utf8"));
+  expect(gridData.calibration).toMatchObject({ modelId: "low-density", revision: 7, colorMax: 3 });
+  const image = await openWorkbookEntry(archive, "/statistics/T01_statistics.xlsx");
+  const rows = new Map();
+  image.getWorksheet("Image Summary").eachRow((row) => rows.set(row.getCell(1).value, row.getCell(2).value));
+  expect(rows.get("Model ID")).toBe("low-density");
+  expect(rows.get("Calibration revision")).toBe(7);
+  expect(rows.get("Color Max (mg/ml)")).toBe(3);
+  const report = await openWorkbookEntry(archive, "/export_report.xlsx");
+  expect(report.getWorksheet("Calibration").getColumn(2).values).toContain("low-density");
+});
 
 async function createTempRoot(prefix) {
   const root = await mkdtemp(path.join(tmpdir(), prefix));
@@ -78,13 +229,15 @@ function rgbaPixel(image, x, y) {
   return [...image.data.subarray(offset, offset + 4)];
 }
 
-async function exportFixtureArchive(fixture) {
+async function exportFixtureArchive(fixture, options = {}) {
   const output = new PassThrough();
   const zipPromise = collectStream(output);
   const writePromise = writeDatasetZip({
     storage: fixture.storage,
     output,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
+    rootPath: fixture.rootDir,
+    ...options,
   });
   const archive = await unzipper.Open.buffer(await zipPromise);
   await writePromise;
@@ -327,7 +480,7 @@ afterEach(async () => {
 });
 
 test("uses the fixed density model and creates deterministic safe names", () => {
-  expect(densityModelForExport()).toMatchObject({ y0: 0.0569, plateau: 0.4337, k: 0.0841 });
+  expect(densityModelForExport()).toEqual(getCollagenDensityModel("high-density"));
   expect(datasetExportFilename("/data/Study A", new Date("2026-07-27T01:02:03Z"))).toBe(
     "Study_A_export_20260727-010203.zip",
   );
@@ -349,7 +502,7 @@ test("wraps storage discovery failures without exposing host paths", async () =>
   await expect(writeDatasetZip({
     storage,
     output: new PassThrough(),
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
   })).rejects.toMatchObject({
     name: "ExportError",
     code: "EXPORT_FAILED",
@@ -360,7 +513,7 @@ test("wraps storage discovery failures without exposing host paths", async () =>
     await writeDatasetZip({
       storage,
       output: new PassThrough(),
-      calibration: { slope: 0.1, intercept: 0 },
+      calibration: { modelId: "high-density", revision: 0 },
     });
   } catch (error) {
     expect(error).toBeInstanceOf(ExportError);
@@ -398,7 +551,7 @@ test("exports every file from one captured root when the active root switches du
   const writePromise = writeDatasetZip({
     storage,
     output,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
   });
   const archive = await unzipper.Open.buffer(await zipPromise);
   await writePromise;
@@ -421,7 +574,7 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   const writePromise = writeDatasetZip({
     storage: fixture.storage,
     output,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
     autoSavedImageId: "T02",
     maxImagePixels: 1_000_000,
     now: () => new Date("2026-07-27T01:02:03Z"),
@@ -558,7 +711,7 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   expect(JSON.stringify(workbook.worksheets.map((sheet) => sheet.getSheetValues()))).not.toContain(fixture.rootDir);
 
   const datasetWorkbook = await openWorkbookEntry(archive, "/export_report.xlsx");
-  expect(datasetWorkbook.worksheets.map((sheet) => sheet.name)).toEqual(["Subimages", "Export Report"]);
+  expect(datasetWorkbook.worksheets.map((sheet) => sheet.name)).toEqual(["Subimages", "Export Report", "Calibration"]);
   const subimages = datasetWorkbook.getWorksheet("Subimages");
   expect(subimages.getRow(2).values).toEqual([
     undefined,
@@ -585,6 +738,112 @@ test("streams source bytes, reports missing artifacts, and never leaks host path
   expect(JSON.stringify(datasetWorkbook.worksheets.map((sheet) => sheet.getSheetValues())))
     .not.toContain(fixture.rootDir);
 });
+
+async function addSecondExportGroup(fixture, imageId = "T01") {
+  const paths = fixture.storage.imagePaths(imageId);
+  const bounds = await fixture.storage.loadBounds(imageId);
+  const analysis = await fixture.storage.loadAnalysis(imageId);
+  bounds.groups.push({ ...bounds.groups[0], id: "retained", name: "Retained group", color: "#1234ab" });
+  analysis.groups.push({
+    ...analysis.groups[0],
+    groupId: "retained",
+    groupName: "Retained group",
+    area: analysisMetrics(321, 1600),
+  });
+  await writeFile(paths.boundsPath, JSON.stringify(bounds));
+  await writeFile(paths.analysisPath, JSON.stringify(analysis));
+  return { bounds, analysis, paths };
+}
+
+test("filters disabled groups per image without renumbering or changing unrelated ZIP assets or saved files", async () => {
+  const fixture = await createExportFixture({
+    imageFolders: ["T01", "T02"],
+    heatmapSizes: { T01: [20], T02: [20] },
+    subimagesByImage: equalSubimages(),
+  });
+  const { paths } = await addSecondExportGroup(fixture);
+  const savedPaths = [paths.boundsPath, paths.analysisPath];
+  const before = await Promise.all(savedPaths.map(async (file) => ({ bytes: await readFile(file), metadata: await stat(file) })));
+  const now = () => new Date("2026-10-25T00:00:00.000Z");
+  const baseline = await exportFixtureArchive(fixture, { now });
+  const archive = await exportFixtureArchive(fixture, { now, excludedGroupIdsByImage: { T01: ["whole"] } });
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+  const roi = workbook.getWorksheet("ROI Statistics");
+  expect(roi.rowCount).toBe(2);
+  expect(roi.getRow(2).values.slice(1, 5)).toEqual(["G02-I", "G02", "Retained group", "#1234AB"]);
+  expect(roi.getCell("J2").value).toBe(321);
+  expect(roi.getCell("A2").fill.fgColor.argb).toBe("FF1234AB");
+  expect(workbook.getWorksheet("Image Summary").getCell("B9").value).toBe(1);
+  expect(workbook.getWorksheet("Image Summary").getCell("B10").value).toBe(1);
+  expect(JSON.stringify(workbook.worksheets.map((sheet) => sheet.getSheetValues()))).not.toContain("Whole image");
+  const other = await openWorkbookEntry(archive, "/T02_statistics.xlsx");
+  expect(other.getWorksheet("ROI Statistics").getCell("C2").value).toBe("Whole image");
+  const dataset = await openWorkbookEntry(archive, "/export_report.xlsx");
+  expect(JSON.stringify(dataset.worksheets.map((sheet) => sheet.getSheetValues()))).not.toContain("Whole image");
+
+  const roiPath = "fixture_export/T01/roi/T01_ROI_overview.png";
+  expect(await archive.files.find((file) => file.path === roiPath).buffer())
+    .not.toEqual(await baseline.files.find((file) => file.path === roiPath).buffer());
+  const metadataEntry = archive.files.find((file) => file.path.endsWith("/calibration_metadata.json"));
+  const metadata = JSON.parse((await metadataEntry.buffer()).toString());
+  expect(metadata.images.find((image) => image.imageId === "T01").rois.map((roi) => roi.roiId)).toEqual(["G02-I"]);
+  const unrelated = baseline.files.filter((file) => !file.path.endsWith(".xlsx") &&
+    !file.path.endsWith("/calibration_metadata.json") && file.path !== roiPath);
+  expect(unrelated.some((file) => file.path.includes("/heatmap/"))).toBe(true);
+  expect(unrelated.some((file) => file.path.includes("/subimage/"))).toBe(true);
+  for (const file of unrelated) {
+    expect(await archive.files.find((entry) => entry.path === file.path).buffer()).toEqual(await file.buffer());
+  }
+  for (const [index, file] of savedPaths.entries()) {
+    expect(await readFile(file)).toEqual(before[index].bytes);
+    expect((await stat(file)).mtimeMs).toBe(before[index].metadata.mtimeMs);
+  }
+});
+
+test("all disabled groups yield a valid ZIP with no group statistics or ROI overview and an explanation", async () => {
+  const fixture = await createExportFixture({ imageFolders: ["T01"], heatmapSizes: { T01: [] } });
+  const archive = await exportFixtureArchive(fixture, { excludedGroupIdsByImage: { T01: ["whole"] } });
+  expect(archive.files.some((file) => file.path.includes("/roi/"))).toBe(false);
+  expect(await archive.files.find((file) => file.path.endsWith("/image/T01.tif")).buffer()).toEqual(fixture.originalTiffBytes.T01);
+  const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+  expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+  expect(workbook.getWorksheet("Image Summary").getCell("B9").value).toBe(0);
+  expect(workbook.getWorksheet("Image Summary").getCell("B10").value).toBe(0);
+  for (const report of [workbook, await openWorkbookEntry(archive, "/export_report.xlsx")]) {
+    const text = JSON.stringify(report.worksheets.map((sheet) => sheet.getSheetValues()));
+    expect(text).not.toContain("Whole image");
+    expect(text).toMatch(/all.*groups.*disabled/i);
+  }
+});
+
+test.each([{}, { T01: [] }, { T01: ["removed-group"], removedImage: ["whole"] }])(
+  "empty or obsolete exclusions preserve export groups: %j",
+  async (excludedGroupIdsByImage) => {
+    const fixture = await createExportFixture({ imageFolders: ["T01"], heatmapSizes: { T01: [] } });
+    const archive = await exportFixtureArchive(fixture, { excludedGroupIdsByImage });
+    const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+    expect(workbook.getWorksheet("ROI Statistics").getCell("A2").value).toBe("G01-I");
+    expect(archive.files.some((file) => file.path.endsWith("/T01_ROI_overview.png"))).toBe(true);
+  },
+);
+
+test.each(["mode", "invalid metric", "missing group", "mask provenance"])(
+  "validates full saved analysis before excluding a group with %s errors",
+  async (problem) => {
+    const fixture = await createExportFixture({ imageFolders: ["T01"], heatmapSizes: { T01: [] } });
+    const { bounds, analysis, paths } = await addSecondExportGroup(fixture);
+    if (problem === "mode") bounds.groups[0].analysisMode = "outside";
+    if (problem === "invalid metric") analysis.groups[0].area.density = 2;
+    if (problem === "missing group") analysis.groups.shift();
+    if (problem === "mask provenance") analysis.maskSource.file = "wrong.png";
+    await writeFile(paths.boundsPath, JSON.stringify(bounds));
+    await writeFile(paths.analysisPath, JSON.stringify(analysis));
+    const archive = await exportFixtureArchive(fixture, { excludedGroupIdsByImage: { T01: ["whole"] } });
+    const workbook = await openWorkbookEntry(archive, "/T01_statistics.xlsx");
+    expect(workbook.getWorksheet("ROI Statistics").rowCount).toBe(1);
+    expect(JSON.stringify(workbook.getWorksheet("Export Report").getSheetValues())).toMatch(/analysis is (stale|missing or invalid)/i);
+  },
+);
 
 test("uses the requested estimated-density calculation and color maximum in ZIP heatmaps and scale", async () => {
   const fixture = await createExportFixture({
@@ -761,7 +1020,7 @@ test("keeps saved heatmaps after file times change and skips incompatible adjace
   const copiedWritePromise = writeDatasetZip({
     storage: copiedFixture.storage,
     output: copiedOutput,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
   });
   const copiedArchive = await unzipper.Open.buffer(await copiedZipPromise);
   await copiedWritePromise;
@@ -778,7 +1037,7 @@ test("keeps saved heatmaps after file times change and skips incompatible adjace
   const incompatibleWritePromise = writeDatasetZip({
     storage: incompatibleFixture.storage,
     output: incompatibleOutput,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
   });
   const incompatibleArchive = await unzipper.Open.buffer(await incompatibleZipPromise);
   await incompatibleWritePromise;
@@ -797,7 +1056,7 @@ test("keeps sources, ROI, and workbook when analysis is missing", async () => {
   const writePromise = writeDatasetZip({
     storage: fixture.storage,
     output,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
   });
   const archive = await unzipper.Open.buffer(await zipPromise);
   await writePromise;
@@ -879,7 +1138,7 @@ test("reports semantically invalid bounds and analysis without rendering ROI", a
   const writePromise = writeDatasetZip({
     storage: fixture.storage,
     output,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
   });
   const archive = await unzipper.Open.buffer(await zipPromise);
   await writePromise;
@@ -1208,7 +1467,7 @@ test("uses a safe text fallback when workbook generation fails", async () => {
     const writePromise = writeDatasetZip({
       storage: fixture.storage,
       output,
-      calibration: { slope: 0.1, intercept: 0 },
+      calibration: { modelId: "high-density", revision: 0 },
     });
     const archive = await unzipper.Open.buffer(await zipPromise);
     await writePromise;
@@ -1303,7 +1562,7 @@ test("aborts active archive output on signal cancellation", async () => {
   const writePromise = writeDatasetZip({
     storage: fixture.storage,
     output,
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
     signal: controller.signal,
   });
   await firstChunk;
@@ -1322,7 +1581,7 @@ test("aborts promptly when image scanning stays pending", async () => {
   const writePromise = writeDatasetZip({
     storage,
     output: new PassThrough(),
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
     signal: controller.signal,
   });
   controller.abort();

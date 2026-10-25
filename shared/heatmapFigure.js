@@ -21,8 +21,8 @@ export function formatHeatmapFigureRange(min, max, { signed = false } = {}) {
   return `${formatRangeValue(min, signed)} to ${formatRangeValue(max, signed)}`;
 }
 
-export function heatmapCalibrationText() {
-  return `Density model: ${collagenDensityModelText()}`;
+export function heatmapCalibrationText(calibration) {
+  return `Density model: ${collagenDensityModelText(calibration?.model ?? calibration?.modelId ?? calibration)}`;
 }
 
 export function heatmapFigureText({
@@ -38,6 +38,7 @@ export function heatmapFigureText({
   min,
   max,
   comparison = false,
+  calibration,
 }) {
   return {
     titleLines: [
@@ -45,7 +46,7 @@ export function heatmapFigureText({
       ...(previousImage ? [`Previous: ${previousImage}`] : []),
     ],
     detailLine: `${metricLabel} | Cell ${cellWidth}x${cellHeight} px | Grid ${columns}x${rows}`,
-    calibrationLine: heatmapCalibrationText(),
+    calibrationLine: metric === "pixel-density" ? "" : heatmapCalibrationText(calibration),
     rangeLine: `Color range: ${formatHeatmapFigureRange(min, max, { signed: comparison })}${metricUnit ? ` ${metricUnit}` : ""}`,
     colorBarLabel: comparison
       ? metric === "pixel-density" ? "Delta Pixel Density" : "Delta Collagen Density (mg/ml)"

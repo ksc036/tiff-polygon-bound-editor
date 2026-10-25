@@ -1,8 +1,11 @@
 import {
   COLLAGEN_DENSITY_DISPLAY_MAX,
+  COLLAGEN_DENSITY_MODEL,
+  collagenDensityResult,
   estimateCollagenDensity,
   isCollagenDensityColorMax,
 } from "../../shared/collagenDensity.js";
+import { heatmapAxisCellIndex } from "../../shared/heatmapGrid.js";
 
 const INFERNO_STOPS = [
   [0, "#000004"],
@@ -15,24 +18,37 @@ const INFERNO_STOPS = [
 const DIFFERENCE_BLUE = "#2563eb";
 const DIFFERENCE_WHITE = "#f8fafc";
 const DIFFERENCE_RED = "#dc2626";
+export const HEATMAP_NO_DATA_COLOR = "#80858b";
 
 export function estimateHeatmapCollagenDensity(
   pixelDensity,
   collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX,
+  model = COLLAGEN_DENSITY_MODEL,
 ) {
-  return estimateCollagenDensity(pixelDensity, collagenDensityMax);
+  return estimateCollagenDensity(pixelDensity, collagenDensityMax, model);
 }
 
-export function heatmapMetricValue(cell, metric, collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX) {
+export function heatmapMetricValue(cell, metric, collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX, model = COLLAGEN_DENSITY_MODEL) {
+  if (cell?.areaPx === 0 || cell?.empty === true) return null;
   if (metric === "pixel-density") {
-    return Number.isFinite(cell?.pixelDensity) ? cell.pixelDensity : null;
+    return Number.isFinite(cell?.pixelDensity) && cell.pixelDensity >= 0 && cell.pixelDensity <= 1 ? cell.pixelDensity : null;
   }
 
   if (metric === "estimated-collagen-density" || metric === "collagen-density") {
-    return estimateHeatmapCollagenDensity(cell?.pixelDensity, collagenDensityMax);
+    return model ? estimateHeatmapCollagenDensity(cell?.pixelDensity, collagenDensityMax, model) : null;
   }
 
   return null;
+}
+
+export function heatmapDisplayValue(cell, metric, collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX, model = COLLAGEN_DENSITY_MODEL) {
+  if (metric === "pixel-density") return heatmapMetricValue(cell, metric, collagenDensityMax, model);
+  if (!model || (metric !== "collagen-density" && metric !== "estimated-collagen-density")) return null;
+  const result = collagenDensityResult(cell?.pixelDensity, model, {
+    empty: cell?.areaPx === 0 || cell?.empty === true, colorMax: collagenDensityMax,
+  });
+  return result.status === "model-range-exceeded"
+    ? heatmapDisplayRange(metric, collagenDensityMax).max : result.value;
 }
 
 export function heatmapCompatibilityError(current, previous) {
@@ -56,6 +72,12 @@ export function heatmapCompatibilityError(current, previous) {
     return "Heatmaps have incompatible cell count.";
   }
 
+  if (current.cells.some((cell, index) => ["x", "y", "width", "height"].some(
+    (field) => cell?.[field] !== previous.cells[index]?.[field],
+  ))) {
+    return "Heatmaps have incompatible grid alignment. Regenerate both heatmaps.";
+  }
+
   return null;
 }
 
@@ -64,14 +86,16 @@ export function buildHeatmapDifference({
   previous,
   metric,
   collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX,
+  model = COLLAGEN_DENSITY_MODEL,
 }) {
   const compatibilityError = heatmapCompatibilityError(current, previous);
   if (compatibilityError) {
     throw new Error(compatibilityError);
   }
 
-  const currentValues = current.cells.map((cell) => heatmapMetricValue(cell, metric, collagenDensityMax));
-  const previousValues = previous.cells.map((cell) => heatmapMetricValue(cell, metric, collagenDensityMax));
+  // Out-of-model cells use the selected Max as a comparison substitute, not an inverse estimate.
+  const currentValues = current.cells.map((cell) => heatmapDisplayValue(cell, metric, collagenDensityMax, model));
+  const previousValues = previous.cells.map((cell) => heatmapDisplayValue(cell, metric, collagenDensityMax, model));
   let maxAbs = 0;
   const values = currentValues.map((value, index) => {
     const previousValue = previousValues[index];
@@ -114,12 +138,14 @@ export function differenceGradientCss() {
 }
 
 export function infernoColor(value, min, max) {
+  if (!Number.isFinite(value)) return HEATMAP_NO_DATA_COLOR;
   const normalized = normalizeColorValue(value, min, max);
   return colorFromStops(INFERNO_STOPS, normalized);
 }
 
 export function differenceColor(value, maxAbs) {
-  if (!Number.isFinite(maxAbs) || maxAbs <= 0 || !Number.isFinite(value)) {
+  if (!Number.isFinite(value)) return HEATMAP_NO_DATA_COLOR;
+  if (!Number.isFinite(maxAbs) || maxAbs <= 0) {
     return DIFFERENCE_WHITE;
   }
 
@@ -143,8 +169,9 @@ export function heatmapCellAtPoint(heatmap, point) {
     return null;
   }
 
-  const column = Math.floor(point.x / heatmap.cellWidth);
-  const row = Math.floor(point.y / heatmap.cellHeight);
+  const column = heatmapAxisCellIndex(point.x, heatmap.width, heatmap.cellWidth, heatmap.gridAlignment);
+  const row = heatmapAxisCellIndex(point.y, heatmap.height, heatmap.cellHeight, heatmap.gridAlignment);
+  if (column < 0 || row < 0) return null;
   return heatmap.cells[row * heatmap.columns + column] ?? null;
 }
 

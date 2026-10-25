@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import express from "express";
 import { createStorage } from "./storage.js";
+import { assertCalibrationRevision, CollagenSettingsError, createCollagenSettingsStore } from "./collagenSettings.js";
+import { applyBoundsToAll, BoundaryBatchError, saveBoundsAndSynchronize } from "./boundaryBatchService.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
 import { AnalysisError, loadAnalysis, recalculateAnalysis } from "./analysisService.js";
 import { HeatmapError, generateHeatmapBatch, loadImageHeatmap } from "./heatmapService.js";
@@ -10,7 +12,9 @@ import { createMaskPreview, createRoiOverlay, createSkeletonPreview } from "./pr
 import {
   ExportError,
   datasetExportFilename,
+  validateExportGroupExclusions,
   writeDatasetZip,
+  validateExportHeatmapCellSizes,
 } from "./exportService.js";
 import { FOLDER_PICKER_CODES, FolderPickerError } from "./folderPicker.js";
 import {
@@ -27,7 +31,6 @@ import {
   isCollagenDensityColorMax,
 } from "../shared/collagenDensity.js";
 
-const CONNECTION_MODE = "input-order-cycle";
 const SUBIMAGE_ERROR_MESSAGES = {
   IMAGE_NOT_FOUND: "Image not found.",
   MISSING_SOURCE: "Source TIFF is missing.",
@@ -113,8 +116,15 @@ function subimageMutationContext(storage) {
 }
 
 function safeErrorResponse(error) {
+  if (error instanceof CollagenSettingsError) {
+    return { status: error.status, body: { error: error.message, code: error.code } };
+  }
   if (isUnknownImageError(error)) {
     return { status: 404, body: { error: "Image not found." } };
+  }
+
+  if (error instanceof BoundaryBatchError) {
+    return { status: error.status, body: { error: error.message } };
   }
 
   if (error instanceof SubimageError) {
@@ -142,7 +152,10 @@ function safeErrorResponse(error) {
     const messages = {
       ROOT_UNSET: "Storage root has not been set.",
       INVALID_IMAGE: "Export image id is invalid.",
+      INVALID_GROUP_EXCLUSIONS: "Export group exclusions are invalid.",
+      ROOT_MISMATCH: "Export root no longer matches the active root.",
       INVALID_COLOR_MAX: `Estimated collagen color max must be between 0.1 and ${COLLAGEN_DENSITY_COLOR_MAX_MAX} mg/ml.`,
+      INVALID_CELL_SIZES: "Choose one to three heatmap cell sizes, each an integer from 1 to 4096 px.",
       EXPORT_ABORTED: "Dataset export was cancelled.",
       EXPORT_FAILED: "Dataset export failed.",
     };
@@ -232,10 +245,6 @@ function folderPickerResponse(error, { heatmap = false } = {}) {
   return { status, body: { error: messages[code] ?? messages[FOLDER_PICKER_CODES.FAILED] } };
 }
 
-function validOptionalString(value) {
-  return value === undefined || typeof value === "string";
-}
-
 function exportContentDisposition(filename) {
   const fallback = filename
     .replace(/[^\x20-\x7e]/g, "_")
@@ -244,54 +253,6 @@ function exportContentDisposition(filename) {
     `%${character.charCodeAt(0).toString(16).toUpperCase()}`
   );
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
-}
-
-function validFiniteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function validOptionalDimension(value) {
-  return value === undefined || value === null || validFiniteNumber(value);
-}
-
-function isValidBoundsPayload(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return false;
-  }
-
-  if (!validOptionalDimension(payload.width) || !validOptionalDimension(payload.height)) {
-    return false;
-  }
-
-  if (payload.connectionMode !== undefined && payload.connectionMode !== CONNECTION_MODE) {
-    return false;
-  }
-
-  if (!Array.isArray(payload.groups)) {
-    return false;
-  }
-
-  return payload.groups.every((group) => {
-    if (!group || typeof group !== "object" || Array.isArray(group)) {
-      return false;
-    }
-
-    if (typeof group.id !== "string" || !validOptionalString(group.name) || !validOptionalString(group.color)) {
-      return false;
-    }
-
-    if (!Array.isArray(group.points)) {
-      return false;
-    }
-
-    return group.points.every((point) => {
-      if (!point || typeof point !== "object" || Array.isArray(point)) {
-        return false;
-      }
-
-      return typeof point.id === "string" && validFiniteNumber(point.x) && validFiniteNumber(point.y);
-    });
-  });
 }
 
 async function rootPayload(storage) {
@@ -313,6 +274,7 @@ export function createApp({
 } = {}) {
   const app = express();
   const imageStorage = storage ?? createStorage({ initialRoot, selectRoot, dataDir });
+  const collagenSettings = createCollagenSettingsStore({ dataDir });
   const inferenceService = createInferenceService({ storage: imageStorage, fetchImpl, maxImagePixels });
   const distDir = path.join(rootDir, "dist");
   const indexPath = path.join(distDir, "index.html");
@@ -323,6 +285,15 @@ export function createApp({
   app.get("/api/health", (_request, response) => {
     response.json({ ok: true });
   });
+
+  app.get("/api/settings/collagen-density", asyncRoute(async (_request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    response.json(await collagenSettings.get());
+  }));
+  app.put("/api/settings/collagen-density", asyncRoute(async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    response.json(await collagenSettings.set(request.body));
+  }));
 
   app.get(
     "/api/root",
@@ -651,14 +622,27 @@ export function createApp({
   app.put(
     "/api/images/:id/bounds",
     asyncRoute(async (request, response) => {
-      if (!isValidBoundsPayload(request.body)) {
-        response.status(400).json({ error: "Invalid bounds payload." });
+      if (request.body?.rootPath !== undefined && request.body.rootPath !== imageStorage.getRoot()) {
+        response.status(409).json({
+          error: "The selected root has changed. Reload the image list before saving boundaries.",
+        });
         return;
       }
 
-      const bounds = await imageStorage.saveBounds(request.params.id, request.body);
+      response.json(await saveBoundsAndSynchronize(imageStorage, request.params.id, request.body));
+    }),
+  );
 
-      response.json({ bounds });
+  app.post(
+    "/api/images/:id/bounds/apply-all",
+    asyncRoute(async (request, response) => {
+      if (request.body?.rootPath !== undefined && request.body.rootPath !== imageStorage.getRoot()) {
+        response.status(409).json({
+          error: "The selected root has changed. Reload the image list before applying boundaries.",
+        });
+        return;
+      }
+      response.json(await applyBoundsToAll(imageStorage, request.params.id, request.body?.bounds, { maxImagePixels }));
     }),
   );
 
@@ -735,6 +719,12 @@ export function createApp({
         throw new ExportError("ROOT_UNSET", "Storage root has not been set.", 400);
       }
 
+      const excludedGroupIdsByImage = validateExportGroupExclusions({
+        excludedGroupIdsByImage: request.body?.excludedGroupIdsByImage,
+        rootPath: request.body?.rootPath,
+        snapshotRootPath: rootPath,
+      });
+
       const requestedImageId = request.body?.autoSavedImageId;
       if (requestedImageId !== undefined && requestedImageId !== null && typeof requestedImageId !== "string") {
         throw new ExportError("INVALID_IMAGE", "Export image id is invalid.", 400);
@@ -749,6 +739,7 @@ export function createApp({
       }
 
       const requestedColorMax = request.body?.estimatedCollagenColorMax;
+      const heatmapCellSizes = validateExportHeatmapCellSizes(request.body?.heatmapCellSizes);
       const estimatedCollagenColorMax = requestedColorMax === undefined
         ? COLLAGEN_DENSITY_DISPLAY_MAX
         : requestedColorMax;
@@ -760,6 +751,10 @@ export function createApp({
         );
       }
 
+      const calibration = await collagenSettings.get();
+      if (request.body?.calibrationRevision !== undefined) {
+        assertCalibrationRevision(request.body.calibrationRevision, calibration.revision);
+      }
       const now = new Date();
       const filename = datasetExportFilename(rootPath, now);
       const abortController = new AbortController();
@@ -776,7 +771,11 @@ export function createApp({
         storage: exportStorage,
         output: response,
         autoSavedImageId,
+        excludedGroupIdsByImage,
+        rootPath,
         estimatedCollagenColorMax,
+        heatmapCellSizes,
+        calibration,
         maxImagePixels,
         now: () => now,
         signal: abortController.signal,

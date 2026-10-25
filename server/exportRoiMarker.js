@@ -25,12 +25,14 @@ export function createRoiMarkerSvg(canvasWidth, canvasHeight, crop) {
   const markup = cropWidth === 1 || cropHeight === 1
     ? `<rect x="${x}" y="${y}" width="${cropWidth}" height="${cropHeight}" fill="${INNER_COLOR}"/>`
     : (() => {
-        const left = x + 0.5;
-        const top = y + 0.5;
-        const right = x + cropWidth - 0.5;
-        const bottom = y + cropHeight - 0.5;
+        const strokeWidth = Math.min(5, cropWidth - 1, cropHeight - 1);
+        const inset = strokeWidth / 2;
+        const left = x + inset;
+        const top = y + inset;
+        const right = x + cropWidth - inset;
+        const bottom = y + cropHeight - inset;
         const path = `M ${left} ${top} H ${right} V ${bottom} H ${left} Z`;
-        return `<path d="${path}" fill="none" stroke="${INNER_COLOR}" stroke-width="1" shape-rendering="crispEdges"/>`;
+        return `<path d="${path}" fill="none" stroke="${INNER_COLOR}" stroke-width="${strokeWidth}" stroke-dasharray="15 10" shape-rendering="crispEdges"/>`;
       })();
 
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">

@@ -31,3 +31,10 @@ test("renders a symmetric comparison scale", () => {
   expect(screen.getByLabelText("Heatmap scale")).toHaveTextContent("-0.125");
   expect(screen.getByLabelText("Heatmap scale")).toHaveTextContent("+0.125");
 });
+
+test("does not present an all-null comparison as zero change", () => {
+  const { container } = render(<HeatmapScale metric="collagen-density" comparison={{ maxAbs: 0, values: [null, null] }} />);
+  expect(screen.getByText("No finite comparison data")).toBeInTheDocument();
+  expect(container.querySelector(".heatmap-scale-labels")).toBeNull();
+  expect(container.querySelector(".heatmap-scale-bar")).toBeNull();
+});

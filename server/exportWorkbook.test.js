@@ -35,7 +35,7 @@ function workbookInput(overrides = {}) {
         },
       }],
     },
-    calibration: { slope: 0.1, intercept: 0 },
+    calibration: { modelId: "high-density", revision: 0 },
     autoSavedBounds: true,
     roiEntry: { status: "Included", path: "roi/T01_ROI_overview.png" },
     heatmapEntries: [{
@@ -76,10 +76,10 @@ test("writes five linked sheets with numeric ROI values and group colors", async
   expect(roi.getRow(1).values.slice(1)).toEqual([
     "ROI ID", "Group ID", "Group Name", "Group Color", "Analysis Mode", "ROI Label", "From px",
     "To px", "Area px", "Mask Pixels", "Pixel Density", "Estimated Collagen Density (mg/ml)",
-    "ROI Alignment", "Radial Alignment", "Circumferential Alignment", "Migration Axis Alignment", "Empty", "ROI Image",
+    "ROI Alignment", "Radial Alignment", "Circumferential Alignment", "Migration Axis Alignment", "Empty", "ROI Image", "Concentration Status",
   ]);
   expect(roi.views[0]).toMatchObject({ state: "frozen", ySplit: 1 });
-  expect(roi.autoFilter).toBe("A1:R2");
+  expect(roi.autoFilter).toBe("A1:S2");
   expect(roi.getCell("A2").value).toBe("G01-N");
   expect(roi.getCell("I2").value).toBe(200);
   expect(roi.getCell("J2").value).toBe(50);
@@ -119,6 +119,18 @@ test("keeps unavailable measurements blank and reports safe artifact details", a
   expect(roi.getCell("R2").value).toBe("Skipped: Invalid bounds.");
   expect(workbook.getWorksheet("Heatmap Index").getCell("L2").value).toBe("Skipped: Saved heatmap is stale.");
   expect(workbook.getWorksheet("Export Report").getColumn(2).values).toContain("Included");
+});
+
+test("retains the derived model baseline in the exported image summary", async () => {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(await createImageWorkbook(workbookInput()));
+  const summary = new Map();
+  workbook.getWorksheet("Image Summary").eachRow((row) => {
+    summary.set(row.getCell(1).value, row.getCell(2).value);
+  });
+  expect(summary.get("Model Y0")).toBeCloseTo(0.02, 12);
+  expect(summary.get("Model plateau")).toBe(0.2631);
+  expect(summary.get("Model K")).toBe(0.2662);
 });
 
 test("returns safe recovery text without leaking error details", () => {

@@ -361,7 +361,7 @@ test("renders matching parent and Subimage previews", async () => {
   expect([...subimage.data]).toEqual([89, 100, 111, 155, 166, 177]);
 });
 
-test("marks the crop with a one-pixel yellow outline", async () => {
+test("marks the crop with a dashed yellow outline", async () => {
   const raster = fixtureRaster(24, 24);
   const crop = { sourceWidth: 24, sourceHeight: 24, x: 6, y: 6, width: 12, height: 12 };
   const original = await sharp(await renderOriginalPreview(raster)).ensureAlpha().raw().toBuffer({

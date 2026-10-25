@@ -1,21 +1,25 @@
 import { constants as bufferConstants } from "node:buffer";
 import sharp from "sharp";
+import { heatmapAxisCellBounds, heatmapAxisCellCount, heatmapAxisCellIndex } from "../shared/heatmapGrid.js";
 import {
   COLLAGEN_DENSITY_DISPLAY_MAX,
   isCollagenDensityColorMax,
+  collagenDensityModelText,
 } from "../shared/collagenDensity.js";
 import {
   differenceColor,
   heatmapCompatibilityError,
-  heatmapMetricValue,
+  heatmapDisplayValue,
   infernoColor,
 } from "../src/lib/heatmap.js";
 import { loadImageHeatmap } from "./heatmapService.js";
 import { resolveMaxImagePixels } from "./imageProcessing.js";
 import { createRoiMarkerSvg } from "./exportRoiMarker.js";
 import { runSharpWithSignal } from "./sharpRender.js";
+import { EXPORT_NO_DATA_COLOR, exportCalibrationSnapshot, exportGridCalibration } from "./exportCalibration.js";
+import { DEFAULT_HEATMAP_CELL_SIZES } from "../shared/heatmapSettings.js";
 
-export const ESTIMATED_HEATMAP_CELL_SIZES = Object.freeze([20, 50, 100]);
+export const ESTIMATED_HEATMAP_CELL_SIZES = DEFAULT_HEATMAP_CELL_SIZES;
 
 const METRIC = "estimated-collagen-density";
 const METRIC_LABEL = "Estimated Collagen Density";
@@ -23,8 +27,8 @@ const UNIT = "mg/ml";
 const RGB_CHANNELS = 3;
 const RENDER_ABORT_CHECK_INTERVAL = 4_096;
 const ABSOLUTE_SCALE_LAYOUT = Object.freeze({
-  width: 220,
-  height: 360,
+  width: 440,
+  height: 440,
   barX: 28,
   barY: 40,
   barWidth: 32,
@@ -32,7 +36,7 @@ const ABSOLUTE_SCALE_LAYOUT = Object.freeze({
 });
 const COMPARISON_SCALE_LAYOUT = Object.freeze({
   width: 440,
-  height: 150,
+  height: 225,
   barX: 40,
   barY: 48,
   barWidth: 360,
@@ -52,22 +56,26 @@ async function yieldAfterRenderChunk(signal) {
 export async function planEstimatedHeatmapAssets({
   storage,
   images,
+  cellSizes = ESTIMATED_HEATMAP_CELL_SIZES,
   cropsByImage = new Map(),
   sourceDimensionsByImage = new Map(),
   estimatedCollagenColorMax = COLLAGEN_DENSITY_DISPLAY_MAX,
+  calibration,
   loadHeatmap = loadImageHeatmap,
   signal,
 }) {
+  calibration = exportCalibrationSnapshot(calibration).model;
   const collagenDensityMax = resolvedColorMax(estimatedCollagenColorMax);
   const descriptors = [];
   const comparisonDescriptors = [];
   const reportEntries = [];
   const availability = new Map();
-  const ranges = new Map(ESTIMATED_HEATMAP_CELL_SIZES.map((cellSize) => [cellSize, 0]));
+  const ranges = new Map(cellSizes.map((cellSize) => [cellSize, 0]));
+  const comparisonHasFiniteValues = new Map(cellSizes.map((cellSize) => [cellSize, false]));
 
   for (const image of images) {
     const crop = cropFor(cropsByImage, image);
-    for (const cellSize of ESTIMATED_HEATMAP_CELL_SIZES) {
+    for (const cellSize of cellSizes) {
       throwIfAborted(signal);
       try {
         const source = await loadHeatmap(storage, image.id, cellSize);
@@ -102,6 +110,7 @@ export async function planEstimatedHeatmapAssets({
           cellSize,
           crop: null,
           estimatedCollagenColorMax,
+          calibration,
         }));
         const cropReason = absoluteSubimageReason(crop, source);
         if (!cropReason) {
@@ -111,6 +120,7 @@ export async function planEstimatedHeatmapAssets({
             cellSize,
             crop,
             estimatedCollagenColorMax,
+            calibration,
           }));
         } else {
           reportEntries.push(skippedReportEntry({
@@ -146,7 +156,7 @@ export async function planEstimatedHeatmapAssets({
     const currentCrop = cropFor(cropsByImage, currentImage);
     const previousCrop = cropFor(cropsByImage, previousImage);
 
-    for (const cellSize of ESTIMATED_HEATMAP_CELL_SIZES) {
+    for (const cellSize of cellSizes) {
       throwIfAborted(signal);
       const currentAvailability = availability.get(sourceKey(currentImage.id, cellSize));
       const previousAvailability = availability.get(sourceKey(previousImage.id, cellSize));
@@ -196,8 +206,8 @@ export async function planEstimatedHeatmapAssets({
         continue;
       }
 
-      const currentValues = densityValues(current, collagenDensityMax);
-      const previousValues = densityValues(previous, collagenDensityMax);
+      const currentValues = densityValues(current, collagenDensityMax, calibration);
+      const previousValues = densityValues(previous, collagenDensityMax, calibration);
       const compatibilityError = heatmapCompatibilityError(current, previous);
       if (compatibilityError) {
         reportEntries.push(skippedReportEntry({
@@ -208,6 +218,8 @@ export async function planEstimatedHeatmapAssets({
           reason: compatibilityError,
         }));
       } else {
+        const values = fullComparisonValues(currentValues, previousValues);
+        const hasFiniteValues = values.some(Number.isFinite);
         comparisonDescriptors.push(comparisonDescriptor({
           kind: "comparison-full",
           currentImage,
@@ -217,10 +229,13 @@ export async function planEstimatedHeatmapAssets({
           currentCrop: null,
           previousCrop: null,
           estimatedCollagenMax: collagenDensityMax,
+          calibration,
+          hasFiniteValues,
         }));
+        comparisonHasFiniteValues.set(cellSize, comparisonHasFiniteValues.get(cellSize) || hasFiniteValues);
         ranges.set(cellSize, Math.max(
           ranges.get(cellSize),
-          fullComparisonMaxAbs(currentValues, previousValues),
+          finiteMaxAbs(values),
         ));
       }
 
@@ -239,6 +254,8 @@ export async function planEstimatedHeatmapAssets({
           reason: cropReason,
         }));
       } else {
+        const values = compactComparisonValues({ current, previous, currentCrop, previousCrop, currentValues, previousValues });
+        const hasFiniteValues = values.some(Number.isFinite);
         comparisonDescriptors.push(comparisonDescriptor({
           kind: "comparison-subimage",
           currentImage,
@@ -248,17 +265,13 @@ export async function planEstimatedHeatmapAssets({
           currentCrop,
           previousCrop,
           estimatedCollagenMax: collagenDensityMax,
+          calibration,
+          hasFiniteValues,
         }));
+        comparisonHasFiniteValues.set(cellSize, comparisonHasFiniteValues.get(cellSize) || hasFiniteValues);
         ranges.set(cellSize, Math.max(
           ranges.get(cellSize),
-          subimageComparisonMaxAbs({
-            current,
-            previous,
-            currentCrop,
-            previousCrop,
-            currentValues,
-            previousValues,
-          }),
+          finiteMaxAbs(values),
         ));
       }
     }
@@ -273,7 +286,7 @@ export async function planEstimatedHeatmapAssets({
     });
   }
 
-  return { descriptors, ranges, reportEntries };
+  return { descriptors, ranges, comparisonHasFiniteValues, reportEntries };
 }
 
 export async function hydrateEstimatedHeatmapAsset(
@@ -284,7 +297,8 @@ export async function hydrateEstimatedHeatmapAsset(
   const current = await loadHeatmap(storage, descriptor.currentImageId, descriptor.sourceCellSize);
   throwIfAborted(signal);
   const currentCrop = descriptor.currentCrop ?? fullCrop(current);
-  const currentValues = densityValues(current, descriptor.estimatedCollagenMax);
+  const model = exportCalibrationSnapshot(descriptor.calibration).model;
+  const currentValues = densityValues(current, descriptor.estimatedCollagenMax, model);
 
   if (!descriptor.kind.startsWith("comparison")) {
     const valueAt = boundedValueAt(
@@ -295,6 +309,8 @@ export async function hydrateEstimatedHeatmapAsset(
     return {
       ...descriptor,
       isComparison: false,
+      sourceHeatmap: descriptor.kind === "absolute-full" ? current : undefined,
+      gridCalibration: exportGridCalibration(current, model, descriptor.estimatedCollagenMax),
       values: compactDensityValues(current, currentCrop, currentValues),
       valueAt,
     };
@@ -303,7 +319,7 @@ export async function hydrateEstimatedHeatmapAsset(
   const previous = await loadHeatmap(storage, descriptor.previousImageId, descriptor.sourceCellSize);
   throwIfAborted(signal);
   const previousCrop = descriptor.previousCrop ?? fullCrop(previous);
-  const previousValues = densityValues(previous, descriptor.estimatedCollagenMax);
+  const previousValues = densityValues(previous, descriptor.estimatedCollagenMax, model);
   if (descriptor.kind === "comparison-full") {
     const compatibilityError = heatmapCompatibilityError(current, previous);
     if (compatibilityError) throw new Error(compatibilityError);
@@ -366,7 +382,7 @@ export async function renderEstimatedHeatmapAsset(asset, { signal, maxImagePixel
     const key = Number.isFinite(value) ? value : "no-data";
     let color = colorCache.get(key);
     if (!color) {
-      color = hexChannels(isComparison
+      color = hexChannels(!Number.isFinite(value) ? EXPORT_NO_DATA_COLOR : isComparison
         ? differenceColor(value, asset.maxAbs)
         : infernoColor(value, 0, colorMax));
       colorCache.set(key, color);
@@ -402,7 +418,7 @@ export async function renderHeatmapScaleAsset(input = {}) {
       const value = offset < half
         ? -maxAbs * (1 - offset / (half - 1))
         : maxAbs * ((offset - half) / (half - 1));
-      const color = hexChannels(differenceColor(value, maxAbs));
+      const color = hexChannels(input.hasFiniteValues === false ? EXPORT_NO_DATA_COLOR : differenceColor(value, maxAbs));
       for (let y = layout.barY; y < layout.barY + layout.barHeight; y += 1) {
         writeRgb(pixels, y * layout.width + layout.barX + offset, color);
       }
@@ -423,6 +439,8 @@ export async function renderHeatmapScaleAsset(input = {}) {
     colorMax,
     cellSize: input.cellSize,
     layout,
+    model: exportCalibrationSnapshot(input.calibration).model,
+    hasFiniteValues: input.hasFiniteValues !== false,
   });
   return sharp(pixels, { raw: { width: layout.width, height: layout.height, channels: 3 } })
     .composite([{ input: Buffer.from(labels) }])
@@ -431,7 +449,7 @@ export async function renderHeatmapScaleAsset(input = {}) {
     .toBuffer();
 }
 
-function absoluteDescriptor({ image, source, cellSize, crop, estimatedCollagenColorMax }) {
+function absoluteDescriptor({ image, source, cellSize, crop, estimatedCollagenColorMax, calibration }) {
   return {
     kind: crop ? "absolute-subimage" : "absolute-full",
     metric: METRIC,
@@ -449,6 +467,7 @@ function absoluteDescriptor({ image, source, cellSize, crop, estimatedCollagenCo
     previousCrop: null,
     colorRange: { min: 0, max: resolvedColorMax(estimatedCollagenColorMax) },
     estimatedCollagenMax: resolvedColorMax(estimatedCollagenColorMax),
+    calibration,
     ...heatmapMetadata(source),
   };
 }
@@ -462,6 +481,8 @@ function comparisonDescriptor({
   currentCrop,
   previousCrop,
   estimatedCollagenMax,
+  calibration,
+  hasFiniteValues,
 }) {
   return {
     kind,
@@ -479,12 +500,15 @@ function comparisonDescriptor({
     currentCrop: currentCrop ? { ...currentCrop } : null,
     previousCrop: previousCrop ? { ...previousCrop } : null,
     estimatedCollagenMax,
+    calibration,
+    hasFiniteValues,
     ...heatmapMetadata(source),
   };
 }
 
 function heatmapMetadata(source) {
   return {
+    gridAlignment: source.gridAlignment ?? "top-left",
     sourceWidth: source.width,
     sourceHeight: source.height,
     cellWidth: source.cellWidth,
@@ -494,8 +518,8 @@ function heatmapMetadata(source) {
   };
 }
 
-function densityValues(source, collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX) {
-  return source.cells.map((cell) => heatmapMetricValue(cell, METRIC, collagenDensityMax));
+function densityValues(source, collagenDensityMax = COLLAGEN_DENSITY_DISPLAY_MAX, model) {
+  return source.cells.map((cell) => heatmapDisplayValue(cell, METRIC, collagenDensityMax, model));
 }
 
 function compactDensityValues(source, crop, densityByCell = densityValues(source)) {
@@ -546,14 +570,6 @@ function fullComparisonValues(currentValues, previousValues) {
   return currentValues.map((value, index) => finiteDifference(value, previousValues[index]));
 }
 
-function fullComparisonMaxAbs(currentValues, previousValues) {
-  return finiteMaxAbs(fullComparisonValues(currentValues, previousValues));
-}
-
-function subimageComparisonMaxAbs(input) {
-  return finiteMaxAbs(compactComparisonValues(input));
-}
-
 function comparisonBoundaryOffsets({ current, previous, currentCrop, previousCrop }) {
   return {
     xOffsets: mergeOffsets(
@@ -572,11 +588,12 @@ function sourceBoundaryOffsets(source, crop, positionKey, lengthKey, cellSizeKey
   const start = crop[positionKey];
   const length = crop[lengthKey];
   const cellSize = source[cellSizeKey];
-  for (
-    let boundary = (Math.floor(start / cellSize) + 1) * cellSize;
-    boundary < start + length;
-    boundary += cellSize
-  ) {
+  const sourceLength = source[lengthKey];
+  const count = heatmapAxisCellCount(sourceLength, cellSize, source.gridAlignment);
+  const firstIndex = heatmapAxisCellIndex(start, sourceLength, cellSize, source.gridAlignment);
+  for (let index = firstIndex + 1; index < count; index += 1) {
+    const { start: boundary } = heatmapAxisCellBounds(index, sourceLength, cellSize, source.gridAlignment);
+    if (boundary >= start + length) break;
     offsets.push(boundary - start);
   }
   return offsets;
@@ -593,8 +610,9 @@ function densityAt(source, densityByCell, x, y) {
   ) {
     return null;
   }
-  const column = Math.floor(x / source.cellWidth);
-  const row = Math.floor(y / source.cellHeight);
+  const column = heatmapAxisCellIndex(x, source.width, source.cellWidth, source.gridAlignment);
+  const row = heatmapAxisCellIndex(y, source.height, source.cellHeight, source.gridAlignment);
+  if (column < 0 || row < 0) return null;
   return densityByCell[row * source.columns + column] ?? null;
 }
 
@@ -760,7 +778,12 @@ function imageLabel(image) {
   return String(image?.imageFolder ?? image?.id ?? "image");
 }
 
-function scaleLabelsSvg({ isComparison, maxAbs, colorMax, cellSize, layout }) {
+function scaleLabelsSvg({ isComparison, maxAbs, colorMax, cellSize, layout, model, hasFiniteValues }) {
+  const legendY = isComparison ? 152 : 370;
+  const legend = `<rect x="28" y="${legendY - 10}" width="12" height="12" fill="${EXPORT_NO_DATA_COLOR}"/>
+  <text class="tick" x="46" y="${legendY}">No data (invalid or empty)</text>
+  <text class="tick" x="28" y="${legendY + 20}">${model.label}: ${collagenDensityModelText(model).replace("Area Fraction", "AF").replace("Collagen Density", "x")}</text>
+  ${isComparison ? "" : `<text class="tick" x="28" y="${legendY + 40}">Top color: above Max or model range exceeded</text>`}`;
   if (isComparison) {
     const centerX = layout.barX + layout.barWidth / 2;
     const rightX = layout.barX + layout.barWidth;
@@ -770,10 +793,12 @@ function scaleLabelsSvg({ isComparison, maxAbs, colorMax, cellSize, layout }) {
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}">
   <style>text { font-family: Arial, sans-serif; fill: #111827; } .title { font-size: 13px; font-weight: 700; } .tick { font-size: 12px; }</style>
   <text class="title" x="${layout.width / 2}" y="20" text-anchor="middle">${title}</text>
-  <text class="tick" x="${layout.barX}" y="100" text-anchor="middle">-${formatScaleNumber(maxAbs)}</text>
+  ${hasFiniteValues ? `<text class="tick" x="${layout.barX}" y="100" text-anchor="middle">-${formatScaleNumber(maxAbs)}</text>
   <text class="tick" x="${centerX}" y="100" text-anchor="middle">0</text>
-  <text class="tick" x="${rightX}" y="100" text-anchor="middle">+${formatScaleNumber(maxAbs)}</text>
+  <text class="tick" x="${rightX}" y="100" text-anchor="middle">+${formatScaleNumber(maxAbs)}</text>`
+    : `<text class="tick" x="${centerX}" y="100" text-anchor="middle">No data</text>`}
   <text class="title" x="${layout.width / 2}" y="128" text-anchor="middle">mg/ml</text>
+  ${legend}
 </svg>`;
   }
 
@@ -785,6 +810,7 @@ function scaleLabelsSvg({ isComparison, maxAbs, colorMax, cellSize, layout }) {
   <text class="tick" x="${rightX}" y="184">${formatScaleNumber(colorMax / 2)}</text>
   <text class="tick" x="${rightX}" y="320">0</text>
   <text class="title" x="${layout.width / 2}" y="348" text-anchor="middle">mg/ml</text>
+  ${legend}
 </svg>`;
 }
 

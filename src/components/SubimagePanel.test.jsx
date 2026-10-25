@@ -21,8 +21,6 @@ function renderPanel(overrides = {}) {
   const callbacks = handlers();
   const props = {
     activeImageName: "T01",
-    templateOwnerName: "T01",
-    isTemplateOwner: true,
     hasSubimage: false,
     crop,
     dirty: true,
@@ -61,20 +59,17 @@ describe("SubimagePanel", () => {
     expect(callbacks.onSetCrop).toHaveBeenCalledTimes(1);
   });
 
-  test("identifies a later image and its separate template owner", () => {
+  test("offers crop selection on a later image without a first-image owner label", () => {
     const { callbacks } = renderPanel({
       activeImageName: "T02",
-      isTemplateOwner: false,
-      canCreateMissing: false,
-      canSetCrop: false,
     });
 
     expect(screen.getByText("T02")).toBeInTheDocument();
-    expect(screen.getByText("Template: T01")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
+    expect(screen.queryByText("Template: T01")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
-    expect(callbacks.onSetCrop).not.toHaveBeenCalled();
+    expect(callbacks.onSetCrop).toHaveBeenCalledTimes(1);
   });
 
   test("enables saving a dirty locked crop", () => {

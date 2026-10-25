@@ -2,17 +2,13 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import sharp from "sharp";
-import { renderHeatmapFigure } from "./exportHeatmaps.js";
+import { heatmapFigureMetadata, renderHeatmapFigure } from "./exportHeatmaps.js";
 import { discoverHeatmapBundles, generateHeatmapBatch } from "./heatmapService.js";
 import { readGrey16RawFromImage } from "./imageProcessing.js";
 import { sharpPath } from "./sharpPath.js";
 import { infernoColor } from "../src/lib/heatmap.js";
 
 const DEFAULT_CELL_SIZES = Object.freeze([20, 50, 100]);
-const DEFAULT_CALIBRATION = Object.freeze({
-  slope: 0.069676956982087,
-  intercept: 0.067893820336777,
-});
 const COLORBAR_WIDTH = 180;
 const COLORBAR_HEIGHT = 390;
 const BAR_X = 24;
@@ -119,7 +115,7 @@ export async function renderPixelDensityColorbarPng() {
   return sharp(Buffer.from(svg)).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
 }
 
-function pixelDensityFigure(imageFolder, heatmap) {
+export function pixelDensityFigure(imageFolder, heatmap) {
   return {
     kind: "absolute",
     metric: "pixel-density",
@@ -127,13 +123,9 @@ function pixelDensityFigure(imageFolder, heatmap) {
     unit: "ratio",
     currentImage: imageFolder,
     previousImage: null,
-    cellWidth: heatmap.cellWidth,
-    cellHeight: heatmap.cellHeight,
-    columns: heatmap.columns,
-    rows: heatmap.rows,
+    ...heatmapFigureMetadata(heatmap),
     values: heatmap.cells.map((cell) => cell.pixelDensity),
     colorRange: { min: 0, max: 1 },
-    calibration: DEFAULT_CALIBRATION,
   };
 }
 

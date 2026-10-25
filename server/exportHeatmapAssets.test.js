@@ -87,6 +87,63 @@ function pixelAt(decoded, x, y) {
   return [...decoded.data.subarray(offset, offset + 3)];
 }
 
+function centeredMap() {
+  const starts = [0, 1, 5, 9];
+  const sizes = [1, 4, 4, 1];
+  return { width: 10, height: 10, cellWidth: 4, cellHeight: 4, columns: 4, rows: 4,
+    gridAlignment: "center", cells: starts.flatMap((y, row) => starts.map((x, column) => ({
+      x, y, row, column, width: sizes[column], height: sizes[row],
+      areaPx: sizes[column] * sizes[row], pixelDensity: row === 1 && column === 1 ? 1 : 0,
+    }))) };
+}
+
+test("exports centered full and cropped heatmaps using real horizontal and vertical cell boundaries", async () => {
+  const source = centeredMap();
+  const loadHeatmap = async () => source;
+  const full = await hydrateEstimatedHeatmapAsset({ kind: "absolute-full", currentImageId: "T01",
+    sourceCellSize: 4, width: 10, height: 10, estimatedCollagenMax: 3,
+    colorRange: { min: 0, max: 3 } }, { loadHeatmap });
+  expect(full.values).toEqual([0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  expect(full.gridCalibration.gridAlignment).toBe("center");
+  const decoded = await sharp(await renderEstimatedHeatmapAsset(full)).raw().toBuffer({ resolveWithObject: true });
+  expect(pixelAt(decoded, 1, 1)).toEqual([252, 255, 164]);
+  expect(pixelAt(decoded, 4, 4)).toEqual([252, 255, 164]);
+  expect(pixelAt(decoded, 0, 1)).toEqual([0, 0, 4]);
+  expect(pixelAt(decoded, 1, 0)).toEqual([0, 0, 4]);
+  expect(pixelAt(decoded, 5, 4)).toEqual([0, 0, 4]);
+  expect(pixelAt(decoded, 4, 5)).toEqual([0, 0, 4]);
+
+  const cropped = await hydrateEstimatedHeatmapAsset({ kind: "absolute-subimage", currentImageId: "T01",
+    sourceCellSize: 4, width: 4, height: 4, currentCrop: { x: 3, y: 3, width: 4, height: 4 },
+    estimatedCollagenMax: 3, colorRange: { min: 0, max: 3 } }, { loadHeatmap });
+  expect(cropped.values).toEqual([3, 0, 0, 0]);
+  expect(cropped.valueAt(1, 1)).toBe(3);
+  expect(cropped.valueAt(2, 1)).toBe(0);
+  expect(cropped.valueAt(1, 2)).toBe(0);
+});
+
+test("centers both axes when sampling independent comparison crops and planning their scale", async () => {
+  const current = centeredMap();
+  const previous = centeredMap();
+  previous.cells.forEach((cell) => { cell.pixelDensity = 0; });
+  const images = [image("T01"), image("T02")];
+  const loadHeatmap = async (_storage, id) => id === "T01" ? previous : current;
+  const cropsByImage = new Map([
+    ["T01", { sourceWidth: 10, sourceHeight: 10, x: 0, y: 0, width: 4, height: 4 }],
+    ["T02", { sourceWidth: 10, sourceHeight: 10, x: 3, y: 3, width: 4, height: 4 }],
+  ]);
+  const plan = await planEstimatedHeatmapAssets({ images, cellSizes: [4], estimatedCollagenColorMax: 3,
+    cropsByImage, sourceDimensionsByImage: new Map(images.map(({ id }) => [id, { width: 10, height: 10 }])), loadHeatmap });
+  expect(plan.ranges.get(4)).toBe(3);
+  const descriptor = plan.descriptors.find(({ kind }) => kind === "comparison-subimage");
+  const asset = await hydrateEstimatedHeatmapAsset(descriptor, { loadHeatmap });
+  expect(asset.values).toEqual([3, 3, 0, 3, 3, 0, 0, 0, 0]);
+  const decoded = await sharp(await renderEstimatedHeatmapAsset(asset)).raw().toBuffer({ resolveWithObject: true });
+  expect(pixelAt(decoded, 1, 1)).toEqual([220, 38, 38]);
+  expect(pixelAt(decoded, 2, 1)).toEqual([248, 250, 252]);
+  expect(pixelAt(decoded, 1, 2)).toEqual([248, 250, 252]);
+});
+
 describe("estimated collagen heatmap asset planning", () => {
   test("plans lightweight estimated-density assets and current-minus-previous pairs only", async () => {
     const images = [image("T01"), image("T02"), image("T03")];
@@ -468,7 +525,7 @@ describe("estimated collagen heatmap asset rendering", () => {
     expect(pixelAt(decoded, 2, 0)).toEqual(rgb(differenceColor(2, 2)));
   });
 
-  test("renders a separate one-pixel yellow ROI-marked full heatmap", async () => {
+  test("renders a separate dashed yellow ROI-marked full heatmap", async () => {
     const asset = {
       kind: "absolute-full",
       width: 24,
@@ -631,7 +688,7 @@ describe("estimated collagen heatmap asset rendering", () => {
       resolveWithObject: true,
     });
 
-    expect(decoded.info).toMatchObject({ width: 220, height: 360, channels: 3 });
+    expect(decoded.info).toMatchObject({ width: 440, height: 440, channels: 3 });
     expect(pixelAt(decoded, 28, 40)).toEqual(rgb(infernoColor(8, 0, 8)));
     expect(pixelAt(decoded, 28, 319)).toEqual(rgb(infernoColor(0, 0, 8)));
     expect(pixelAt(decoded, 0, 0)).toEqual([255, 255, 255]);
@@ -654,7 +711,7 @@ describe("estimated collagen heatmap asset rendering", () => {
       maxAbs: 2,
     })).raw().toBuffer({ resolveWithObject: true });
 
-    expect(decoded.info).toMatchObject({ width: 440, height: 150, channels: 3 });
+    expect(decoded.info).toMatchObject({ width: 440, height: 225, channels: 3 });
     expect(pixelAt(decoded, 40, 48)).toEqual(rgb(differenceColor(-2, 2)));
     expect(pixelAt(decoded, 219, 48)).toEqual(rgb(differenceColor(0, 2)));
     expect(pixelAt(decoded, 399, 48)).toEqual(rgb(differenceColor(2, 2)));

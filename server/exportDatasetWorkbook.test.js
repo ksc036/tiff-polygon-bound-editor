@@ -91,7 +91,7 @@ function rowValues(row, columnCount) {
 test("records crop dimensions and recoverable skips", async () => {
   const workbook = await loadWorkbook(workbookInput());
 
-  expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual(["Subimages", "Export Report"]);
+  expect(workbook.worksheets.map((sheet) => sheet.name)).toEqual(["Subimages", "Export Report", "Calibration"]);
 
   const subimages = workbook.getWorksheet("Subimages");
   expect(rowValues(subimages.getRow(1), 9)).toEqual([

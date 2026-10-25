@@ -292,6 +292,66 @@ describe("createApp", () => {
     expect(archive.files.some((file) => file.path.endsWith("/statistics/T01_statistics.xlsx"))).toBe(true);
   });
 
+  test.each([null, [], "groups", 1, { T01: null }, { T01: "cell" }, { T01: [1] }, { T01: [""] }, { "": [] }])(
+    "rejects malformed export group exclusions %j before streaming",
+    async (excludedGroupIdsByImage) => {
+      const appRoot = await createTempRoot();
+      const imageRoot = await createTempRoot();
+      await writeImage(imageRoot, "T01");
+      const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+        method: "POST",
+        body: { rootPath: imageRoot, excludedGroupIdsByImage },
+      });
+      expect(response.status).toBe(400);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("content-disposition")).toBeNull();
+      expect(await response.json()).toMatchObject({ error: expect.stringMatching(/group.*exclusions/i) });
+    },
+  );
+
+  test.each([undefined, null, 123, "different-root"])(
+    "rejects export exclusions with a nonmatching root %j before streaming",
+    async (rootPath) => {
+      const appRoot = await createTempRoot();
+      const imageRoot = await createTempRoot();
+      await writeImage(imageRoot, "T01");
+      const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+        method: "POST",
+        body: { rootPath, excludedGroupIdsByImage: {} },
+      });
+      expect(response.status).toBe(409);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.headers.get("content-disposition")).toBeNull();
+      expect(await response.json()).toMatchObject({ error: expect.stringMatching(/root/i) });
+    },
+  );
+
+  test("passes per-image export exclusions to the ZIP using the captured root", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    const nextRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01", "frame001.tif");
+    await writeImage(nextRoot, "T02", "other.tif");
+    const bounds = validBounds("T01");
+    bounds.groups[0].analysisMode = "inside";
+    await writeBounds(imageRoot, "T01", bounds);
+    const storage = createStorage({ initialRoot: imageRoot });
+    const createSnapshot = storage.createSnapshot;
+    storage.createSnapshot = () => {
+      const snapshot = createSnapshot();
+      storage.setRoot(nextRoot);
+      return snapshot;
+    };
+    const response = await jsonRequest(createApp({ rootDir: appRoot, storage }), "/api/export", {
+      method: "POST",
+      body: { rootPath: imageRoot, excludedGroupIdsByImage: { T01: ["cell"] } },
+    });
+    expect(response.status).toBe(200);
+    const archive = await unzipper.Open.buffer(Buffer.from(await response.arrayBuffer()));
+    expect(archive.files.some((file) => file.path.endsWith("/image/frame001.tif"))).toBe(true);
+    expect(archive.files.some((file) => file.path.endsWith("_ROI_overview.png"))).toBe(false);
+  });
+
   test("uses one root snapshot for validation, naming, and ZIP contents", async () => {
     const appRoot = await createTempRoot();
     const firstRoot = await createTempRoot();
@@ -419,6 +479,35 @@ describe("createApp", () => {
       });
     },
   );
+
+  test.each([[], [0], [1.5], [4097], ["30"], null, [1, 2, 3, 4]].map((value) => [value]))(
+    "rejects invalid export heatmap sizes %j before streaming",
+    async (heatmapCellSizes) => {
+      const appRoot = await createTempRoot();
+      const imageRoot = await createTempRoot();
+      await writeImage(imageRoot, "T01");
+      const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+        method: "POST", body: { heatmapCellSizes },
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "Choose one to three heatmap cell sizes, each an integer from 1 to 4096 px.",
+      });
+    },
+  );
+
+  test("forwards custom heatmap sizes to ZIP scales and deduplicates equal sizes", async () => {
+    const appRoot = await createTempRoot();
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "T01");
+    const response = await jsonRequest(createApp({ rootDir: appRoot, initialRoot: imageRoot }), "/api/export", {
+      method: "POST", body: { heatmapCellSizes: [30, 60, 30] },
+    });
+    expect(response.status).toBe(200);
+    const archive = await unzipper.Open.buffer(Buffer.from(await response.arrayBuffer()));
+    const scales = archive.files.filter((file) => file.path.includes("/scales/comparison_")).map((file) => path.basename(file.path));
+    expect(scales).toEqual(["comparison_30x30.png", "comparison_60x60.png"]);
+  });
 
   test("serves health status", async () => {
     const rootDir = await createTempRoot();
@@ -908,6 +997,7 @@ describe("createApp", () => {
     const appRoot = await createTempRoot();
     const imageRoot = await createTempRoot();
     await writeImage(imageRoot, "selected-stack-sequence_T01", "frame001.tif");
+    await writeFile(path.join(imageRoot, "selected-stack-sequence_T01", "image", "frame001.tif"), "unreadable TIFF");
     const body = {
       width: 12,
       height: 34,
@@ -922,7 +1012,9 @@ describe("createApp", () => {
     );
 
     expect(response.status).toBe(200);
-    const { bounds } = await response.json();
+    const { bounds, synchronized, failed } = await response.json();
+    expect(synchronized).toEqual([]);
+    expect(failed).toEqual([]);
     expect(bounds).toMatchObject({
       schemaVersion: 1,
       ...body,
@@ -1048,6 +1140,420 @@ describe("createApp", () => {
     await expect(
       readFile(path.join(imageRoot, "selected-stack-sequence_T01", "bound", "selected-stack-sequence_T01.bounds.json")),
     ).rejects.toThrow();
+  });
+
+  test("apply-all saves linked source groups and appends copies with fresh local IDs", async () => {
+    const imageRoot = await createTempRoot();
+    for (const id of ["source", "target", "empty"]) await writeImage(imageRoot, id);
+    const storage = createStorage({ initialRoot: imageRoot });
+    const sourcePath = storage.imagePaths("source").boundsPath;
+    await writeBounds(imageRoot, "source", { groups: [{ id: "saved-source", points: [] }] });
+    const existing = {
+      id: "cell", name: "Existing", color: "#123456", analysisMode: "inside",
+      roiLimits: { nearPx: 1, midPx: 2, farPx: 3 }, custom: { keep: true },
+      points: [{ id: "p1", x: 0.25, y: 0.75, custom: "keep" }],
+    };
+    await writeBounds(imageRoot, "target", { width: 2, height: 2, groups: [existing] });
+    const bounds = validBounds("source");
+    Object.assign(bounds.groups[0], {
+      name: "Unsaved", color: "#abcdef", analysisMode: "outside",
+      roiLimits: { nearPx: 2, midPx: 4, farPx: 6 },
+      migrationVector: { start: { x: 0.125, y: 0.25 }, end: { x: 1.5, y: 1.75 } },
+    });
+    bounds.groups[0].points[0].x = -0.125;
+    bounds.groups.push({ id: "whole", name: "Whole image", analysisMode: "inside", points: [] });
+    const response = await jsonRequest(createApp({ rootDir: imageRoot, storage }),
+      "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds } });
+
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result).toEqual({ bounds: expect.any(Object), added: ["empty", "target"], updated: [], failed: [] });
+    expect(JSON.parse(await readFile(sourcePath, "utf8"))).toEqual(result.bounds);
+    expect(result.bounds.groups).toHaveLength(2);
+    expect(new Set(result.bounds.groups.map(({ sharedBoundaryId }) => sharedBoundaryId)).size).toBe(2);
+    for (const group of result.bounds.groups) expect(group.sharedBoundaryId).toEqual(expect.any(String));
+    const allIds = ["cell", "p1", "p2", "p3", "whole"];
+    for (const id of ["target", "empty"]) {
+      const saved = await storage.loadBounds(id);
+      const offset = id === "target" ? 1 : 0;
+      expect(saved).toMatchObject({ width: 2, height: 2, connectionMode: "input-order-cycle" });
+      expect(saved.groups).toHaveLength(offset + 2);
+      if (offset) expect(saved.groups[0]).toEqual(existing);
+      saved.groups.slice(offset).forEach((group, index) => {
+        const source = result.bounds.groups[index];
+        expect({ ...group, id: source.id, points: group.points.map((point, pointIndex) => ({
+          ...point, id: source.points[pointIndex].id,
+        })) }).toEqual(source);
+        allIds.push(group.id, ...group.points.map((point) => point.id));
+      });
+    }
+    expect(new Set(allIds).size).toBe(allIds.length);
+  });
+
+  test("apply-all reports mismatched, unreadable and corrupt targets without changing their bounds", async () => {
+    const imageRoot = await createTempRoot();
+    for (const id of ["source", "good", "corrupt", "invalid", "unreadable"]) await writeImage(imageRoot, id);
+    await writeSizedImage(imageRoot, "mismatch", { width: 3, height: 2 });
+    const storage = createStorage({ initialRoot: imageRoot });
+    for (const id of ["mismatch", "unreadable", "corrupt", "invalid"]) {
+      await writeBounds(imageRoot, id, validBounds(id));
+    }
+    await writeFile(storage.imagePaths("corrupt").boundsPath, "{broken bounds json");
+    await writeFile(storage.imagePaths("invalid").boundsPath, '{"groups":null}');
+    await writeFile(storage.imagePaths("unreadable").imagePath, "not a TIFF");
+    const before = new Map();
+    for (const id of ["mismatch", "unreadable", "corrupt", "invalid"]) {
+      before.set(id, await readFile(storage.imagePaths(id).boundsPath, "utf8"));
+    }
+    const response = await jsonRequest(createApp({ rootDir: imageRoot, storage }),
+      "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds: validBounds("source") } });
+
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.added).toEqual(["good"]);
+    expect(result.failed).toEqual([
+      { imageId: "corrupt", message: expect.stringMatching(/bounds.*json.*invalid/i) },
+      { imageId: "invalid", message: expect.stringMatching(/bounds.*invalid/i) },
+      { imageId: "mismatch", message: expect.stringMatching(/dimensions.*match/i) },
+      { imageId: "unreadable", message: expect.stringMatching(/read.*image/i) },
+    ]);
+    expect(JSON.stringify(result)).not.toContain(imageRoot);
+    for (const [id, contents] of before) {
+      expect(await readFile(storage.imagePaths(id).boundsPath, "utf8")).toBe(contents);
+    }
+    expect(await storage.loadBounds("source")).toEqual(result.bounds);
+    expect(result.bounds.groups[0].sharedBoundaryId).toEqual(expect.any(String));
+  });
+
+  test("apply-all rejects a request from a browser still viewing a different root", async () => {
+    const oldRoot = await createTempRoot();
+    const newRoot = await createTempRoot();
+    for (const root of [oldRoot, newRoot]) {
+      await writeImage(root, "source");
+      await writeImage(root, "target");
+    }
+    const storage = createStorage({ initialRoot: newRoot });
+    const response = await jsonRequest(createApp({ rootDir: newRoot, storage }),
+      "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds: validBounds("source"), rootPath: oldRoot } });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "The selected root has changed. Reload the image list before applying boundaries." });
+    await expect(readFile(storage.imagePaths("target").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.each([
+    undefined, null, [], {}, { groups: null }, { groups: [null] },
+    { groups: [{ points: [] }] }, { groups: [{ id: "g", points: [{ x: 1, y: 2 }] }] },
+    { groups: [{ id: "g", points: [{ id: "p", x: "1", y: 2 }] }] },
+    { groups: [{ id: "g", points: [{ id: "p", x: null, y: 2 }] }] },
+    { groups: [{ id: "g", name: 3, points: [] }] },
+    { groups: [], width: "2" }, { groups: [], width: -1 }, { groups: [], height: 1.5 },
+    { groups: [], connectionMode: "manual" },
+  ])("apply-all rejects malformed bounds %# without any writes", async (bounds) => {
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "source");
+    await writeImage(imageRoot, "target");
+    const storage = createStorage({ initialRoot: imageRoot });
+    const response = await jsonRequest(createApp({ rootDir: imageRoot, storage }),
+      "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds } });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Invalid bounds payload." });
+    for (const id of ["source", "target"]) {
+      await expect(readFile(storage.imagePaths(id).boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
+  test("apply-all rejects source dimensions inconsistent with the in-memory bounds", async () => {
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "source");
+    await writeImage(imageRoot, "target");
+    const storage = createStorage({ initialRoot: imageRoot });
+    const response = await jsonRequest(createApp({ rootDir: imageRoot, storage }),
+      "/api/images/source/bounds/apply-all", {
+        method: "POST", body: { bounds: { ...validBounds("source"), width: 3 } },
+      });
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "Source image dimensions do not match the bounds." });
+    await expect(readFile(storage.imagePaths("target").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("apply-all scans fresh images and stays on its starting root during a root switch", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeImage(firstRoot, "source");
+    await writeImage(secondRoot, "source");
+    await writeImage(secondRoot, "target");
+    const storage = createStorage({ initialRoot: firstRoot });
+    await writeImage(firstRoot, "target");
+    const createContext = storage.createBoundaryMutationContext?.bind(storage);
+    storage.createBoundaryMutationContext = () => {
+      const context = createContext();
+      storage.setRoot(secondRoot);
+      return context;
+    };
+    const response = await jsonRequest(createApp({ rootDir: firstRoot, storage }),
+      "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds: validBounds("source") } });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ bounds: expect.any(Object), added: ["target"], updated: [], failed: [] });
+    expect(storage.getRoot()).toBe(secondRoot);
+    expect((await createStorage({ initialRoot: firstRoot }).loadBounds("target")).groups).toHaveLength(1);
+    await expect(readFile(storage.imagePaths("target").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("apply-all allows omitted dimensions, leaves empty targets untouched, and validates source IDs", async () => {
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "source");
+    await writeImage(imageRoot, "target");
+    const storage = createStorage({ initialRoot: imageRoot });
+    const app = createApp({ rootDir: imageRoot, storage });
+    const emptyResponse = await jsonRequest(app, "/api/images/source/bounds/apply-all", {
+      method: "POST", body: { bounds: { groups: [] } },
+    });
+    expect(emptyResponse.status).toBe(200);
+    expect(await emptyResponse.json()).toMatchObject({ bounds: { groups: [] }, added: [], updated: [], failed: [] });
+    await expect(readFile(storage.imagePaths("target").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+    const missingResponse = await jsonRequest(app, "/api/images/missing/bounds/apply-all", {
+      method: "POST", body: { bounds: validBounds("source") },
+    });
+    expect(missingResponse.status).toBe(404);
+    expect(await missingResponse.json()).toEqual({ error: "Image not found." });
+    const response = await jsonRequest(app, "/api/images/source/bounds/apply-all", {
+      method: "POST", body: { bounds: { groups: validBounds("source").groups } },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ bounds: expect.any(Object), added: ["target"], updated: [], failed: [] });
+    expect(await storage.loadBounds("target")).toMatchObject({ width: 2, height: 2 });
+  });
+
+  test("overlapping apply-all requests retain distinct additions and recover corrupt saved source bounds", async () => {
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "source");
+    await writeImage(imageRoot, "target");
+    const storage = createStorage({ initialRoot: imageRoot });
+    await writeBounds(imageRoot, "source", {});
+    const sourcePath = storage.imagePaths("source").boundsPath;
+    await writeFile(sourcePath, "{corrupt source must not be read");
+    const legacyGroup = { points: [{ x: 0.5, y: 0.75 }], custom: "preserve legacy" };
+    await writeBounds(imageRoot, "target", { groups: [legacyGroup] });
+    const app = createApp({ rootDir: imageRoot, storage });
+    const responses = await Promise.all(["first", "second"].map((name) => jsonRequest(app,
+      "/api/images/source/bounds/apply-all", { method: "POST", body: {
+        bounds: { ...validBounds("source"), groups: [{ ...validBounds("source").groups[0], id: name, name }] },
+      } })));
+
+    for (const response of responses) {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ bounds: expect.any(Object), added: ["target"], updated: [], failed: [] });
+    }
+    const { groups } = await storage.loadBounds("target");
+    expect(groups).toHaveLength(3);
+    expect(groups[0]).toEqual(legacyGroup);
+    expect(groups.slice(1).map(({ name }) => name).sort()).toEqual(["first", "second"]);
+    const ids = groups.slice(1).flatMap((group) => [group.id, ...group.points.map(({ id }) => id)]);
+    expect(new Set(ids).size).toBe(8);
+    const savedSource = JSON.parse(await readFile(sourcePath, "utf8"));
+    expect(savedSource.groups).toHaveLength(1);
+    expect(groups.some((group) => group.sharedBoundaryId === savedSource.groups[0].sharedBoundaryId)).toBe(true);
+  });
+
+  test("apply-all rejects unreadable sources before writing any target", async () => {
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "source");
+    await writeImage(imageRoot, "target");
+    const storage = createStorage({ initialRoot: imageRoot });
+    await writeFile(storage.imagePaths("source").imagePath, "not a TIFF");
+    const response = await jsonRequest(createApp({ rootDir: imageRoot, storage }),
+      "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds: validBounds("source") } });
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "Unable to read image dimensions." });
+    await expect(readFile(storage.imagePaths("target").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.skipIf(process.platform !== "win32")("apply-all reads TIFF metadata and writes bounds under long Windows paths", async () => {
+    const rootDir = await createTempRoot();
+    const imageRoot = path.join(rootDir, "nested-".repeat(12), "long-".repeat(18), "dataset");
+    await writeImage(imageRoot, "source");
+    await writeImage(imageRoot, "target");
+    const storage = createStorage({ initialRoot: imageRoot });
+    expect(storage.imagePaths("target").imagePath.length).toBeGreaterThan(260);
+    const response = await jsonRequest(createApp({ rootDir, storage }),
+      "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds: validBounds("source") } });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ bounds: expect.any(Object), added: ["target"], updated: [], failed: [] });
+    expect((await storage.loadBounds("target")).groups).toHaveLength(1);
+  });
+
+  test("reapplying linked groups updates geometry without duplicating or replacing target settings", async () => {
+    const imageRoot = await createTempRoot();
+    for (const id of ["source", "target"]) await writeImage(imageRoot, id);
+    const storage = createStorage({ initialRoot: imageRoot });
+    const app = createApp({ rootDir: imageRoot, storage });
+    const original = validBounds("source");
+    original.groups[0].sharedBoundaryId = "client-cannot-assign-link";
+    const first = await jsonRequest(app, "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds: original } });
+    const initial = await first.json();
+    expect(initial.bounds?.groups[0].sharedBoundaryId).toEqual(expect.any(String));
+    expect(initial.bounds.groups[0].sharedBoundaryId).not.toBe("client-cannot-assign-link");
+    const target = await storage.loadBounds("target");
+    Object.assign(target.groups[0], { name: "Local name", color: "#123456", analysisMode: "inside", enabled: false });
+    await storage.saveBounds("target", target);
+    const retry = structuredClone(original);
+    delete retry.groups[0].sharedBoundaryId;
+    retry.groups[0].points[0].x = 0.75;
+    const response = await jsonRequest(app, "/api/images/source/bounds/apply-all", { method: "POST", body: { bounds: retry } });
+    const result = await response.json();
+    expect(response.status).toBe(200);
+    expect(result).toMatchObject({ added: [], updated: ["target"], failed: [] });
+    expect(result.bounds.groups[0].sharedBoundaryId).toBe(initial.bounds.groups[0].sharedBoundaryId);
+    const saved = await storage.loadBounds("target");
+    expect(saved.groups).toHaveLength(1);
+    expect(saved.groups[0]).toEqual({
+      ...target.groups[0], points: target.groups[0].points.map((point, index) => index === 0 ? { ...point, x: 0.75 } : point),
+    });
+  });
+
+  test("saving from a linked copy synchronizes only geometry and keeps deletions local", async () => {
+    const imageRoot = await createTempRoot();
+    for (const id of ["source", "copy", "independent"]) await writeImage(imageRoot, id);
+    const storage = createStorage({ initialRoot: imageRoot });
+    const app = createApp({ rootDir: imageRoot, storage });
+    const source = validBounds("source");
+    Object.assign(source.groups[0], {
+      sharedBoundaryId: "shared-1", name: "Source local", color: "#123456", enabled: false,
+      analysisMode: "inside", roiLimits: { nearPx: 2, midPx: 4, farPx: 6 },
+      migrationVector: { start: { x: 1, y: 2 }, end: { x: 3, y: 4 } }, custom: { keep: true },
+    });
+    const independent = { id: "other", name: "Source local", points: [{ id: "new-point", x: 0, y: 0 }] };
+    source.groups.push(independent);
+    const copy = validBounds("copy");
+    Object.assign(copy.groups[0], { id: "copy-local", sharedBoundaryId: "shared-1", name: "Copy local" });
+    await storage.saveBounds("source", source);
+    await storage.saveBounds("copy", copy);
+    await storage.saveBounds("independent", { groups: [independent] });
+    const independentBefore = await readFile(storage.imagePaths("independent").boundsPath, "utf8");
+    await writeFile(storage.imagePaths("source").imagePath, "unreadable metadata must not block save");
+    delete copy.groups[0].sharedBoundaryId;
+    copy.groups[0].name = "Changed only here";
+    copy.groups[0].points = [{ id: "new-point", x: 0.5, y: -0.25 }, { id: "another", x: 1.5, y: 1.75 }];
+    const response = await jsonRequest(app, "/api/images/copy/bounds", { method: "PUT", body: { ...copy, rootPath: imageRoot } });
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result).toMatchObject({ synchronized: ["source"], failed: [] });
+    expect(result.bounds.groups[0]).toMatchObject({ id: "copy-local", sharedBoundaryId: "shared-1", name: "Changed only here" });
+    let saved = await storage.loadBounds("source");
+    expect(saved.groups).toEqual([
+      { ...source.groups[0], points: [{ id: "p1", x: 0.5, y: -0.25 }, { id: "p2", x: 1.5, y: 1.75 }] }, independent,
+    ]);
+    copy.groups[0].points.push({ id: "third", x: 1, y: 0 }, { id: "new-point", x: 0, y: 1 });
+    const added = await jsonRequest(app, "/api/images/copy/bounds", { method: "PUT", body: copy });
+    expect(added.status).toBe(200);
+    saved = await storage.loadBounds("source");
+    expect(saved.groups[0].points.map(({ x, y }) => [x, y])).toEqual([[0.5, -0.25], [1.5, 1.75], [1, 0], [0, 1]]);
+    const ids = saved.groups.flatMap((group) => [group.id, ...group.points.map(({ id }) => id)]);
+    expect(new Set(ids).size).toBe(ids.length);
+    const sourceBeforeDelete = await readFile(storage.imagePaths("source").boundsPath, "utf8");
+    const deleted = await jsonRequest(app, "/api/images/copy/bounds", { method: "PUT", body: { groups: [] } });
+    expect(await deleted.json()).toMatchObject({ bounds: { groups: [] }, synchronized: [], failed: [] });
+    expect(await readFile(storage.imagePaths("source").boundsPath, "utf8")).toBe(sourceBeforeDelete);
+    expect(await readFile(storage.imagePaths("independent").boundsPath, "utf8")).toBe(independentBefore);
+  });
+
+  test("PUT uses stored links rather than client-supplied replacements or forged links", async () => {
+    const imageRoot = await createTempRoot();
+    for (const id of ["source", "target"]) await writeImage(imageRoot, id);
+    const storage = createStorage({ initialRoot: imageRoot });
+    const source = { groups: [
+      { id: "linked", sharedBoundaryId: "real-link", points: [] },
+      { id: "local", points: [] },
+    ] };
+    await storage.saveBounds("source", source);
+    await storage.saveBounds("target", { groups: [
+      { id: "target-linked", sharedBoundaryId: "real-link", points: [] },
+      { id: "unrelated", sharedBoundaryId: "forged-link", points: [] },
+    ] });
+    source.groups[0].sharedBoundaryId = "replacement-link";
+    source.groups[1].sharedBoundaryId = "forged-link";
+    for (const group of source.groups) group.points = [{ id: "p", x: 1, y: 2 }];
+    const response = await jsonRequest(createApp({ rootDir: imageRoot, storage }), "/api/images/source/bounds", { method: "PUT", body: source });
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.bounds.groups[0].sharedBoundaryId).toBe("real-link");
+    expect(result.bounds.groups[1]).not.toHaveProperty("sharedBoundaryId");
+    const target = await storage.loadBounds("target");
+    expect(target.groups[0].points).toEqual([{ id: expect.any(String), x: 1, y: 2 }]);
+    expect(target.groups[1].points).toEqual([]);
+  });
+
+  test("PUT reports corrupt linked targets without modifying them or independent images", async () => {
+    const imageRoot = await createTempRoot();
+    for (const id of ["source", "good", "corrupt", "invalid", "bad-link", "empty"]) await writeImage(imageRoot, id);
+    const storage = createStorage({ initialRoot: imageRoot });
+    const linked = { groups: [{ id: "local", sharedBoundaryId: "shared-1", points: [] }] };
+    for (const id of ["source", "good", "corrupt", "invalid", "bad-link"]) await storage.saveBounds(id, linked);
+    const corrupt = new Map([
+      ["corrupt", "{broken"], ["invalid", '{"groups":[{"points":null}]}'],
+      ["bad-link", '{"groups":[{"sharedBoundaryId":42,"points":[]}]}'],
+    ]);
+    for (const [id, data] of corrupt) await writeFile(storage.imagePaths(id).boundsPath, data);
+    linked.groups[0].points = [{ id: "p", x: 0.5, y: 1.5 }];
+    const response = await jsonRequest(createApp({ rootDir: imageRoot, storage }), "/api/images/source/bounds", { method: "PUT", body: linked });
+    const result = await response.json();
+    expect(response.status).toBe(200);
+    expect(result).toMatchObject({ synchronized: ["good"], failed: [
+      { imageId: "bad-link", message: expect.stringMatching(/bounds.*invalid/i) },
+      { imageId: "corrupt", message: expect.stringMatching(/bounds.*json.*invalid/i) },
+      { imageId: "invalid", message: expect.stringMatching(/bounds.*invalid/i) },
+    ] });
+    expect(await storage.loadBounds("source")).toEqual(result.bounds);
+    for (const [id, data] of corrupt) expect(await readFile(storage.imagePaths(id).boundsPath, "utf8")).toBe(data);
+    await expect(readFile(storage.imagePaths("empty").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await storage.loadBounds("good")).groups[0].points).toMatchObject([{ x: 0.5, y: 1.5 }]);
+  });
+
+  test.each([null, 7, {}, [], "", "   "])("bounds routes reject invalid sharedBoundaryId %j before writes", async (sharedBoundaryId) => {
+    const imageRoot = await createTempRoot();
+    await writeImage(imageRoot, "source");
+    const storage = createStorage({ initialRoot: imageRoot });
+    const app = createApp({ rootDir: imageRoot, storage });
+    const bounds = { groups: [{ id: "local", sharedBoundaryId, points: [] }] };
+    for (const [suffix, method, body] of [["", "PUT", bounds], ["/apply-all", "POST", { bounds }]]) {
+      const response = await jsonRequest(app, `/api/images/source/bounds${suffix}`, { method, body });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "Invalid bounds payload." });
+    }
+    await expect(readFile(storage.imagePaths("source").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("PUT rejects stale rootPath without writing and captures its root before awaiting", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    for (const root of [firstRoot, secondRoot]) {
+      for (const id of ["source", "target"]) await writeImage(root, id);
+    }
+    const storage = createStorage({ initialRoot: firstRoot });
+    const linked = { groups: [{ id: "local", sharedBoundaryId: "shared-1", points: [] }] };
+    await storage.saveBounds("source", linked);
+    await storage.saveBounds("target", linked);
+    const app = createApp({ rootDir: firstRoot, storage });
+    const rejected = await jsonRequest(app, "/api/images/source/bounds", { method: "PUT", body: { ...linked, rootPath: secondRoot } });
+    expect(rejected.status).toBe(409);
+    expect((await storage.loadBounds("source")).groups[0].points).toEqual([]);
+    const createContext = storage.createBoundaryMutationContext.bind(storage);
+    storage.createBoundaryMutationContext = () => {
+      const context = createContext();
+      storage.setRoot(secondRoot);
+      return context;
+    };
+    linked.groups[0].points = [{ id: "p", x: 1, y: 2 }];
+    const response = await jsonRequest(app, "/api/images/source/bounds", { method: "PUT", body: { ...linked, rootPath: firstRoot } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ synchronized: ["target"], failed: [] });
+    expect((await createStorage({ initialRoot: firstRoot }).loadBounds("target")).groups[0].points).toMatchObject([{ x: 1, y: 2 }]);
+    for (const id of ["source", "target"]) await expect(readFile(storage.imagePaths(id).boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("imports previous bounds through POST /api/images/:id/bounds/import-previous", async () => {

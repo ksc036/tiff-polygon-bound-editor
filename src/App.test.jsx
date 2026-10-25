@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import React from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "./App.jsx";
+import { getCollagenDensityModel } from "../shared/collagenDensity.js";
 
 const images = [
   {
@@ -376,18 +377,33 @@ function mockApi({
   saveSubimageResponse,
   createSubimagesResponse,
   replaceSubimagesResponse,
+  applyBoundariesResponse,
+  maskPreviewResponse,
+  setRootResponse,
+  boundsByImage,
+  calibrationResponse,
 } = {}) {
   const calls = [];
+  let calibration = { modelId: "high-density", model: getCollagenDensityModel(), revision: 0, updatedAt: null };
   const exportDeferred = delayedExport ? deferred() : null;
   const fetchMock = vi.fn((input, options = {}) => {
     const url = String(input);
     const method = options.method ?? "GET";
     calls.push({ url, method, options });
+    if (url === "/api/settings/collagen-density") {
+      if (calibrationResponse) return calibrationResponse(options);
+      if (method === "PUT") {
+        const { modelId } = JSON.parse(options.body);
+        calibration = { ...calibration, modelId, model: getCollagenDensityModel(modelId), revision: calibration.revision + 1 };
+      }
+      return jsonResponse(calibration);
+    }
 
     if (url === "/api/root" && method === "GET") {
       return jsonResponse({ rootPath, images: rootImages });
     }
     if (url === "/api/root" && method === "POST") {
+      if (setRootResponse) return setRootResponse(options);
       return jsonResponse({ rootPath: appliedRootPath, images: appliedRootImages });
     }
     if (url === "/api/root/select" && method === "POST") {
@@ -465,6 +481,9 @@ function mockApi({
     if (url === "/api/images/scan-a/raw16" && method === "GET") {
       return raw16Response(...(rawDimensionsById["scan-a"] ?? [100, 80]));
     }
+    if (url.endsWith("/mask-preview") && method === "GET") {
+      return maskPreviewResponse ? maskPreviewResponse(url) : pngResponse();
+    }
     if (url === "/api/images/scan-a/roi-overlay" && method === "POST") {
       return pngResponse();
     }
@@ -488,6 +507,10 @@ function mockApi({
     if (subimageMatch && method === "PUT") {
       if (saveSubimageResponse) return saveSubimageResponse(subimageMatch[1], options);
       return jsonResponse({ crop: JSON.parse(options.body).crop });
+    }
+    const boundsMatch = url.match(/^\/api\/images\/([^/]+)\/bounds$/);
+    if (boundsByImage && boundsMatch && method === "GET") {
+      return jsonResponse({ bounds: boundsByImage[boundsMatch[1]], hasBounds: true });
     }
     if (url === "/api/images/scan-a/bounds" && method === "GET") {
       return jsonResponse({ bounds: boundsQueue.shift() ?? savedBounds, hasBounds: true });
@@ -538,6 +561,14 @@ function mockApi({
     }
     if (url === "/api/images/scan-a/bounds/import-previous" && method === "POST") {
       return jsonResponse({ bounds: reloadedBounds });
+    }
+    if (url === "/api/images/scan-a/bounds/apply-all" && method === "POST") {
+      if (applyBoundariesResponse) return applyBoundariesResponse(options);
+      const bounds = JSON.parse(options.body).bounds;
+      return jsonResponse({
+        bounds: { ...bounds, groups: bounds.groups.map((group) => ({ ...group, sharedBoundaryId: `shared-${group.id}` })) },
+        added: ["scan-b"], updated: [], failed: [],
+      });
     }
 
     return Promise.reject(new Error(`Unexpected fetch ${method} ${url}`));
@@ -756,6 +787,10 @@ describe("App", () => {
     expect(JSON.parse(exportCall[1].body)).toEqual({
       autoSavedImageId: null,
       estimatedCollagenColorMax: 8,
+      heatmapCellSizes: [20, 50, 100],
+      calibrationRevision: 0,
+      rootPath: "/data/root",
+      excludedGroupIdsByImage: {},
     });
     await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:export"));
   });
@@ -769,11 +804,11 @@ describe("App", () => {
     const colorMax = screen.getByLabelText("Estimated density max (mg/ml)");
     expect(colorMax).toHaveValue(8);
     expect(colorMax).toHaveAttribute("max", "10");
-    expect(screen.getByText("Area Fraction >= 24.14% uses max color")).toBeInTheDocument();
+    expect(screen.getByText("Area Fraction >= 23.42% uses max color")).toBeInTheDocument();
 
     fireEvent.change(colorMax, { target: { value: "10" } });
     expect(screen.getByLabelText("Heatmap scale")).toHaveTextContent("10 mg/ml");
-    expect(screen.getByText("Area Fraction >= 27.12% uses max color")).toBeInTheDocument();
+    expect(screen.getByText("Area Fraction >= 24.61% uses max color")).toBeInTheDocument();
     await waitFor(() => expect(localStorage.getItem("raw16-editor-heatmap-collagen-color-max")).toBe("10"));
 
     first.unmount();
@@ -788,6 +823,10 @@ describe("App", () => {
     expect(JSON.parse(exportCall[1].body)).toEqual({
       autoSavedImageId: null,
       estimatedCollagenColorMax: 10,
+      heatmapCellSizes: [20, 50, 100],
+      calibrationRevision: 0,
+      rootPath: "/data/root",
+      excludedGroupIdsByImage: {},
     });
   });
 
@@ -903,7 +942,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Set root" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Next image" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Import previous bound" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Apply boundary to all (2)" })).toBeDisabled();
     expect(screen.getByRole("status")).toHaveTextContent("Preparing ZIP...");
 
     releaseExport(
@@ -1336,6 +1375,376 @@ describe("App", () => {
     expect(within(screen.getByRole("table")).getAllByText("Inside Patch").length).toBeGreaterThan(0);
   });
 
+  test("remembers separate group drawing, statistics and vector states per image", async () => {
+    const { fetchMock } = mockApi({ boundsByImage: { "scan-a": boundsWithMigration, "scan-b": boundsWithMigration } });
+    render(<App />);
+    await screen.findByLabelText("Migration vector Saved Tissue");
+    fireEvent.click(screen.getByLabelText("Draw active group"));
+    fireEvent.click(screen.getByLabelText("Show migration vector"));
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await waitFor(() => expect(screen.getByLabelText("Draw active group")).toBeChecked());
+    fireEvent.click(screen.getByLabelText("Show active group stats"));
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    await waitFor(() => expect(screen.getByLabelText("Draw active group")).not.toBeChecked());
+    expect(screen.getByLabelText("Show active group stats")).toBeChecked();
+    expect(screen.getByLabelText("Show migration vector")).not.toBeChecked();
+    expect(screen.getByText("Clean")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "PUT")).toHaveLength(0);
+  });
+
+  test("restores group display after reload and keeps roots with identical image IDs separate", async () => {
+    mockApi();
+    const view = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Hide Saved Tissue display" }));
+    view.unmount();
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Show Saved Tissue display" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Root path"), { target: { value: "/typed/root" } });
+    fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+    expect(await screen.findByRole("button", { name: "Hide Saved Tissue display" })).toBeInTheDocument();
+  });
+
+  test("exports disabled groups for every image in only the current root", async () => {
+    const fixture = { "scan-a": boundsWithInsideGroup, "scan-b": boundsWithInsideGroup };
+    const { fetchMock } = mockApi({ boundsByImage: fixture, appliedRootPath: "/other/root" });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Hide Saved Tissue display" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Hide Saved Tissue display" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Inside Patch" }));
+    fireEvent.click(screen.getByLabelText("Show active group stats"));
+    fireEvent.click(screen.getByLabelText("Show boundaries"));
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+    await screen.findByText("ZIP downloaded");
+    let call = fetchMock.mock.calls.filter(([url]) => url === "/api/export").at(-1);
+    expect(JSON.parse(call[1].body)).toMatchObject({
+      rootPath: "/data/root",
+      excludedGroupIdsByImage: { "scan-a": ["group-saved"], "scan-b": ["group-inside"] },
+    });
+    fireEvent.change(screen.getByLabelText("Root path"), { target: { value: "/other/root" } });
+    fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Download as ZIP" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+    await screen.findByText("ZIP downloaded");
+    call = fetchMock.mock.calls.filter(([url]) => url === "/api/export").at(-1);
+    expect(JSON.parse(call[1].body)).toMatchObject({ rootPath: "/other/root", excludedGroupIdsByImage: {} });
+  });
+
+  test("gives a replacement group a fresh identity after a hidden group was deleted", async () => {
+    mockApi({ boundsQueue: [{ ...savedBounds, groups: [{ ...savedBounds.groups[0], id: "group-1" }] }] });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Hide Saved Tissue display" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete active group" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+    expect(screen.getByRole("button", { name: "Hide Group 2 display" })).toBeInTheDocument();
+  });
+
+  test.each(["Add group", "Inside area"])("resets a discarded new group's visibility when recreated using %s", async (creationAction) => {
+    mockApi({ boundsByImage: { "scan-a": emptyBounds, "scan-b": emptyBounds } });
+    render(<React.StrictMode><App /></React.StrictMode>);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add group" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide Group 1 display" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Group 1", exact: true })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Previous image" })).toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: creationAction, exact: true }));
+    expect(screen.getByRole("button", { name: "Hide Group 2 display" })).toBeInTheDocument();
+  });
+
+  test("preserves OFF when a saved group's deletion is discarded", async () => {
+    mockApi();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Hide Saved Tissue display" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete active group" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await screen.findByText("No saved bound");
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    expect(await screen.findByRole("button", { name: "Show Saved Tissue display" })).toBeInTheDocument();
+  });
+
+  test("discarding a replacement preserves the original group's OFF preference", async () => {
+    const saved = { ...savedBounds, groups: [{ ...savedBounds.groups[0], id: "group-1" }] };
+    mockApi({ boundsByImage: { "scan-a": saved, "scan-b": emptyBounds } });
+    render(<React.StrictMode><App /></React.StrictMode>);
+    fireEvent.click(await screen.findByRole("button", { name: "Hide Saved Tissue display" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete active group" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Hide Group \d+ display/ })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    expect(await screen.findByRole("button", { name: "Show Saved Tissue display" })).toBeInTheDocument();
+  });
+
+  test("hides boundaries across image navigation without changing groups or analysis", async () => {
+    const { fetchMock } = mockApi({
+      boundsQueue: [boundsWithMigration, boundsWithMigration],
+      analysisResponse: { analysis: savedAnalysis, hasAnalysis: true },
+    });
+    render(<App />);
+    await screen.findByLabelText("Migration vector Saved Tissue");
+    fireEvent.click(screen.getByLabelText("Show boundaries"));
+    expect(screen.queryByLabelText("Bounds overlay")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Saved Tissue" })).toBeInTheDocument();
+    expect(screen.getByText("Clean")).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await screen.findByText("No saved bound");
+    expect(screen.getByLabelText("Show boundaries")).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Previous image" }));
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    expect(screen.queryByLabelText("Bounds overlay")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Show boundaries"));
+    expect(screen.getByLabelText("Migration vector Saved Tissue")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "PUT")).toHaveLength(0);
+  });
+
+  test("toggles the original mask overlay and changes its opacity independently of boundaries", async () => {
+    mockApi({ maskPreviewResponse: () => new Promise(() => {}) });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    const toggle = screen.getByRole("button", { name: "Mask overlay" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByLabelText("Mask opacity")).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Mask opacity")).toHaveValue("55");
+    expect(screen.getByLabelText("Mask overlay")).toHaveStyle({ opacity: "0.55" });
+    fireEvent.change(screen.getByLabelText("Mask opacity"), { target: { value: "25" } });
+    expect(screen.getByLabelText("Mask overlay")).toHaveStyle({ opacity: "0.25" });
+    fireEvent.click(screen.getByLabelText("Show boundaries"));
+    expect(screen.queryByLabelText("Bounds overlay")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Mask overlay")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Mask" }));
+    expect(screen.queryByLabelText("Mask overlay")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Original" }));
+    expect(screen.getByLabelText("Mask opacity")).toHaveValue("25");
+    fireEvent.click(screen.getByRole("button", { name: "Mask overlay" }));
+    expect(screen.queryByLabelText("Mask overlay")).not.toBeInTheDocument();
+    expect(screen.getByText("Clean")).toBeInTheDocument();
+  });
+
+  test("shows a missing mask error without hiding the original", async () => {
+    mockApi({ maskPreviewResponse: () => jsonResponse({ error: "Mask file was not found." }, { status: 404 }) });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Mask overlay" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/mask/i);
+    expect(screen.getByLabelText("raw16 image")).not.toHaveClass("hidden-layer");
+  });
+
+  test("adds and links current boundaries without replacement confirmation and saves the source", async () => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Add group" }));
+    const apply = screen.getByRole("button", { name: "Apply boundary to all (2)" });
+    fireEvent.click(apply);
+    await screen.findByText("Boundaries added to 1 image(s).");
+    const request = fetchMock.mock.calls.find(([url]) => url.endsWith("/bounds/apply-all"));
+    expect(JSON.parse(request[1].body).bounds.groups).toHaveLength(2);
+    expect(JSON.parse(request[1].body).bounds.groups[0].points).toEqual(savedBounds.groups[0].points);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.getByText("Clean")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Import previous bound" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "PUT")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, options]) => options?.method === "PUT")).toBe(true));
+    const save = fetchMock.mock.calls.find(([, options]) => options?.method === "PUT");
+    expect(JSON.parse(save[1].body).groups.map((group) => group.sharedBoundaryId)).toEqual(["shared-group-saved", "shared-group-1"]);
+  });
+
+  test("preserves loaded shared boundary links and sends the dataset root when saving", async () => {
+    const linkedBounds = { ...savedBounds, groups: savedBounds.groups.map((group) => ({ ...group, sharedBoundaryId: "shared-boundary-a" })) };
+    const { fetchMock } = mockApi({ boundsQueue: [linkedBounds], saveResponse: (options) => jsonResponse({
+      bounds: JSON.parse(options.body), synchronized: ["scan-b"], failed: [],
+    }) });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByTestId("image-stage"), { clientX: 55, clientY: 24 });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Saved. Boundaries synchronized to 1 image(s).");
+    const request = fetchMock.mock.calls.find(([, options]) => options?.method === "PUT");
+    expect(JSON.parse(request[1].body)).toMatchObject({ rootPath: "/data/root", groups: [{ sharedBoundaryId: "shared-boundary-a" }] });
+    expect(JSON.parse(request[1].body).groups[0].points).toContainEqual({ id: "point-4", x: 55, y: 24 });
+  });
+
+  test("merges links without erasing geometry edited while apply-all is pending", async () => {
+    const pending = deferred();
+    let submitted;
+    const { fetchMock } = mockApi({ applyBoundariesResponse: (options) => {
+      submitted = JSON.parse(options.body).bounds;
+      return pending.promise;
+    } });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Apply boundary to all (2)" }));
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Calculate" })).toBeDisabled();
+    fireEvent.click(screen.getByTestId("image-stage"), { clientX: 55, clientY: 24 });
+    pending.resolve(await jsonResponse({ bounds: { ...submitted, groups: submitted.groups.map((group) => ({ ...group, sharedBoundaryId: "shared-a" })) }, added: ["scan-b"], updated: [], failed: [] }));
+    await screen.findByText("Boundaries added to 1 image(s).");
+    expect(screen.getByLabelText("Vertex point-4")).toHaveAttribute("cx", "55");
+    expect(screen.getByText("Unsaved")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, options]) => options?.method === "PUT")).toBe(true));
+    const request = fetchMock.mock.calls.find(([, options]) => options?.method === "PUT");
+    expect(JSON.parse(request[1].body).groups[0]).toMatchObject({ sharedBoundaryId: "shared-a", points: expect.arrayContaining([{ id: "point-4", x: 55, y: 24 }]) });
+  });
+
+  test.each(["Save", "Calculate", "Download as ZIP"])("keeps a partial shared save retryable and stops %s from claiming success", async (action) => {
+    const { fetchMock } = mockApi({ saveResponse: (options) => jsonResponse({
+      bounds: JSON.parse(options.body), synchronized: [], failed: [{ imageId: "scan-b", message: "Saved bounds JSON is invalid." }],
+    }) });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByTestId("image-stage"), { clientX: 55, clientY: 24 });
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    await screen.findAllByText(/Boundary synchronization failed.*scan-b/);
+    expect(screen.getByText("Unsaved")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/export" || url.endsWith("/analysis/recalculate"))).toBe(false);
+  });
+
+  test("reports updated linked images when applying an existing shared boundary", async () => {
+    mockApi({ applyBoundariesResponse: (options) => jsonResponse({ bounds: JSON.parse(options.body).bounds, added: [], updated: ["scan-b"], failed: [] }) });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Apply boundary to all (2)" }));
+    await screen.findByText("Boundaries added to 0 image(s). Synchronized to 1 image(s).");
+  });
+
+  test("partial linked reapply keeps geometry dirty so export retries and reports synchronization failure", async () => {
+    const failure = { imageId: "scan-b", message: "Unable to update bounds for image." };
+    const { fetchMock } = mockApi({
+      applyBoundariesResponse: (options) => jsonResponse({ bounds: JSON.parse(options.body).bounds, added: [], updated: [], failed: [failure] }),
+      saveResponse: (options) => jsonResponse({ bounds: JSON.parse(options.body), synchronized: [], failed: [failure] }),
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByTestId("image-stage"), { clientX: 55, clientY: 24 });
+    fireEvent.click(screen.getByRole("button", { name: "Apply boundary to all (2)" }));
+    await screen.findByText(/Boundaries added.*Failed.*scan-b/);
+    expect(screen.getByText("Unsaved")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+    await screen.findByText(/Boundary synchronization failed.*scan-b/);
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/export")).toBe(false);
+  });
+
+  test("blocks overlapping boundary saves and stays clean after the pending save succeeds", async () => {
+    const pending = deferred();
+    let snapshot;
+    const { fetchMock } = mockApi({ saveResponse: (options) => {
+      snapshot = JSON.parse(options.body);
+      return pending.promise;
+    } });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    const save = screen.getByRole("button", { name: "Save" });
+    fireEvent.click(save);
+    fireEvent.click(save);
+    expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "PUT")).toHaveLength(1);
+    expect(save).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Apply boundary to all (2)" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Calculate" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Download as ZIP" })).toBeDisabled();
+    pending.resolve(await jsonResponse({ bounds: snapshot, synchronized: ["scan-b"], failed: [] }));
+    await screen.findByText("Saved. Boundaries synchronized to 1 image(s).");
+    expect(screen.getByText("Clean")).toBeInTheDocument();
+    expect(save).toBeEnabled();
+  });
+
+  test("reports partial boundary additions and blocks duplicate submission and navigation while applying", async () => {
+    const pending = deferred();
+    mockApi({ applyBoundariesResponse: () => pending.promise });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Apply boundary to all (2)" }));
+    expect(screen.getByRole("button", { name: "Applying boundaries..." })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next image" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Find root" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Download as ZIP" })).toBeDisabled();
+    pending.resolve(await jsonResponse({ added: [], failed: [{ imageId: "scan-b", message: "Image dimensions do not match." }] }));
+    await screen.findByText(/scan-b: Image dimensions do not match/);
+    expect(screen.getByRole("button", { name: "Apply boundary to all (2)" })).toBeEnabled();
+  });
+
+  test("blocks boundary additions while a previous root change is still pending", async () => {
+    const pending = deferred();
+    const { fetchMock } = mockApi({ setRootResponse: () => pending.promise });
+    render(<App />);
+    await screen.findByRole("button", { name: "Saved Tissue" });
+    fireEvent.click(screen.getByRole("button", { name: "Set root" }));
+    const apply = screen.getByRole("button", { name: "Apply boundary to all (2)" });
+    expect(apply).toBeDisabled();
+    fireEvent.click(apply);
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/bounds/apply-all"))).toBe(false);
+    pending.resolve(await jsonResponse({ rootPath: "/new/root", images }));
+    await waitFor(() => expect(apply).toBeEnabled());
+  });
+
+  test("a later image's saved crop size remains editable after partial batch replacement", async () => {
+    mockSubimageApi({ subimageResponse: (imageId) => jsonResponse({ hasSubimage: true,
+      crop: imageId === "scan-a" ? savedSubimage : { ...savedSubimageB, width: 40, height: 32 },
+    }) });
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await screen.findByText("40 x 32 px");
+    moveSubimageCrop(mockSubimageCanvasRect());
+    expect(screen.getByText("x 60")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save subimage" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeEnabled();
+  });
+
+  test("discarding a crop re-selection clears the unsaved template before navigation", async () => {
+    mockSubimageApi({ subimageResponse: () => jsonResponse({ hasSubimage: false, crop: null }) });
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    drawSubimageCrop(mockSubimageCanvasRect());
+    await screen.findByText("50 x 40 px");
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
+    confirm.mockReturnValue(false);
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    expect(confirm).toHaveBeenCalledWith("Discard unsaved subimage changes?");
+    expect(screen.getByText("1 / 2")).toBeInTheDocument();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await waitFor(() => expect(screen.getByText("2 / 2")).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Loading subimage")).not.toBeInTheDocument());
+    expect(screen.getByText("- x - px")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
+  });
+
+  test("selects and moves an initial crop on a non-first image before creating the batch", async () => {
+    let crop = null;
+    const { fetchMock } = mockSubimageApi({
+      subimageResponse: () => jsonResponse({ hasSubimage: Boolean(crop), crop }),
+      createSubimagesResponse: (options) => {
+        crop = JSON.parse(options.body).templateCrop;
+        return jsonResponse({ created: ["plate-a", "plate-b"], failed: [] });
+      },
+    });
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await waitFor(() => expect(screen.queryByText("Loading subimage")).not.toBeInTheDocument());
+    const setCrop = screen.getByRole("button", { name: "Set crop" });
+    expect(setCrop).toBeEnabled();
+    fireEvent.click(setCrop);
+    const stage = mockSubimageCanvasRect();
+    drawSubimageCrop(stage);
+    expect(await screen.findByText("50 x 40 px")).toBeInTheDocument();
+    moveSubimageCrop(stage);
+    expect(screen.getByText("x 50")).toBeInTheDocument();
+    expect(screen.getByText("y 0")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Create all subimages" }));
+    await screen.findByText("Created (2): plate-a, plate-b");
+    const request = fetchMock.mock.calls.find(([url]) => url === "/api/subimages/create-missing");
+    expect(JSON.parse(request[1].body).templateCrop).toMatchObject({ x: 50, y: 0, width: 50, height: 40 });
+  });
+
   test("renders migration vector as an arrow and hides it independently", async () => {
     mockApi({ boundsQueue: [boundsWithMigration] });
 
@@ -1394,11 +1803,11 @@ describe("App", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent(/roi-wide nematic order parameter/i);
   });
 
-  test("derives estimated collagen density from the fixed one-phase model", async () => {
+  test("reinterprets saved analysis with the selected model without recalculating data", async () => {
     const modelAnalysis = structuredClone(savedAnalysis);
     modelAnalysis.groups[0].bands.near.density = 0.1;
     modelAnalysis.groups[0].allBands.density = 0.1;
-    mockApi({ analysisResponse: { analysis: modelAnalysis, hasAnalysis: true } });
+    const { fetchMock } = mockApi({ analysisResponse: { analysis: modelAnalysis, hasAnalysis: true } });
 
     render(<App />);
 
@@ -1407,7 +1816,40 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Estimated Collagen Density" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Density calibration a")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Density calibration b")).not.toBeInTheDocument();
-    expect(within(screen.getByRole("table")).getAllByText("1.4444 mg/ml").length).toBeGreaterThan(0);
+    expect(within(screen.getByRole("table")).getAllByText("1.499 mg/mL").length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText("Collagen calibration"), { target: { value: "low-density" } });
+    await waitFor(() => expect(within(screen.getByRole("table")).getAllByText("1.540 mg/mL").length).toBeGreaterThan(0));
+    expect(fetchMock.mock.calls.filter(([url, options]) => options?.method === "POST" && url !== "/api/settings/collagen-density")).toHaveLength(0);
+  });
+
+  test("keeps Max manual when changing calibration and exports the selected revision", async () => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    const max = screen.getByLabelText("Estimated density max (mg/ml)");
+    expect(max).toHaveValue(8);
+    fireEvent.change(screen.getByLabelText("Collagen calibration"), { target: { value: "low-density" } });
+    await waitFor(() => expect(screen.getByLabelText("Collagen calibration")).toHaveValue("low-density"));
+    expect(max).toHaveValue(8);
+    expect(screen.getByText(/Area Fraction = 0.1087/)).toBeInTheDocument();
+    fireEvent.change(max, { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("Collagen calibration"), { target: { value: "high-density" } });
+    await waitFor(() => expect(screen.getByLabelText("Collagen calibration")).toHaveValue("high-density"));
+    expect(max).toHaveValue(3);
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url === "/api/export")).toBe(true));
+    const call = fetchMock.mock.calls.find(([url]) => url === "/api/export");
+    expect(JSON.parse(call[1].body)).toMatchObject({ calibrationRevision: 2, estimatedCollagenColorMax: 3 });
+  });
+
+  test("does not silently calculate or export with High when settings fail to load", async () => {
+    mockApi({ analysisResponse: { analysis: savedAnalysis, hasAnalysis: true }, calibrationResponse: () => jsonResponse({ error: "Settings cannot be read" }, { status: 500 }) });
+    render(<App />);
+    await screen.findByText("Settings cannot be read");
+    await screen.findByText(/analysis loaded/i);
+    expect(screen.getByRole("button", { name: "Download as ZIP" })).toBeDisabled();
+    expect(within(screen.getByRole("table")).getAllByText("Calibration unavailable").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Collagen calibration")).toBeDisabled();
   });
 
   test("calculates analysis after automatically saving edited bounds", async () => {
@@ -1784,7 +2226,7 @@ describe("App", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20");
   });
 
-  test("ignores stale editable heatmap presets and keeps fixed viewer sizes", async () => {
+  test("starts with default heatmap sizes without restoring obsolete presets", async () => {
     const { fetchMock } = mockApi();
     localStorage.setItem(
       "raw16-editor-heatmap-presets",
@@ -1798,13 +2240,80 @@ describe("App", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=20"),
     );
-    expect(screen.queryByLabelText("small heatmap cell size")).not.toBeInTheDocument();
-    expect(screen.getByText("20 x 20")).toBeInTheDocument();
+    expect(screen.getByLabelText("Small heatmap cell size (px)")).toHaveValue(20);
+    expect(screen.getByLabelText("Medium heatmap cell size (px)")).toHaveValue(50);
+    expect(screen.getByLabelText("Large heatmap cell size (px)")).toHaveValue(100);
     fireEvent.click(screen.getByRole("button", { name: "Next image" }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-b/heatmap?cellSize=20"),
     );
     expect(localStorage.getItem("raw16-editor-heatmap-presets")).toBeNull();
+  });
+
+  test("uses edited heatmap sizes for display, generation and ZIP after remount", async () => {
+    const { fetchMock } = mockApi();
+    const first = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    for (const [label, value] of [["Small", "30"], ["Medium", "60"], ["Large", "120"]]) {
+      const input = screen.getByLabelText(`${label} heatmap cell size (px)`);
+      fireEvent.change(input, { target: { value } });
+      fireEvent.blur(input);
+    }
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=30"));
+    fireEvent.click(screen.getByRole("button", { name: "Medium 60x60" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/images/scan-a/heatmap?cellSize=60"));
+    first.unmount();
+
+    const { fetchMock: requests } = mockApi();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    expect(screen.getByLabelText("Small heatmap cell size (px)")).toHaveValue(30);
+    expect(screen.getByLabelText("Medium heatmap cell size (px)")).toHaveValue(60);
+    expect(screen.getByLabelText("Large heatmap cell size (px)")).toHaveValue(120);
+    expect(screen.getByRole("button", { name: "Medium 60x60" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.change(screen.getByLabelText("Heatmap batch path"), { target: { value: "/custom/root" } });
+    fireEvent.click(screen.getByRole("button", { name: "Generate Heatmaps" }));
+    await waitFor(() => expect(requests).toHaveBeenCalledWith("/api/heatmaps/generate", expect.any(Object)));
+    await waitFor(() => expect(requests.mock.calls.filter(([url]) => url === "/api/images/scan-a/heatmap?cellSize=60")).toHaveLength(2));
+    const generation = requests.mock.calls.find(([url]) => url === "/api/heatmaps/generate");
+    expect(JSON.parse(generation[1].body)).toEqual({ rootPath: "/custom/root", cellSizes: [30, 60, 120] });
+    fireEvent.click(screen.getByRole("button", { name: "Download as ZIP" }));
+    await waitFor(() => expect(requests).toHaveBeenCalledWith("/api/export", expect.any(Object)));
+    const download = requests.mock.calls.find(([url]) => url === "/api/export");
+    expect(JSON.parse(download[1].body).heatmapCellSizes).toEqual([30, 60, 120]);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("ZIP downloaded"));
+  });
+
+  test.each([
+    ["not-json", [20, 50, 100]],
+    ['{"small":30,"medium":0,"large":"120"}', [30, 50, 100]],
+  ])("recovers invalid stored heatmap sizes %s", async (stored, expected) => {
+    mockApi();
+    localStorage.setItem("raw16-editor-heatmap-cell-sizes-v1", stored);
+    render(<App />);
+    await screen.findByRole("button", { name: "Heat Map" });
+    ["Small", "Medium", "Large"].forEach((label, index) => {
+      expect(screen.getByLabelText(`${label} heatmap cell size (px)`)).toHaveValue(expected[index]);
+    });
+  });
+
+  test.each(["", "0", "-1", "1.5", "4097"])("does not apply invalid heatmap size %j", async (value) => {
+    const { fetchMock } = mockApi();
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Heat Map" }));
+    fireEvent.change(screen.getByLabelText("Heatmap batch path"), { target: { value: "/custom/root" } });
+    const input = screen.getByLabelText("Small heatmap cell size (px)");
+    fireEvent.change(input, { target: { value } });
+    fireEvent.blur(input);
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: "Generate Heatmaps" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Small 20x20" })).toHaveAttribute("aria-pressed", "true");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/heatmap?cellSize=")))
+      .toEqual([["/api/images/scan-a/heatmap?cellSize=20"]]);
+    fireEvent.change(input, { target: { value: "25" } });
+    fireEvent.blur(input);
+    expect(input).toHaveAttribute("aria-invalid", "false");
+    expect(screen.getByRole("button", { name: "Generate Heatmaps" })).toBeEnabled();
   });
 
   test("ignores a stale heatmap response after changing cell size", async () => {
@@ -2294,15 +2803,15 @@ describe("App", () => {
     expect(within(report).queryAllByTestId("heatmap-scale-tick")).toHaveLength(0);
   });
 
-  test("selects a separate batch folder and generates the fixed preset sizes", async () => {
+  test("selects a separate batch folder and generates the default preset sizes", async () => {
     const { fetchMock } = mockApi();
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Choose heatmap folder" }));
     expect(await screen.findByLabelText("Heatmap batch path")).toHaveValue("/selected/heatmap-root");
-    expect(screen.getByText("20 x 20")).toBeInTheDocument();
-    expect(screen.getByText("50 x 50")).toBeInTheDocument();
-    expect(screen.getByText("100 x 100")).toBeInTheDocument();
+    expect(screen.getByLabelText("Small heatmap cell size (px)")).toHaveValue(20);
+    expect(screen.getByLabelText("Medium heatmap cell size (px)")).toHaveValue(50);
+    expect(screen.getByLabelText("Large heatmap cell size (px)")).toHaveValue(100);
     fireEvent.click(screen.getByRole("button", { name: "Generate Heatmaps" }));
 
     await waitFor(() => {
@@ -2747,16 +3256,17 @@ describe("App", () => {
     expect(screen.getByText(/1 \/ 2/i)).toBeInTheDocument();
   });
 
-  test("marks imported previous bounds dirty but does not auto-save", async () => {
+  test("adding saved boundaries to all leaves the source clean and does not auto-save it", async () => {
     const { fetchMock } = mockApi();
 
     render(<App />);
     await screen.findByRole("button", { name: "Saved Tissue" });
 
-    fireEvent.click(screen.getByRole("button", { name: /import previous bound/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply boundary to all (2)" }));
 
-    expect(await screen.findByRole("button", { name: "Reloaded Bound" })).toBeInTheDocument();
-    expect(screen.getByText(/unsaved/i)).toBeInTheDocument();
+    await screen.findByText("Boundaries added to 1 image(s).");
+    expect(screen.getByRole("button", { name: "Saved Tissue" })).toBeInTheDocument();
+    expect(screen.getByText("Clean")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith(
       "/api/images/scan-a/bounds",
       expect.objectContaining({ method: "PUT" }),
@@ -2862,7 +3372,7 @@ describe("App", () => {
     expect(screen.getByText("Clean")).toBeInTheDocument();
   });
 
-  test("redraws the initial crop at a different size before Create All, then locks the committed size", async () => {
+  test("redraws the initial crop before Create All and allows a new batch selection after saving", async () => {
     let activeLoads = 0;
     const { fetchMock } = mockSubimageApi({
       subimageResponse: (imageId) => {
@@ -2900,7 +3410,7 @@ describe("App", () => {
       expect.objectContaining({ method: "POST" }),
     ));
     expect(await screen.findByText("40 x 32 px")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeEnabled();
     expect(activeLoads).toBe(2);
     expect(fetchMock).not.toHaveBeenCalledWith(
       expect.stringContaining("/subimage"),
@@ -2936,21 +3446,22 @@ describe("App", () => {
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
   });
 
-  test("does not reopen size selection or save a different size for a saved template owner", async () => {
+  test("allows a new crop size after saving and requires batch replacement for that size", async () => {
     const { fetchMock } = mockSubimageApi();
     render(<App />);
     await enterSubimage();
 
     const setCrop = screen.getByRole("button", { name: "Set crop" });
-    expect(setCrop).toBeDisabled();
+    expect(setCrop).toBeEnabled();
     fireEvent.click(setCrop);
     drawSubimageCrop(mockSubimageCanvasRect(), {
       start: { clientX: 0, clientY: 0 },
       end: { clientX: 390, clientY: 310 },
     });
 
-    expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save subimage" })).toBeDisabled();
+    expect(screen.getByText("40 x 32 px")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save subimage" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply replacement" })).toBeEnabled();
     expect(fetchMock).not.toHaveBeenCalledWith(
       "/api/images/scan-a/subimage",
       expect.objectContaining({ method: "PUT" }),
@@ -3118,7 +3629,7 @@ describe("App", () => {
     expect(await screen.findByText("x 10")).toBeInTheDocument();
     expect(screen.getByText("y 8")).toBeInTheDocument();
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeEnabled();
     expect(activeLoads).toBe(2);
   });
 
@@ -3173,7 +3684,7 @@ describe("App", () => {
     });
   });
 
-  test("loads distinct saved crops in order and reserves create-missing for the first image", async () => {
+  test("loads distinct saved crops and offers batch actions from any image", async () => {
     mockSubimageApi();
     render(<App />);
     await enterSubimage();
@@ -3183,9 +3694,25 @@ describe("App", () => {
 
     expect(await screen.findByText("x 30")).toBeInTheDocument();
     expect(screen.getByText("y 20")).toBeInTheDocument();
-    expect(screen.getByText("Template: plate-a")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Set crop" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeDisabled();
+    expect(screen.queryByText("Template: plate-a")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set crop" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Create all subimages" })).toBeEnabled();
+  });
+
+  test("replaces all subimages with the visible moved crop without requiring a redraw", async () => {
+    const { fetchMock } = mockSubimageApi();
+    render(<App />);
+    await enterSubimage();
+    fireEvent.click(screen.getByRole("button", { name: "Next image" }));
+    await screen.findByText("x 30");
+    moveSubimageCrop(mockSubimageCanvasRect());
+    expect(screen.getByText("x 50")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Replace all subimages" }));
+    expect(screen.getByText("50 x 40 px")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Apply replacement" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/subimages/replace-all", expect.objectContaining({ method: "POST" })));
+    const request = fetchMock.mock.calls.find(([url]) => url === "/api/subimages/replace-all");
+    expect(JSON.parse(request[1].body).templateCrop).toMatchObject({ x: 50, y: 0, width: 50, height: 40 });
   });
 
   test("reviews a replacement candidate and restores the saved crop when replacement is cancelled", async () => {
@@ -3196,7 +3723,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next image" }));
     await screen.findByText("x 30");
 
-    fireEvent.click(screen.getByRole("button", { name: "Replace all subimages" }));
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
     drawSubimageCrop(mockSubimageCanvasRect(), {
       start: { clientX: 0, clientY: 0 },
       end: { clientX: 390, clientY: 310 },
@@ -3222,7 +3749,7 @@ describe("App", () => {
     render(<App />);
     await enterSubimage();
 
-    fireEvent.click(screen.getByRole("button", { name: "Replace all subimages" }));
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
     const stage = mockSubimageCanvasRect();
     fireSubimagePointer(stage, "pointerdown", {
       clientX: 100,
@@ -3259,7 +3786,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next image" }));
     await screen.findByText("x 30");
 
-    fireEvent.click(screen.getByRole("button", { name: "Replace all subimages" }));
+    fireEvent.click(screen.getByRole("button", { name: "Set crop" }));
     const stage = mockSubimageCanvasRect();
     drawSubimageCrop(stage, {
       start: { clientX: 0, clientY: 0 },

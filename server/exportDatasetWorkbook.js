@@ -1,4 +1,6 @@
 import ExcelJS from "exceljs";
+import { calibrationMetadata } from "../shared/collagenDensity.js";
+import { exportCalibrationSnapshot } from "./exportCalibration.js";
 
 const HEADER_FILL = "FF1E293B";
 const HEADER_FONT = "FFFFFFFF";
@@ -27,7 +29,7 @@ const REPORT_COLUMNS = [
   ["Reason", 38],
 ];
 
-export async function createDatasetExportWorkbook({ records = [], scaleEntries = [], exportedAt } = {}) {
+export async function createDatasetExportWorkbook({ records = [], scaleEntries = [], exportedAt, calibration, estimatedCollagenColorMax = 8 } = {}) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "TIFF Polygon Bound Editor";
   workbook.created = dateValue(exportedAt) ?? new Date();
@@ -41,6 +43,14 @@ export async function createDatasetExportWorkbook({ records = [], scaleEntries =
     Array.isArray(scaleEntries) ? scaleEntries : [],
     exportedAt,
   );
+  const snapshot = exportCalibrationSnapshot(calibration);
+  const metadata = calibrationMetadata({ ...snapshot, colorMax: estimatedCollagenColorMax, exportedAt });
+  const sheet = workbook.addWorksheet("Calibration");
+  configureSheet(sheet, [["Field", 28], ["Value", 38]]);
+  for (const [key, value] of Object.entries(metadata)) {
+    sheet.addRow([key, value && typeof value === "object" ? JSON.stringify(value) : value]);
+  }
+  applyAutoFilter(sheet, "B");
 
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }

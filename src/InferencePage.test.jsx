@@ -2,6 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import JSZip from "jszip";
+import { getCollagenDensityModel } from "../shared/collagenDensity.js";
 import React from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import AppRouter from "./AppRouter.jsx";
@@ -118,16 +119,27 @@ function mockInferenceApi({
   reviewDeferredById = {},
   rootData = null,
   thresholdSave,
+  reviewOverrides = {},
+  calibrationResponse,
 } = {}) {
   let images = clone(initialImages);
   let imageListCallCount = 0;
   let imageSnapshotIndex = 0;
-  const currentReviews = clone(reviews);
+  const currentReviews = clone({ ...reviews, ...reviewOverrides });
   let rootPath = "/data/inference";
   const savedRois = new Map();
+  let calibration = { modelId: "high-density", model: getCollagenDensityModel(), revision: 0, updatedAt: null };
 
   const fetchMock = vi.fn(async (url, options = {}) => {
     const method = options.method ?? "GET";
+    if (url === "/api/settings/collagen-density") {
+      if (calibrationResponse) return calibrationResponse(options);
+      if (method === "PUT") {
+        const { modelId } = JSON.parse(options.body);
+        calibration = { ...calibration, modelId, model: getCollagenDensityModel(modelId), revision: calibration.revision + 1 };
+      }
+      return jsonResponse(calibration);
+    }
 
     if (url === "/api/inference/images" && method === "GET") {
       imageListCallCount += 1;
@@ -565,7 +577,7 @@ test("downloads every completed image with its ROI overlay, whole overlay, and w
     downloadedFilename = this.download;
   });
   const secondOverlay = deferred();
-  mockInferenceApi({
+  const { fetchMock } = mockInferenceApi({
     overlayDeferredByUrl: {
       "/api/inference/images/complete-b/overlay?threshold=0.610": secondOverlay,
     },
@@ -583,11 +595,19 @@ test("downloads every completed image with its ROI overlay, whole overlay, and w
   fireEvent.click(download);
 
   expect(await screen.findByRole("button", { name: "Preparing 2 / 2..." })).toBeDisabled();
+  expect(screen.getByLabelText("Whole image probability threshold")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Clear ROI" })).toBeDisabled();
+  await act(async () => {
+    await fetchMock("/api/settings/collagen-density", { method: "PUT", body: JSON.stringify({ modelId: "low-density", revision: 0 }) });
+    fireEvent.focus(window);
+  });
+  await waitFor(() => expect(screen.getByLabelText("Collagen calibration")).toHaveValue("low-density"));
   secondOverlay.resolve();
   expect(await screen.findByRole("status")).toHaveTextContent("Inference ZIP downloaded");
   expect(downloadedFilename).toBe("inference_outputs.zip");
   const archive = await JSZip.loadAsync(await blobArrayBuffer(downloadedBlob));
   expect(Object.values(archive.files).filter((entry) => !entry.dir).map((entry) => entry.name).sort()).toEqual([
+    "calibration_metadata.json",
     "override/override_histograms.png",
     "override/override_roi_mask_overlay.png",
     "override/override_whole_mask_overlay.png",
@@ -597,6 +617,11 @@ test("downloads every completed image with its ROI overlay, whole overlay, and w
     "reference/reference_whole_mask_overlay.png",
     "reference/reference_whole_original_roi.png",
   ]);
+  const metadata = JSON.parse(await archive.file("calibration_metadata.json").async("text"));
+  expect(metadata).toMatchObject({ modelId: "high-density", revision: 0, colorMax: null });
+  expect(metadata.images).toHaveLength(2);
+  expect(metadata.images[0]).toMatchObject({ threshold: 0.5, roi: { x: 0, y: 0, width: 1, height: 1 } });
+  expect(metadata.images[0].wholeImage).toHaveProperty("status");
   await expect(archive.file("reference/reference_whole_original_roi.png").async("text")).resolves.toBe("2x2");
   await expect(archive.file("reference/reference_whole_mask_overlay.png").async("text")).resolves.toBe("2x2");
   await expect(archive.file("reference/reference_roi_mask_overlay.png").async("text")).resolves.toBe("1x1");
@@ -616,8 +641,42 @@ test("downloads every completed image with its ROI overlay, whole overlay, and w
     "Threshold 0.500",
     "Whole image area fraction",
     "ROI area fraction",
+    "High density collagen correlation curve (mg/mL)",
+    "Area Fraction = 0.2631 - 0.2431 * exp(-0.2662 * Collagen Density)",
   ]));
   expect(overlayBitmap.close).toHaveBeenCalledTimes(2);
+});
+
+test("reinterprets inference area fractions when global calibration changes", async () => {
+  const { fetchMock } = mockInferenceApi({ reviewOverrides: {
+    "complete-a": { ...reviews["complete-a"], probabilityMap: { width: 10, height: 1, data: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0] } },
+  } });
+  render(<InferencePage />);
+  expect(await screen.findByText("1.499 mg/mL")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Collagen calibration"), { target: { value: "low-density" } });
+  expect(await screen.findByText("1.540 mg/mL")).toBeInTheDocument();
+  expect(screen.getByText(/Area Fraction = 0.1087/)).toBeInTheDocument();
+  expect(fetchMock.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(0);
+});
+
+test("blocks inference ZIP when its preflight finds a changed revision", async () => {
+  let reads = 0;
+  mockInferenceApi({ calibrationResponse: () => {
+    reads += 1;
+    const modelId = reads === 1 ? "high-density" : "low-density";
+    return jsonResponse({ modelId, revision: reads === 1 ? 0 : 1, model: getCollagenDensityModel(modelId) });
+  } });
+  render(<InferencePage />);
+  const frame = await screen.findByLabelText("Composited source and binary mask");
+  await screen.findByAltText("Binary mask overlay");
+  vi.spyOn(frame, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 200, height: 200 });
+  fireEvent(frame, new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+  fireEvent(frame, new MouseEvent("pointerup", { bubbles: true, clientX: 100, clientY: 100 }));
+  const download = screen.getByRole("button", { name: "Download all inference ZIP" });
+  await waitFor(() => expect(download).toBeEnabled());
+  fireEvent.click(download);
+  expect(await screen.findByText(/Collagen calibration changed.*retry/i)).toBeInTheDocument();
+  expect(screen.getByLabelText("Collagen calibration")).toHaveValue("low-density");
 });
 
 test("sets a typed root, supports folder selection, and reloads inference rows", async () => {
@@ -645,6 +704,7 @@ test("starts inference with the configured server and polls the job to completio
   });
   render(<InferencePage />);
   const serverInput = await screen.findByLabelText("Model server URL");
+  expect(serverInput).toHaveValue("http://192.168.1.157:8001/");
 
   fireEvent.change(serverInput, { target: { value: "http://model:8080" } });
   fireEvent.click(screen.getByRole("button", { name: "Run inference" }));

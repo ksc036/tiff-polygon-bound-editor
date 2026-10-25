@@ -1,10 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import HeatmapReport from "./components/HeatmapReport.jsx";
 import HeatmapScale from "./components/HeatmapScale.jsx";
+import CollagenCalibrationControl from "./components/CollagenCalibrationControl.jsx";
+import { useCollagenCalibration } from "./lib/useCollagenCalibration.js";
+import { concentrationLabel, concentrationResult } from "./lib/collagenPresentation.js";
+import MaskOverlay from "./components/MaskOverlay.jsx";
 import SubimageOverlay from "./components/SubimageOverlay.jsx";
 import SubimagePanel from "./components/SubimagePanel.jsx";
 import {
   addGroup,
+  GROUP_COLORS,
   addPoint,
   clampBoundsToImage,
   clearGroupMigrationVector,
@@ -23,6 +28,13 @@ import {
 } from "./lib/editorState.js";
 import { findNearestSegment } from "./lib/geometry.js";
 import {
+  excludedGroupsForExport,
+  groupDisplayScope,
+  imageGroupDisplay,
+  readGroupDisplayPreferences,
+  saveGroupDisplayPreferences,
+} from "./lib/groupDisplayPreferences.js";
+import {
   buildHeatmapDifference,
   heatmapCompatibilityError,
 } from "./lib/heatmap.js";
@@ -36,20 +48,22 @@ import {
   sameCrop,
 } from "./lib/subimageCrop.js";
 import { buildAnalysisRows, groupDisplayId, roiDisplayId } from "../shared/analysisRows.js";
+import { DEFAULT_HEATMAP_PRESETS, MAX_HEATMAP_CELL_SIZE, isHeatmapCellSize } from "../shared/heatmapSettings.js";
 import {
   COLLAGEN_DENSITY_COLOR_MAX_MAX,
   COLLAGEN_DENSITY_COLOR_MAX_MIN,
   COLLAGEN_DENSITY_DISPLAY_MAX,
-  estimateCollagenDensity,
+  collagenDensityInverseText,
   isCollagenDensityColorMax,
   pixelDensityFromCollagenDensity,
 } from "../shared/collagenDensity.js";
 
 const OPACITY_KEY = "raw16-editor-point-opacity";
+const BOUNDARIES_VISIBLE_KEY = "raw16-editor-boundaries-visible";
+const MASK_OVERLAY_OPACITY_KEY = "raw16-editor-mask-overlay-opacity";
 const DEFAULT_OPACITY = 0.85;
 const SEGMENT_INSERT_SCREEN_THRESHOLD = 8;
 const SEGMENT_INSERT_IMAGE_THRESHOLD = 8;
-const GROUP_COLORS = ["#e11d48", "#2563eb", "#16a34a", "#ca8a04", "#9333ea"];
 const DEFAULT_ROI_LIMITS = { near: 20, mid: 50, far: 100 };
 const ROI_BAND_IDS = ["near", "mid", "far"];
 const ROI_BAND_LABELS = { near: "가까움", mid: "중간", far: "멀리" };
@@ -64,7 +78,7 @@ const DEFAULT_ANALYSIS_PANEL_HEIGHT = 210;
 const MIN_ANALYSIS_PANEL_HEIGHT = 0;
 const MAX_ANALYSIS_PANEL_HEIGHT = 520;
 const ANALYSIS_MODE_LABELS = { outside: "Outside ROI", inside: "Inside area" };
-const FIXED_HEATMAP_PRESETS = { small: 20, medium: 50, large: 100 };
+const HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-cell-sizes-v1";
 const LEGACY_HEATMAP_PRESETS_KEY = "raw16-editor-heatmap-presets";
 const HEATMAP_SELECTED_PRESET_KEY = "raw16-editor-heatmap-selected-preset";
 const HEATMAP_METRIC_KEY = "raw16-editor-heatmap-metric";
@@ -94,9 +108,8 @@ const ANALYSIS_COLUMNS = [
   {
     key: "estimatedCollagenDensity",
     label: "Estimated Collagen Density",
-    help: "Estimated collagen density in mg/ml from the fixed one-phase pixel-density calibration, capped at 0 to 8 mg/ml.",
+    help: "Estimated collagen density from the selected global calibration. Color Max limits colors only, not finite values.",
     format: formatCollagenDensity,
-    value: (metrics) => estimateCollagenDensity(metrics.density),
   },
   {
     key: "globalAlignment",
@@ -125,6 +138,11 @@ const ANALYSIS_COLUMNS = [
 ];
 
 export default function App() {
+  const calibration = useCollagenCalibration();
+  const calibrationModel = calibration.snapshot?.model ?? null;
+  const analysisColumns = ANALYSIS_COLUMNS.map((column) => column.key === "estimatedCollagenDensity"
+    ? { ...column, help: calibrationModel ? collagenDensityInverseText(calibrationModel) : "Calibration unavailable" }
+    : column);
   const canvasRef = useRef(null);
   const stageFrameRef = useRef(null);
   const loadRequestRef = useRef(0);
@@ -133,6 +151,11 @@ export default function App() {
   const heatmapBatchRequestRef = useRef(0);
   const heatmapGenerationInFlightRef = useRef(false);
   const exportInFlightRef = useRef(false);
+  const boundaryApplyInFlightRef = useRef(false);
+  const boundarySaveInFlightRef = useRef(false);
+  const rootChangeInFlightRef = useRef(false);
+  const boundsImageIdRef = useRef(null);
+  const loadedGroupIdsRef = useRef([]);
   const activeImageIdRef = useRef(null);
   const activeRootPathRef = useRef("");
   const boundsRevisionRef = useRef(0);
@@ -140,6 +163,7 @@ export default function App() {
   const pointerRef = useRef(null);
   const [rootPath, setRootPath] = useState("");
   const [activeRootPath, setActiveRootPath] = useState("");
+  const [rootChanging, setRootChanging] = useState(false);
   const [images, setImages] = useState([]);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [bounds, setBounds] = useState(null);
@@ -147,6 +171,7 @@ export default function App() {
   const [activeGroupId, setActiveGroupId] = useState(null);
   const [pointer, setPointer] = useState(null);
   const [dirty, setDirty] = useState(false);
+  const [boundarySaveBusy, setBoundarySaveBusy] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [displayMin, setDisplayMin] = useState(0);
   const [displayMax, setDisplayMax] = useState(65535);
@@ -161,13 +186,16 @@ export default function App() {
   const [activeMetricHelp, setActiveMetricHelp] = useState(null);
   const [imageLayer, setImageLayer] = useState("original");
   const [showRoiOverlay, setShowRoiOverlay] = useState(true);
+  const [showBoundaries, setShowBoundaries] = useState(() => localStorage.getItem(BOUNDARIES_VISIBLE_KEY) !== "false");
+  const [boundaryApplyBusy, setBoundaryApplyBusy] = useState(false);
+  const [showMaskOverlay, setShowMaskOverlay] = useState(false);
+  const [maskOverlayOpacity, setMaskOverlayOpacity] = useState(() => readStoredOpacity(MASK_OVERLAY_OPACITY_KEY, 0.55));
+  const [maskOverlayError, setMaskOverlayError] = useState("");
   const [sidePanelOpen, setSidePanelOpen] = useState(true);
   const [pointOrderOpen, setPointOrderOpen] = useState(true);
   const [roiSettingsOpen, setRoiSettingsOpen] = useState(true);
   const [migrationDraft, setMigrationDraft] = useState(null);
-  const [groupDrawVisibility, setGroupDrawVisibility] = useState({});
-  const [groupStatsVisibility, setGroupStatsVisibility] = useState({});
-  const [groupVectorVisibility, setGroupVectorVisibility] = useState({});
+  const [groupDisplayPreferences, setGroupDisplayPreferences] = useState(readGroupDisplayPreferences);
   const [stageDisplaySize, setStageDisplaySize] = useState(null);
   const [analysisPanelHeight, setAnalysisPanelHeight] = useState(() => {
     const storedValue = localStorage.getItem(ANALYSIS_PANEL_HEIGHT_KEY);
@@ -184,6 +212,11 @@ export default function App() {
     return stored >= 0.1 && stored <= 1 ? stored : DEFAULT_OPACITY;
   });
   const [heatmapPreset, setHeatmapPreset] = useState(loadSelectedHeatmapPreset);
+  const [heatmapPresets, setHeatmapPresets] = useState(loadHeatmapPresets);
+  const [heatmapPresetInputs, setHeatmapPresetInputs] = useState(() =>
+    Object.fromEntries(Object.entries(heatmapPresets).map(([preset, value]) => [preset, String(value)])),
+  );
+  const [heatmapRefreshKey, setHeatmapRefreshKey] = useState(0);
   const [heatmapMetric, setHeatmapMetric] = useState(loadHeatmapMetric);
   const [heatmapCollagenColorMax, setHeatmapCollagenColorMax] = useState(loadHeatmapCollagenColorMax);
   const [heatmapCollagenColorMaxInput, setHeatmapCollagenColorMaxInput] = useState(() =>
@@ -216,34 +249,37 @@ export default function App() {
   const [subimageBatchResult, setSubimageBatchResult] = useState(null);
 
   const activeImage = activeIndex >= 0 ? resolveImageDimensions(images[activeIndex], rawPixels, bounds) : null;
-  const templateOwnerImage = images[0] ?? null;
+  const {
+    draw: groupDrawVisibility, stats: groupStatsVisibility, vector: groupVectorVisibility,
+  } = imageGroupDisplay(groupDisplayPreferences, activeRootPath, activeImage?.id);
   const previousImage = activeIndex > 0 ? images[activeIndex - 1] : null;
   const activeGroup = bounds?.groups.find((group) => group.id === activeGroupId) ?? null;
   const activeRoiLimits = groupRoiLimits(activeGroup);
   const activeGroupUsesOutsideRoi = (activeGroup?.analysisMode ?? "outside") === "outside";
   const hasActiveImageDimensions = hasImageDimensions(activeImage);
   const isBoundsLayer = imageLayer !== "heatmap" && imageLayer !== "subimage";
-  const isTemplateOwner = activeIndex === 0;
-  const subimageDirty = Boolean(subimageDraft) && !sameCrop(subimageDraft, savedSubimageCrop);
-  const subimageDraftMatchesTemplateSize = sameCropSize(subimageDraft, subimageTemplateCrop);
-  const canSetSubimageCrop = isTemplateOwner && !subimageSizeLocked;
+  const subimageDirty = subimageMode.startsWith("select-") ||
+    (Boolean(subimageDraft) && !sameCrop(subimageDraft, savedSubimageCrop));
+  const subimageDraftMatchesTemplateSize = sameCropSize(subimageDraft, savedSubimageCrop ?? subimageTemplateCrop);
+  const canSetSubimageCrop = hasActiveImageDimensions;
   const canCreateMissing =
-    isTemplateOwner && Boolean(subimageDraft) && subimageDraftMatchesTemplateSize;
+    Boolean(subimageDraft) && subimageDraftMatchesTemplateSize;
   const canSaveSubimage =
     subimageSizeLocked &&
     subimageMode === "idle" &&
     subimageDirty &&
-    subimageDraftMatchesTemplateSize &&
-    (Boolean(savedSubimageCrop) || !isTemplateOwner);
+    subimageDraftMatchesTemplateSize;
   const canReplaceSubimages =
-    (subimageMode === "idle" && Boolean(subimageTemplateCrop)) ||
+    (subimageMode === "idle" && Boolean(subimageDraft)) ||
     (subimageMode === "confirm-replacement" && Boolean(subimageDraft));
   const activeImageAspect = hasActiveImageDimensions ? activeImage.width / activeImage.height : 4 / 3;
   const collapsedPanelSpacePx =
     (pointOrderOpen ? 0 : POINT_ORDER_COLLAPSED_STAGE_GAIN) +
     (roiSettingsOpen ? 0 : ROI_SETTINGS_COLLAPSED_STAGE_GAIN);
   const analysisPanelStageAdjustPx = DEFAULT_ANALYSIS_PANEL_HEIGHT - analysisPanelHeight;
-  const selectedHeatmapCellSize = FIXED_HEATMAP_PRESETS[heatmapPreset];
+  const selectedHeatmapCellSize = heatmapPresets[heatmapPreset];
+  const heatmapCellSizes = [...new Set(Object.values(heatmapPresets))];
+  const heatmapPresetInputsValid = Object.values(heatmapPresetInputs).every((value) => isHeatmapCellSize(Number(value)));
   const activeHeatmapSourceKey = heatmapSourceKeyFor({
     rootPath: activeRootPath,
     image: activeImage,
@@ -252,8 +288,8 @@ export default function App() {
   const matchingHeatmap = heatmapSourceKey === activeHeatmapSourceKey ? heatmap : null;
   const activeStageAspect = activeImageAspect;
   const heatmapCollagenColorMaxValue = Number(heatmapCollagenColorMaxInput);
-  const heatmapSaturationAreaFraction = isCollagenDensityColorMax(heatmapCollagenColorMaxValue)
-    ? pixelDensityFromCollagenDensity(heatmapCollagenColorMaxValue)
+  const heatmapSaturationAreaFraction = calibrationModel && isCollagenDensityColorMax(heatmapCollagenColorMaxValue)
+    ? pixelDensityFromCollagenDensity(heatmapCollagenColorMaxValue, calibrationModel)
     : null;
   const heatmapComparison = useMemo(() => {
     if (!heatmapComparePrevious || !matchingHeatmap || !previousHeatmap) {
@@ -267,13 +303,14 @@ export default function App() {
           previous: previousHeatmap,
           metric: heatmapMetric,
           collagenDensityMax: heatmapCollagenColorMax,
+          model: calibrationModel,
         }),
         error: "",
       };
     } catch (error) {
       return { value: null, error: error.message };
     }
-  }, [matchingHeatmap, heatmapCollagenColorMax, heatmapComparePrevious, heatmapMetric, previousHeatmap]);
+  }, [matchingHeatmap, heatmapCollagenColorMax, heatmapComparePrevious, heatmapMetric, previousHeatmap, calibrationModel]);
   const heatmapViewStatus = heatmapLoading
     ? "Loading heatmap"
     : heatmapError
@@ -322,6 +359,8 @@ export default function App() {
   const loadImage = useCallback(
     async (index, nextImages) => {
       const requestId = (loadRequestRef.current += 1);
+      boundsImageIdRef.current = null;
+      loadedGroupIdsRef.current = [];
       const isCurrentRequest = () => requestId === loadRequestRef.current;
       const image = nextImages[index];
       if (!image) {
@@ -331,9 +370,6 @@ export default function App() {
         setBounds(null);
         setActiveGroupId(null);
         setMigrationDraft(null);
-        setGroupDrawVisibility({});
-        setGroupStatsVisibility({});
-        setGroupVectorVisibility({});
         clearAnalysisState();
         return;
       }
@@ -343,9 +379,6 @@ export default function App() {
       setActiveIndex(index);
       clearPointer();
       setMigrationDraft(null);
-      setGroupDrawVisibility({});
-      setGroupStatsVisibility({});
-      setGroupVectorVisibility({});
       setRawPixels(null);
       setStatus("Loading image");
       clearAnalysisState("Loading analysis");
@@ -354,6 +387,8 @@ export default function App() {
         const boundsPayload = await readJsonResponse(await fetch(`/api/images/${image.id}/bounds`));
         if (!isCurrentRequest()) return;
         const nextBounds = normalizeAndClampBounds(boundsPayload.bounds, image);
+        loadedGroupIdsRef.current = nextBounds.groups.map((group) => group.id);
+        boundsImageIdRef.current = image.id;
         setBounds(nextBounds);
         setHasBounds(Boolean(boundsPayload.hasBounds));
         setActiveGroupId(nextBounds.groups[0]?.id ?? null);
@@ -362,6 +397,7 @@ export default function App() {
       } catch (error) {
         if (!isCurrentRequest()) return;
         const emptyBounds = normalizeAndClampBounds(createEmptyBounds(image), image);
+        boundsImageIdRef.current = image.id;
         setBounds(emptyBounds);
         setHasBounds(false);
         setActiveGroupId(null);
@@ -446,8 +482,7 @@ export default function App() {
     if (
       imageLayer !== "subimage" ||
       !activeImage ||
-      !hasActiveImageDimensions ||
-      !templateOwnerImage
+      !hasActiveImageDimensions
     ) {
       setSubimageInteraction(null);
       if (imageLayer === "subimage") setSubimageBusy(null);
@@ -455,7 +490,6 @@ export default function App() {
     }
 
     const requestedImage = activeImage;
-    const ownerImage = templateOwnerImage;
     setSavedSubimageCrop(null);
     setSubimageDraft(null);
     setSubimageMode("idle");
@@ -465,18 +499,13 @@ export default function App() {
 
     async function loadSubimages() {
       try {
-        const activeRequest = readJsonResponse(await fetch(`/api/images/${requestedImage.id}/subimage`));
-        const ownerRequest = ownerImage.id === requestedImage.id
-          ? activeRequest
-          : readJsonResponse(await fetch(`/api/images/${ownerImage.id}/subimage`));
-        const [activePayload, ownerPayload] = await Promise.all([activeRequest, ownerRequest]);
+        const activePayload = await readJsonResponse(await fetch(`/api/images/${requestedImage.id}/subimage`));
         if (!isCurrentSubimageRequest(context)) return;
 
-        const ownerCrop = validSubimageCropFor(ownerPayload, ownerImage);
         const activeCrop = validSubimageCropFor(activePayload, requestedImage);
-        const templateCrop = ownerCrop ?? subimageTemplateCrop;
-        setSubimageTemplateCrop((current) => ownerCrop ?? current);
-        setSubimageSizeLocked((current) => current || Boolean(ownerCrop));
+        const templateCrop = subimageTemplateCrop ?? activeCrop;
+        setSubimageTemplateCrop((current) => current ?? activeCrop);
+        setSubimageSizeLocked((current) => current || Boolean(activeCrop));
 
         setSavedSubimageCrop(activeCrop);
         setSubimageDraft(
@@ -493,11 +522,29 @@ export default function App() {
     return () => {
       if (isCurrentSubimageRequest(context)) subimageRequestRef.current += 1;
     };
-  }, [activeImage?.height, activeImage?.id, activeImage?.width, activeRootPath, imageLayer, templateOwnerImage?.id]);
+  }, [activeImage?.height, activeImage?.id, activeImage?.width, activeRootPath, imageLayer]);
 
   useEffect(() => {
     localStorage.setItem(OPACITY_KEY, String(pointOpacity));
   }, [pointOpacity]);
+
+  useEffect(() => {
+    localStorage.setItem(BOUNDARIES_VISIBLE_KEY, String(showBoundaries));
+  }, [showBoundaries]);
+
+  useEffect(() => {
+    if (!saveGroupDisplayPreferences(groupDisplayPreferences)) {
+      setStatus("Group display settings could not be saved in this browser.");
+    }
+  }, [groupDisplayPreferences]);
+
+  useEffect(() => {
+    localStorage.setItem(MASK_OVERLAY_OPACITY_KEY, String(maskOverlayOpacity));
+  }, [maskOverlayOpacity]);
+
+  useEffect(() => {
+    setMaskOverlayError("");
+  }, [activeImage?.id, activeRootPath, imageLayer, showMaskOverlay]);
 
   useEffect(() => {
     localStorage.setItem(ANALYSIS_PANEL_HEIGHT_KEY, String(analysisPanelHeight));
@@ -514,6 +561,10 @@ export default function App() {
   useEffect(() => {
     localStorage.removeItem(LEGACY_HEATMAP_PRESETS_KEY);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(HEATMAP_PRESETS_KEY, JSON.stringify(heatmapPresets));
+  }, [heatmapPresets]);
 
   useEffect(() => {
     const requestId = (heatmapRequestRef.current += 1);
@@ -554,7 +605,7 @@ export default function App() {
     return () => {
       if (isCurrentRequest()) heatmapRequestRef.current += 1;
     };
-  }, [activeHeatmapSourceKey, hasActiveImageDimensions, imageLayer, selectedHeatmapCellSize]);
+  }, [activeHeatmapSourceKey, hasActiveImageDimensions, imageLayer, selectedHeatmapCellSize, heatmapRefreshKey]);
 
   useEffect(() => {
     const requestId = (previousHeatmapRequestRef.current += 1);
@@ -664,14 +715,14 @@ export default function App() {
 
   const discardSubimageDraft = useCallback(() => {
     setSubimageDraft(savedSubimageCrop);
-    if (isTemplateOwner && !subimageSizeLocked) {
+    if (!subimageSizeLocked) {
       setSubimageTemplateCrop(savedSubimageCrop);
       setSubimageSizeLocked(Boolean(savedSubimageCrop));
     }
     setSubimageMode("idle");
     setSubimageInteraction(null);
     setSubimageError("");
-  }, [isTemplateOwner, savedSubimageCrop, subimageSizeLocked]);
+  }, [savedSubimageCrop, subimageSizeLocked]);
 
   const confirmNavigationDiscard = useCallback(() => {
     if (!dirty && !subimageDirty) return true;
@@ -698,9 +749,10 @@ export default function App() {
   }, [subimageDirty]);
 
   const replaceRoot = async (endpoint, body) => {
-    if (exportInFlightRef.current || subimageBusy !== null) return;
+    if (exportInFlightRef.current || boundaryApplyInFlightRef.current || rootChangeInFlightRef.current || subimageBusy !== null) return;
     if (!confirmNavigationDiscard()) return;
-
+    rootChangeInFlightRef.current = true;
+    setRootChanging(true);
     try {
       const payload = await readJsonResponse(
         await fetch(endpoint, {
@@ -732,6 +784,9 @@ export default function App() {
       }
     } catch (error) {
       setStatus(`Root change failed: ${error.message}`);
+    } finally {
+      rootChangeInFlightRef.current = false;
+      setRootChanging(false);
     }
   };
 
@@ -739,6 +794,8 @@ export default function App() {
     async (nextIndex) => {
       if (
         exportInFlightRef.current ||
+        boundaryApplyInFlightRef.current ||
+        rootChangeInFlightRef.current ||
         nextIndex < 0 ||
         nextIndex >= images.length ||
         nextIndex === activeIndex
@@ -759,13 +816,13 @@ export default function App() {
       } else if (event.code === "ArrowRight") {
         event.preventDefault();
         navigateTo(activeIndex + 1);
-      } else if (event.code === "KeyP" && isBoundsLayer) {
+      } else if (event.code === "KeyP" && isBoundsLayer && showBoundaries) {
         event.preventDefault();
         addPointAtPointer();
-      } else if (event.code === "KeyD" && isBoundsLayer) {
+      } else if (event.code === "KeyD" && isBoundsLayer && showBoundaries) {
         event.preventDefault();
         mutateBounds((current) => deleteNearestPoint(current, activeGroupId, pointerRef.current), "Point deleted");
-      } else if (event.code === "KeyM" && isBoundsLayer) {
+      } else if (event.code === "KeyM" && isBoundsLayer && showBoundaries) {
         event.preventDefault();
         mutateBounds((current) => moveNearestPoint(current, activeGroupId, pointerRef.current), "Point moved");
       }
@@ -780,6 +837,9 @@ export default function App() {
       if (!current) return current;
       const nextBounds = mutator(current);
       if (nextBounds !== current) {
+        const existingIds = new Set(current.groups.map((group) => group.id));
+        const createdIds = nextBounds.groups.filter((group) => !existingIds.has(group.id)).map((group) => group.id);
+        if (createdIds.length) updateGroupDisplay(createdIds, ["draw", "stats", "vector"], true);
         boundsRevisionRef.current += 1;
         setDirty(true);
         setStatus(nextStatus);
@@ -825,7 +885,7 @@ export default function App() {
       let groupId = activeGroupId;
 
       if (!groupId) {
-        nextBounds = addGroup(current);
+        nextBounds = addGroupWithFreshId(current);
         groupId = nextBounds.groups[nextBounds.groups.length - 1]?.id ?? null;
         setActiveGroupId(groupId);
       }
@@ -882,7 +942,7 @@ export default function App() {
       return;
     }
 
-    if (subimageSizeLocked && cropContainsPoint(subimageDraft, start)) {
+    if (cropContainsPoint(subimageDraft, start)) {
       event.preventDefault();
       event.currentTarget.setPointerCapture?.(event.pointerId);
       setSubimageInteraction({ kind: "move", start, startCrop: subimageDraft });
@@ -954,10 +1014,21 @@ export default function App() {
 
   function handleAddGroup() {
     mutateBounds((current) => {
-      const nextBounds = addGroup(current);
+      const nextBounds = addGroupWithFreshId(current);
       setActiveGroupId(nextBounds.groups[nextBounds.groups.length - 1].id);
       return nextBounds;
     }, "Group added");
+  }
+
+  function addGroupWithFreshId(current) {
+    // Never let a replacement inherit preferences belonging to saved or discarded groups.
+    const reservedIds = new Set([
+      ...loadedGroupIdsRef.current,
+      ...Object.keys(groupDrawVisibility),
+      ...Object.keys(groupStatsVisibility),
+      ...Object.keys(groupVectorVisibility),
+    ]);
+    return addGroup(current, [...reservedIds]);
   }
 
   function handleRenameGroup(name) {
@@ -971,7 +1042,7 @@ export default function App() {
       let groupId = activeGroupId;
 
       if (!groupId) {
-        nextBounds = addGroup(current);
+        nextBounds = addGroupWithFreshId(current);
         groupId = nextBounds.groups[nextBounds.groups.length - 1]?.id ?? null;
         setActiveGroupId(groupId);
       }
@@ -993,30 +1064,40 @@ export default function App() {
 
   function handleActiveGroupDrawVisibility(visible) {
     if (!activeGroupId) return;
-    setGroupDrawVisibility((current) => ({ ...current, [activeGroupId]: visible }));
+    updateGroupDisplay([activeGroupId], ["draw"], visible);
   }
 
   function handleActiveGroupStatsVisibility(visible) {
     if (!activeGroupId) return;
-    setGroupStatsVisibility((current) => ({ ...current, [activeGroupId]: visible }));
+    updateGroupDisplay([activeGroupId], ["stats"], visible);
   }
 
   function handleActiveGroupVectorVisibility(visible) {
     if (!activeGroupId) return;
-    setGroupVectorVisibility((current) => ({ ...current, [activeGroupId]: visible }));
+    updateGroupDisplay([activeGroupId], ["vector"], visible);
   }
 
   function handleAllGroupDisplayVisibility(visible) {
     if (!bounds?.groups.length) return;
 
-    const nextVisibility = Object.fromEntries(bounds.groups.map((group) => [group.id, visible]));
-    setGroupDrawVisibility(nextVisibility);
-    setGroupStatsVisibility(nextVisibility);
+    updateGroupDisplay(bounds.groups.map((group) => group.id), ["draw", "stats"], visible);
   }
 
   function handleGroupDisplayVisibility(groupId, visible) {
-    setGroupDrawVisibility((current) => ({ ...current, [groupId]: visible }));
-    setGroupStatsVisibility((current) => ({ ...current, [groupId]: visible }));
+    updateGroupDisplay([groupId], ["draw", "stats"], visible);
+  }
+
+  function updateGroupDisplay(groupIds, types, visible) {
+    if (!activeRootPath || boundsImageIdRef.current !== activeImage?.id || rootChangeInFlightRef.current) return;
+    const scope = groupDisplayScope(activeRootPath, activeImage.id);
+    setGroupDisplayPreferences((current) => {
+      const display = imageGroupDisplay(current, activeRootPath, activeImage.id);
+      const next = { ...display };
+      for (const type of types) {
+        next[type] = { ...display[type], ...Object.fromEntries(groupIds.map((id) => [id, visible])) };
+      }
+      return { ...current, [scope]: next };
+    });
   }
 
   function handleStartMigrationVector() {
@@ -1088,6 +1169,16 @@ export default function App() {
     localStorage.setItem(HEATMAP_SELECTED_PRESET_KEY, preset);
   }
 
+  function commitHeatmapPreset(preset) {
+    const value = Number(heatmapPresetInputs[preset]);
+    if (!isHeatmapCellSize(value)) return;
+    setHeatmapPresetInputs((current) => ({ ...current, [preset]: String(value) }));
+    if (heatmapPresets[preset] === value) return;
+    setHeatmapPresets((current) => ({ ...current, [preset]: value }));
+    setHeatmapBatchResult(null);
+    setHeatmapBatchError("");
+  }
+
   function handleHeatmapMetricSelect(metric) {
     setHeatmapMetric(metric);
     localStorage.setItem(HEATMAP_METRIC_KEY, metric);
@@ -1129,7 +1220,7 @@ export default function App() {
   }
 
   async function handleGenerateHeatmaps() {
-    if (!heatmapBatchRoot || heatmapGenerationInFlightRef.current) return;
+    if (!heatmapBatchRoot || !heatmapPresetInputsValid || heatmapGenerationInFlightRef.current) return;
     heatmapGenerationInFlightRef.current = true;
     const requestId = (heatmapBatchRequestRef.current += 1);
     const isCurrentRequest = () => requestId === heatmapBatchRequestRef.current;
@@ -1146,11 +1237,14 @@ export default function App() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             rootPath: requestedRoot,
-            cellSizes: Object.values(FIXED_HEATMAP_PRESETS),
+            cellSizes: heatmapCellSizes,
           }),
         }),
       );
-      if (isCurrentRequest()) setHeatmapBatchResult(payload);
+      if (isCurrentRequest()) {
+        setHeatmapBatchResult(payload);
+        setHeatmapRefreshKey((current) => current + 1);
+      }
     } catch (error) {
       if (isCurrentRequest()) setHeatmapBatchError(error.message);
     } finally {
@@ -1161,15 +1255,15 @@ export default function App() {
 
   function handleSetSubimageCrop() {
     if (!canSetSubimageCrop || subimageBusy !== null) return;
-    setSubimageMode("select-initial");
+    setSubimageDraft(null);
+    setSubimageMode(subimageSizeLocked ? "select-replacement" : "select-initial");
     setSubimageInteraction(null);
     setSubimageError("");
   }
 
   function handleStartSubimageReplacement() {
     if (!canReplaceSubimages || subimageBusy !== null) return;
-    setSubimageDraft(null);
-    setSubimageMode("select-replacement");
+    setSubimageMode("confirm-replacement");
     setSubimageInteraction(null);
     setSubimageError("");
   }
@@ -1183,7 +1277,7 @@ export default function App() {
       !canSaveSubimage ||
       !activeImage ||
       !subimageDraft ||
-      !sameCropSize(subimageDraft, subimageTemplateCrop) ||
+      rootChangeInFlightRef.current ||
       subimageBusy !== null
     ) return;
     const context = subimageRequestContext();
@@ -1205,7 +1299,7 @@ export default function App() {
       if (!savedCrop) throw new Error("Saved subimage crop is invalid.");
       setSavedSubimageCrop(savedCrop);
       setSubimageDraft(savedCrop);
-      if (isTemplateOwner) setSubimageTemplateCrop(savedCrop);
+      setSubimageTemplateCrop(savedCrop);
     } catch (error) {
       if (isCurrentSubimageRequest(context)) setSubimageError(error.message);
     } finally {
@@ -1234,7 +1328,7 @@ export default function App() {
       !canCreateMissing ||
       !activeImage ||
       !subimageDraft ||
-      !sameCropSize(subimageDraft, subimageTemplateCrop) ||
+      rootChangeInFlightRef.current ||
       subimageBusy !== null
     ) return;
     const context = subimageRequestContext();
@@ -1266,6 +1360,7 @@ export default function App() {
   async function handleApplySubimageReplacement() {
     if (
       subimageMode !== "confirm-replacement" ||
+      rootChangeInFlightRef.current ||
       !subimageDraft ||
       subimageBusy !== null ||
       !window.confirm("Replace all saved subimages with this crop?")
@@ -1312,7 +1407,7 @@ export default function App() {
   }
 
   function handleStageClick(event) {
-    if (!hasActiveImageDimensions || !isBoundsLayer) return;
+    if (!hasActiveImageDimensions || !isBoundsLayer || !showBoundaries) return;
     const clickPoint = eventToImagePoint(event, activeImage, {
       contentRect: imageContentRect(canvasRef.current, event.currentTarget),
     });
@@ -1343,57 +1438,85 @@ export default function App() {
   }
 
   async function handleSave() {
-    if (exportInFlightRef.current) return;
+    if (exportInFlightRef.current || boundaryApplyInFlightRef.current || boundarySaveInFlightRef.current || rootChangeInFlightRef.current) return;
     try {
-      const savedBounds = await saveCurrentBounds();
-      if (!savedBounds) return;
-      setStatus("Saved");
+      await saveCurrentBounds({ announce: true });
     } catch (error) {
       setStatus(`Save failed: ${error.message}`);
     }
   }
 
-  async function saveCurrentBounds() {
+  async function saveCurrentBounds(options) {
     if (!activeImage || !bounds) return null;
-    return saveBounds(bounds);
+    return saveBounds(bounds, options);
   }
 
-  async function saveBounds(boundsToSave) {
+  async function saveBounds(boundsToSave, options) {
+    if (!activeImage || !boundsToSave) return null;
+    if (boundarySaveInFlightRef.current) throw new Error("A boundary save is already in progress.");
+    boundarySaveInFlightRef.current = true;
+    setBoundarySaveBusy(true);
+    try {
+      return await persistBounds(boundsToSave, options);
+    } finally {
+      boundarySaveInFlightRef.current = false;
+      setBoundarySaveBusy(false);
+    }
+  }
+
+  async function persistBounds(boundsToSave, { announce = false } = {}) {
     if (!activeImage || !boundsToSave) {
       return null;
     }
 
     const savedImageId = activeImage.id;
+    const savedRootPath = activeRootPath;
     const savedRevision = boundsRevisionRef.current;
     const nextBounds = normalizeAndClampBounds(boundsToSave, activeImage);
     const payload = await readJsonResponse(
       await fetch(`/api/images/${activeImage.id}/bounds`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(nextBounds),
+        body: JSON.stringify({ ...nextBounds, rootPath: savedRootPath }),
       }),
     );
     const savedBounds = normalizeAndClampBounds(payload.bounds ?? nextBounds, activeImage);
 
-    if (activeImageIdRef.current !== savedImageId || boundsRevisionRef.current !== savedRevision) {
-      return savedBounds;
+    if (activeImageIdRef.current !== savedImageId || activeRootPathRef.current !== savedRootPath) {
+      throw new Error("The selected image or root changed while saving. Reload before continuing.");
     }
 
-    boundsRevisionRef.current += 1;
-    setBounds(savedBounds);
+    const failures = payload.failed ?? [];
+    const hasLaterEdits = boundsRevisionRef.current !== savedRevision;
+    if (hasLaterEdits) {
+      setBounds((current) => mergeSharedBoundaryLinks(current, savedBounds));
+    } else {
+      boundsRevisionRef.current += 1;
+      setBounds(savedBounds);
+    }
+    loadedGroupIdsRef.current = savedBounds.groups.map((group) => group.id);
     setHasBounds(true);
-    setDirty(false);
+    setDirty(hasLaterEdits || failures.length > 0);
+    if (failures.length) {
+      throw new Error(`Boundary synchronization failed (${failures.length}): ${failures.map((failure) => `${failure.imageId}: ${failure.message}`).join(", ")}`);
+    }
+    if (announce) {
+      const synchronized = payload.synchronized?.length ?? 0;
+      setStatus(`${hasLaterEdits ? "Saved snapshot; newer edits remain unsaved" : "Saved"}${synchronized ? `. Boundaries synchronized to ${synchronized} image(s).` : ""}`);
+    }
     return savedBounds;
   }
 
   async function handleDownloadZip() {
-    if (exportInFlightRef.current || !activeRootPath) return;
+    if (!calibration.snapshot || calibration.saving || !heatmapPresetInputsValid) return;
+    if (exportInFlightRef.current || boundaryApplyInFlightRef.current || boundarySaveInFlightRef.current || rootChangeInFlightRef.current || !activeRootPath) return;
 
     exportInFlightRef.current = true;
     setExporting(true);
     setStatus("Preparing ZIP...");
 
     try {
+      const exportCalibration = await calibration.preflight();
       let autoSavedImageId = null;
       if (dirty && activeImage) {
         await saveCurrentBounds();
@@ -1406,6 +1529,10 @@ export default function App() {
         body: JSON.stringify({
           autoSavedImageId,
           estimatedCollagenColorMax: heatmapCollagenColorMax,
+          heatmapCellSizes,
+          calibrationRevision: exportCalibration.revision,
+          rootPath: activeRootPath,
+          excludedGroupIdsByImage: excludedGroupsForExport(groupDisplayPreferences, activeRootPath, images),
         }),
       });
       if (!response.ok) {
@@ -1425,28 +1552,52 @@ export default function App() {
     }
   }
 
-  async function handleImportPrevious() {
-    if (exportInFlightRef.current) return;
-    if (!activeImage || !confirmNavigationDiscard()) return;
+  async function handleApplyBoundaries() {
+    if (exportInFlightRef.current || boundaryApplyInFlightRef.current || boundarySaveInFlightRef.current || rootChangeInFlightRef.current || !activeImage ||
+        boundsImageIdRef.current !== activeImage.id || !bounds?.groups.length || images.length < 2) return;
+    boundaryApplyInFlightRef.current = true;
+    const appliedImageId = activeImage.id;
+    const appliedRootPath = activeRootPath;
+    const appliedRevision = boundsRevisionRef.current;
+    setBoundaryApplyBusy(true);
+    setStatus("Adding boundaries...");
     try {
       const payload = await readJsonResponse(
-        await fetch(`/api/images/${activeImage.id}/bounds/import-previous`, {
+        await fetch(`/api/images/${encodeURIComponent(activeImage.id)}/bounds/apply-all`, {
           method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ bounds, rootPath: activeRootPath }),
         }),
       );
-      const nextBounds = normalizeAndClampBounds(payload.bounds, activeImage);
-      boundsRevisionRef.current += 1;
-      setBounds(nextBounds);
-      setActiveGroupId(nextBounds.groups[0]?.id ?? null);
-      setDirty(true);
-      setStatus("Imported previous bound");
+      if (activeImageIdRef.current !== appliedImageId || activeRootPathRef.current !== appliedRootPath) return;
+      const failures = payload.failed ?? [];
+      if (payload.bounds) {
+        const savedBounds = normalizeAndClampBounds(payload.bounds, activeImage);
+        if (boundsRevisionRef.current === appliedRevision) {
+          boundsRevisionRef.current += 1;
+          setBounds(savedBounds);
+          setDirty(failures.length > 0);
+        } else {
+          // Preserve edits made while the server saved the submitted snapshot.
+          setBounds((current) => mergeSharedBoundaryLinks(current, savedBounds));
+        }
+        loadedGroupIdsRef.current = savedBounds.groups.map((group) => group.id);
+        setHasBounds(true);
+      }
+      const updated = payload.updated?.length ?? 0;
+      setStatus(`Boundaries added to ${payload.added.length} image(s).${updated ? ` Synchronized to ${updated} image(s).` : ""}${failures.length
+        ? ` Failed (${failures.length}): ${failures.map((failure) => `${failure.imageId}: ${failure.message}`).join(", ")}`
+        : ""}`);
     } catch (error) {
-      setStatus(`Import failed: ${error.message}`);
+      setStatus(`Boundary addition failed: ${error.message}`);
+    } finally {
+      boundaryApplyInFlightRef.current = false;
+      setBoundaryApplyBusy(false);
     }
   }
 
   async function handleCalculateAnalysis() {
-    if (!activeImage || !bounds) return;
+    if (boundaryApplyInFlightRef.current || boundarySaveInFlightRef.current || rootChangeInFlightRef.current || !activeImage || !bounds) return;
     setAnalysisLoading(true);
     setAnalysisStatus("Calculating analysis");
     setAnalysisError("");
@@ -1554,11 +1705,11 @@ export default function App() {
     [activeImage?.height, activeImage?.width, hasActiveImageDimensions, showRoiOverlay, visiblePolygons],
   );
   const roiPreviewStatus = useMemo(() => {
-    if (!showRoiOverlay) return "ROI preview hidden";
+    if (!showBoundaries || !showRoiOverlay) return "ROI preview hidden";
     if (!activeImage || !bounds || !hasActiveImageDimensions) return "ROI preview unavailable";
     if (!visiblePolygons.some((group) => group.points.length >= 3)) return "ROI preview needs polygon";
     return "ROI preview local";
-  }, [activeImage, bounds, hasActiveImageDimensions, showRoiOverlay, visiblePolygons]);
+  }, [activeImage, bounds, hasActiveImageDimensions, showBoundaries, showRoiOverlay, visiblePolygons]);
   const roiOverlayLabels = useMemo(
     () =>
       isBoundsLayer && showRoiOverlay
@@ -1573,12 +1724,12 @@ export default function App() {
         className="top-toolbar"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!exporting && subimageBusy === null) replaceRoot("/api/root", { rootPath });
+          if (!exporting && !boundaryApplyBusy && subimageBusy === null) replaceRoot("/api/root", { rootPath });
         }}
       >
         <button
           type="button"
-          disabled={exporting || subimageBusy !== null}
+          disabled={exporting || boundaryApplyBusy || rootChanging || subimageBusy !== null}
           onClick={() => replaceRoot("/api/root/select")}
         >
           Find root
@@ -1591,15 +1742,15 @@ export default function App() {
             type="text"
             value={rootPath}
             placeholder="No root selected"
-            disabled={exporting}
+            disabled={exporting || rootChanging}
             onChange={(event) => setRootPath(event.target.value)}
           />
         </label>
-        <button type="submit" disabled={exporting || subimageBusy !== null}>Set root</button>
+        <button type="submit" disabled={exporting || boundaryApplyBusy || rootChanging || subimageBusy !== null}>Set root</button>
         <button
           type="button"
           aria-label="Previous image"
-          disabled={exporting || activeIndex <= 0}
+          disabled={exporting || boundaryApplyBusy || rootChanging || activeIndex <= 0}
           onClick={() => navigateTo(activeIndex - 1)}
         >
           Prev
@@ -1611,29 +1762,34 @@ export default function App() {
         <button
           type="button"
           aria-label="Next image"
-          disabled={exporting || activeIndex >= images.length - 1}
+          disabled={exporting || boundaryApplyBusy || rootChanging || activeIndex >= images.length - 1}
           onClick={() => navigateTo(activeIndex + 1)}
         >
           Next
         </button>
         {isBoundsLayer ? (
           <>
-            <button type="button" disabled={exporting || !activeImage || !bounds} onClick={handleSave}>
+            <button type="button" disabled={exporting || boundaryApplyBusy || boundarySaveBusy || rootChanging || !activeImage || !bounds} onClick={handleSave}>
               Save
             </button>
-            <button type="button" disabled={exporting || !activeImage} onClick={handleImportPrevious}>
-              Import previous bound
+            <button type="button"
+              disabled={exporting || boundaryApplyBusy || boundarySaveBusy || rootChanging || !activeImage || boundsImageIdRef.current !== activeImage.id || !bounds?.groups.length || images.length < 2}
+              onClick={handleApplyBoundaries}
+              title="Add linked boundaries to all images; saving point edits updates linked copies"
+            >
+              {boundaryApplyBusy ? "Applying boundaries..." : `Apply boundary to all (${images.length})`}
             </button>
           </>
         ) : null}
         <button
           type="button"
           className="export-button"
-          disabled={!activeRootPath || exporting}
+          disabled={!activeRootPath || exporting || boundaryApplyBusy || boundarySaveBusy || rootChanging || !calibration.snapshot || calibration.saving || !heatmapPresetInputsValid}
           onClick={handleDownloadZip}
         >
           {exporting ? "Preparing ZIP..." : "Download as ZIP"}
         </button>
+        <CollagenCalibrationControl calibration={calibration} disabled={exporting} />
       </form>
 
       <aside
@@ -1645,13 +1801,11 @@ export default function App() {
         {imageLayer === "subimage" ? (
           <SubimagePanel
             activeImageName={imageDisplayName(activeImage)}
-            templateOwnerName={imageDisplayName(templateOwnerImage)}
-            isTemplateOwner={isTemplateOwner}
             hasSubimage={Boolean(savedSubimageCrop)}
             crop={subimageDraft}
             dirty={subimageDirty}
             mode={subimageMode}
-            busy={subimageBusy}
+            busy={rootChanging ? "loading" : subimageBusy}
             error={subimageError}
             result={subimageBatchResult}
             canCreateMissing={canCreateMissing}
@@ -1753,13 +1907,14 @@ export default function App() {
               <button
                 type="button"
                 aria-pressed={heatmapMetric === "estimated-collagen-density"}
+                disabled={!calibrationModel}
                 onClick={() => handleHeatmapMetricSelect("estimated-collagen-density")}
               >
                 Estimated Collagen Density
               </button>
             </div>
             <div className="segmented-control heatmap-size-control" aria-label="Heatmap cell size">
-              {Object.entries(FIXED_HEATMAP_PRESETS).map(([preset, value]) => (
+              {Object.entries(heatmapPresets).map(([preset, value]) => (
                 <button
                   type="button"
                   key={preset}
@@ -1823,6 +1978,7 @@ export default function App() {
         ) : null}
         {imageLayer === "heatmap" ? (
           <HeatmapScale
+            model={calibrationModel}
             metric={heatmapMetric}
             comparison={heatmapComparison.value}
             collagenDensityColorMax={heatmapCollagenColorMax}
@@ -1853,21 +2009,41 @@ export default function App() {
             />
           </label>
           <div className="heatmap-preset-fields">
-            {Object.entries(FIXED_HEATMAP_PRESETS).map(([preset, value]) => (
+            {Object.entries(heatmapPresetInputs).map(([preset, value]) => (
               <label key={preset}>
-                <span>{HEATMAP_PRESET_LABELS[preset]}</span>
-                <span className="heatmap-preset-value">{`${value} x ${value}`}</span>
+                <span>{`${HEATMAP_PRESET_LABELS[preset]} (px)`}</span>
+                <input
+                  className="heatmap-preset-value"
+                  aria-label={`${HEATMAP_PRESET_LABELS[preset]} heatmap cell size (px)`}
+                  type="number"
+                  min="1"
+                  max={MAX_HEATMAP_CELL_SIZE}
+                  step="1"
+                  value={value}
+                  disabled={heatmapBatchLoading || exporting}
+                  aria-invalid={!isHeatmapCellSize(Number(value))}
+                  aria-describedby={!isHeatmapCellSize(Number(value)) ? "heatmap-cell-size-error" : undefined}
+                  onChange={(event) => setHeatmapPresetInputs((current) => ({ ...current, [preset]: event.target.value }))}
+                  onBlur={() => commitHeatmapPreset(preset)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      commitHeatmapPreset(preset);
+                    }
+                  }}
+                />
               </label>
             ))}
           </div>
           <button
             type="button"
-            disabled={!heatmapBatchRoot || heatmapBatchLoading}
+            disabled={!heatmapBatchRoot || heatmapBatchLoading || !heatmapPresetInputsValid}
             onClick={handleGenerateHeatmaps}
           >
             {heatmapBatchLoading ? "Generating..." : "Generate Heatmaps"}
           </button>
           <div className="heatmap-batch-state" aria-live="polite">
+            {!heatmapPresetInputsValid ? <span id="heatmap-cell-size-error" className="heatmap-error">Cell size must be an integer from 1 to {MAX_HEATMAP_CELL_SIZE} px.</span> : null}
             {heatmapBatchError ? <span className="heatmap-error">{heatmapBatchError}</span> : null}
             {heatmapBatchResult ? (
               <span>
@@ -2045,6 +2221,32 @@ export default function App() {
               Subimage
             </button>
           </div>
+          {imageLayer === "original" ? <div className="mask-overlay-controls">
+            <button
+              type="button"
+              aria-pressed={showMaskOverlay}
+              disabled={!activeImage || !rawPixels}
+              onClick={() => setShowMaskOverlay((current) => !current)}
+              title="Show the mask in red over the original image"
+            >
+              Mask overlay
+            </button>
+            {showMaskOverlay ? <label htmlFor="mask-overlay-opacity">
+              Mask opacity
+              <input
+                id="mask-overlay-opacity"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={Math.round(maskOverlayOpacity * 100)}
+                onChange={(event) => setMaskOverlayOpacity(Number(event.target.value) / 100)}
+              />
+              <output htmlFor="mask-overlay-opacity">{Math.round(maskOverlayOpacity * 100)}%</output>
+            </label> : null}
+          </div> : null}
+          {imageLayer === "original" && showMaskOverlay && maskOverlayError ?
+            <span className="mask-overlay-error" role="alert">{maskOverlayError}</span> : null}
           {isBoundsLayer ? <label htmlFor="point-opacity">
             Point opacity
             <input
@@ -2056,6 +2258,20 @@ export default function App() {
               value={pointOpacity}
               onChange={(event) => setPointOpacity(Number(event.target.value))}
             />
+          </label> : null}
+          {isBoundsLayer ? <label className="toggle-field" htmlFor="show-boundaries">
+            <input
+              id="show-boundaries"
+              type="checkbox"
+              checked={showBoundaries}
+              onChange={(event) => {
+                setShowBoundaries(event.target.checked);
+                setDragPoint(null);
+                setHoverPointId(null);
+                setMigrationDraft(null);
+              }}
+            />
+            Show boundaries
           </label> : null}
           <label htmlFor="display-min">
             Display min
@@ -2107,6 +2323,12 @@ export default function App() {
             onPointerCancel={handleStagePointerEnd}
             onClick={handleStageClick}
             style={{
+              cursor: imageLayer === "subimage"
+                ? subimageBusy ? "progress"
+                  : subimageMode.startsWith("select-") ? "crosshair"
+                    : subimageInteraction?.kind === "move" ? "grabbing"
+                      : subimageDraft ? "grab" : "default"
+                : undefined,
               aspectRatio: imageLayer === "heatmap"
                 ? String(activeStageAspect)
                 : hasActiveImageDimensions
@@ -2123,6 +2345,17 @@ export default function App() {
                 ref={canvasRef}
                 className={`raw-canvas${imageLayer === "original" || imageLayer === "subimage" ? "" : " hidden-layer"}`}
                 aria-label="raw16 image"
+              />
+            ) : null}
+            {activeImage && rawPixels && imageLayer === "original" && showMaskOverlay ? (
+              <MaskOverlay
+                key={`${activeRootPath}:${activeImage.id}`}
+                imageId={activeImage.id}
+                width={activeImage.width}
+                height={activeImage.height}
+                opacity={maskOverlayOpacity}
+                revision={analysis?.updatedAt}
+                onError={setMaskOverlayError}
               />
             ) : null}
             {activeImage && hasActiveImageDimensions && imageLayer === "subimage" ? (
@@ -2148,6 +2381,7 @@ export default function App() {
             ) : null}
             {imageLayer === "heatmap" && matchingHeatmap ? (
               <HeatmapReport
+                model={calibrationModel}
                 heatmap={matchingHeatmap}
                 metric={heatmapMetric}
                 comparison={heatmapComparison.value}
@@ -2159,7 +2393,7 @@ export default function App() {
                 collagenDensityColorMax={heatmapCollagenColorMax}
               />
             ) : null}
-            {activeImage && hasActiveImageDimensions && bounds && isBoundsLayer ? (
+            {activeImage && hasActiveImageDimensions && bounds && isBoundsLayer && showBoundaries ? (
               <svg
                 className="overlay"
                 viewBox={`0 0 ${activeImage.width} ${activeImage.height}`}
@@ -2390,7 +2624,7 @@ export default function App() {
             <strong>Analysis</strong>
             <span className="status-chip">{hasAnalysis ? "Saved analysis" : "No saved analysis"}</span>
             <span className="status-line">{analysisStatus}</span>
-            <button type="button" disabled={!activeImage || !bounds || analysisLoading} onClick={handleCalculateAnalysis}>
+            <button type="button" disabled={boundaryApplyBusy || boundarySaveBusy || !activeImage || !bounds || analysisLoading} onClick={handleCalculateAnalysis}>
               {analysisLoading ? "Working" : "Calculate"}
             </button>
             {imageLayer !== "heatmap" ? <button
@@ -2482,7 +2716,7 @@ export default function App() {
                       <th>Group</th>
                       <th>Mode</th>
 		                      <th>ROI</th>
-		                      {ANALYSIS_COLUMNS.map((column) => (
+		                      {analysisColumns.map((column) => (
 	                        <MetricColumnHeader
 	                          activeMetricHelp={activeMetricHelp}
 	                          column={column}
@@ -2505,9 +2739,11 @@ export default function App() {
                             </td>
 	                        <td>{row.modeLabel}</td>
 		                        <td>{row.bandLabel}</td>
-		                        {ANALYSIS_COLUMNS.map((column) => (
+		                        {analysisColumns.map((column) => (
 	                          <td key={column.key}>
-                              {column.format(analysisColumnValue(column, row.metrics))}
+                              {column.key === "estimatedCollagenDensity"
+                                ? concentrationLabel(concentrationResult(row.metrics, calibrationModel, heatmapCollagenColorMax))
+                                : column.format(analysisColumnValue(column, row.metrics))}
                             </td>
 	                        ))}
 	                      </tr>
@@ -2837,7 +3073,18 @@ function downloadBlob(blob, filename) {
 
 function loadSelectedHeatmapPreset() {
   const stored = localStorage.getItem(HEATMAP_SELECTED_PRESET_KEY);
-  return Object.hasOwn(FIXED_HEATMAP_PRESETS, stored) ? stored : "small";
+  return Object.hasOwn(DEFAULT_HEATMAP_PRESETS, stored) ? stored : "small";
+}
+
+function loadHeatmapPresets() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(HEATMAP_PRESETS_KEY));
+    return Object.fromEntries(Object.entries(DEFAULT_HEATMAP_PRESETS).map(([preset, fallback]) =>
+      [preset, isHeatmapCellSize(stored?.[preset]) ? stored[preset] : fallback],
+    ));
+  } catch {
+    return { ...DEFAULT_HEATMAP_PRESETS };
+  }
 }
 
 function loadHeatmapMetric() {
@@ -3028,6 +3275,8 @@ function normalizeGroups(groups) {
 
       return {
         id,
+        ...(typeof group.sharedBoundaryId === "string" && group.sharedBoundaryId.trim()
+          ? { sharedBoundaryId: group.sharedBoundaryId } : {}),
         name: typeof group.name === "string" && group.name.trim() ? group.name : `Group ${groupIndex + 1}`,
         color:
           typeof group.color === "string" && group.color.trim()
@@ -3039,6 +3288,13 @@ function normalizeGroups(groups) {
         points: normalizePoints(points),
       };
     });
+}
+
+function mergeSharedBoundaryLinks(current, saved) {
+  if (!current) return current;
+  const links = new Map(saved.groups.filter((group) => group.sharedBoundaryId).map((group) => [group.id, group.sharedBoundaryId]));
+  return { ...current, groups: current.groups.map((group) => links.has(group.id)
+    ? { ...group, sharedBoundaryId: links.get(group.id) } : group) };
 }
 
 function normalizeOptionalRoiLimits(roiLimits) {

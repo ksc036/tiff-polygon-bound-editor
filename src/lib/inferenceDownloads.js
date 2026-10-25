@@ -1,4 +1,6 @@
 import JSZip from "jszip";
+import { calibrationMetadata, getCollagenDensityModel, collagenDensityModelText } from "../../shared/collagenDensity.js";
+import { concentrationLabel, concentrationResult } from "./collagenPresentation.js";
 import {
   HISTOGRAM_DISPLAY_BIN_COUNT,
   HISTOGRAM_MAX_HEIGHT,
@@ -7,7 +9,7 @@ import {
 } from "./inferenceHistogram.js";
 
 const HISTOGRAM_WIDTH = 960;
-const HISTOGRAM_HEIGHT = 760;
+const HISTOGRAM_HEIGHT = 930;
 const COLORS = {
   background: "#10171d",
   chart: "#121b22",
@@ -134,10 +136,10 @@ function drawHistogram(context, { histogram, label, threshold, top }) {
 }
 
 function percentLabel(value) {
-  return `${((Number.isFinite(value) ? value : 0) * 100).toFixed(2)}%`;
+  return Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "No data";
 }
 
-function histogramCanvas({ imageFile, histograms, metrics, threshold }) {
+function histogramCanvas({ imageFile, histograms, metrics, threshold, calibration }) {
   const { canvas, context } = createCanvas(HISTOGRAM_WIDTH, HISTOGRAM_HEIGHT);
   context.fillStyle = COLORS.background;
   context.fillRect(0, 0, canvas.width, canvas.height);
@@ -156,7 +158,30 @@ function histogramCanvas({ imageFile, histograms, metrics, threshold }) {
   drawAlignedText(context, percentLabel(metrics.wholeImage?.areaFraction), HISTOGRAM_WIDTH - 36, nextTop + 24, "right");
   drawAlignedText(context, "ROI area fraction", 36, nextTop + 62);
   drawAlignedText(context, percentLabel(metrics.roi?.areaFraction), HISTOGRAM_WIDTH - 36, nextTop + 62, "right");
+  context.font = "20px system-ui, sans-serif";
+  drawAlignedText(context, `Whole image concentration: ${concentrationLabel(concentrationResult(metrics.wholeImage, calibration.model))}`, 36, nextTop + 104);
+  drawAlignedText(context, `ROI concentration: ${concentrationLabel(concentrationResult(metrics.roi, calibration.model))}`, 36, nextTop + 138);
+  context.fillStyle = COLORS.muted;
+  context.font = "18px system-ui, sans-serif";
+  drawAlignedText(context, `${calibration.model.label} collagen correlation curve (mg/mL)`, 36, nextTop + 178);
+  drawAlignedText(context, collagenDensityModelText(calibration.model), 36, nextTop + 210);
   return canvas;
+}
+
+function pinCalibration(calibration) {
+  if (!calibration || !Number.isInteger(calibration.revision) || calibration.revision < 0) {
+    throw new Error("Confirmed collagen calibration is required for download.");
+  }
+  return Object.freeze({ ...calibration, model: getCollagenDensityModel(calibration.modelId ?? calibration.model) });
+}
+
+function regionMetadata(metrics, histogram, model) {
+  return {
+    areaPx: metrics?.areaPx ?? histogram?.areaPx ?? 0,
+    maskPixelCount: metrics?.pixelCount ?? metrics?.maskPixelCount ?? 0,
+    areaFraction: Number.isFinite(metrics?.areaFraction) ? metrics.areaFraction : null,
+    ...concentrationResult(metrics, model),
+  };
 }
 
 export async function createInferenceOutputFiles({
@@ -167,7 +192,10 @@ export async function createInferenceOutputFiles({
   metrics,
   threshold,
   imageFile,
+  imageId,
+  calibration,
 }) {
+  const pinned = pinCalibration(calibration);
   if (!sourceCanvas?.width || !sourceCanvas?.height || !overlayBlob || !roi || !histograms?.wholeImage || !histograms?.roi) {
     throw new Error("Inference download inputs are not ready.");
   }
@@ -176,7 +204,7 @@ export async function createInferenceOutputFiles({
     const originalRoiCanvas = originalWithRoiCanvas(sourceCanvas, roi);
     const wholeCanvas = compositeCanvas(sourceCanvas, overlayBitmap);
     const roiCanvas = compositeCanvas(sourceCanvas, overlayBitmap, roi);
-    const chartsCanvas = histogramCanvas({ imageFile, histograms, metrics, threshold });
+    const chartsCanvas = histogramCanvas({ imageFile, histograms, metrics, threshold, calibration: pinned });
     const [originalRoiBlob, wholeBlob, roiBlob, chartsBlob] = await Promise.all([
       canvasBlob(originalRoiCanvas),
       canvasBlob(wholeCanvas),
@@ -192,6 +220,11 @@ export async function createInferenceOutputFiles({
     const baseName = outputBaseName(imageFile);
     return {
       baseName,
+      metadata: {
+        imageId, imageFile, threshold, roi: { ...roi },
+        wholeImage: regionMetadata(metrics.wholeImage, histograms.wholeImage, pinned.model),
+        roiMetrics: regionMetadata(metrics.roi, histograms.roi, pinned.model),
+      },
       files: [
         { name: `${baseName}_whole_original_roi.png`, bytes: originalRoiBytes },
         { name: `${baseName}_whole_mask_overlay.png`, bytes: wholeBytes },
@@ -210,16 +243,21 @@ async function zipDownloadBlob(zip) {
 }
 
 export async function createInferenceOutputZip(options) {
-  const { baseName, files } = await createInferenceOutputFiles(options);
+  const calibration = pinCalibration(options.calibration);
+  const metadata = calibrationMetadata({ ...calibration, colorMax: null });
+  const { baseName, files, metadata: imageMetadata } = await createInferenceOutputFiles({ ...options, calibration });
   const zip = new JSZip();
   files.forEach((file) => zip.file(file.name, file.bytes));
+  zip.file("calibration_metadata.json", JSON.stringify({ ...metadata, images: [imageMetadata] }, null, 2));
   return {
     blob: await zipDownloadBlob(zip),
     filename: `${baseName}_inference_outputs.zip`,
   };
 }
 
-export async function createAllInferenceOutputsZip({ images, loadImageOutputs, onProgress }) {
+export async function createAllInferenceOutputsZip({ images, loadImageOutputs, onProgress, calibration }) {
+  const pinned = pinCalibration(calibration);
+  const metadata = { ...calibrationMetadata({ ...pinned, colorMax: null }), images: [] };
   if (!Array.isArray(images) || images.length === 0 || typeof loadImageOutputs !== "function") {
     throw new Error("Completed inference images are not ready for download.");
   }
@@ -227,7 +265,7 @@ export async function createAllInferenceOutputsZip({ images, loadImageOutputs, o
   const usedFolders = new Set();
   for (let index = 0; index < images.length; index += 1) {
     onProgress?.({ current: index + 1, total: images.length });
-    const output = await createInferenceOutputFiles(await loadImageOutputs(images[index]));
+    const output = await createInferenceOutputFiles({ ...await loadImageOutputs(images[index]), calibration: pinned });
     let folderName = output.baseName;
     let suffix = 2;
     while (usedFolders.has(folderName)) {
@@ -236,7 +274,9 @@ export async function createAllInferenceOutputsZip({ images, loadImageOutputs, o
     }
     usedFolders.add(folderName);
     output.files.forEach((file) => zip.file(`${folderName}/${file.name}`, file.bytes));
+    metadata.images.push({ ...output.metadata, folder: folderName });
   }
+  zip.file("calibration_metadata.json", JSON.stringify(metadata, null, 2));
   return {
     blob: await zipDownloadBlob(zip),
     filename: "inference_outputs.zip",

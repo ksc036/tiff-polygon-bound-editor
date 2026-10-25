@@ -16,6 +16,43 @@ import {
 } from "./editorState.js";
 
 describe("editor state", () => {
+  test("does not reuse a reserved saved or discarded group ID", () => {
+    const bounds = createEmptyBounds({ width: 100, height: 80 });
+    const next = addGroup(bounds, ["group-1", "group-2", "imported-id"]);
+    expect(next.groups[0].id).toBe("group-3");
+  });
+
+  test("chooses an unused color even when existing groups have imported IDs", () => {
+    const bounds = {
+      ...createEmptyBounds({ width: 100, height: 80 }),
+      groups: [
+        { id: "imported-a", color: "#E11D48", points: [] },
+        { id: "imported-b", color: "#2563eb", points: [] },
+      ],
+    };
+    const updated = addGroup(bounds);
+    expect(updated.groups.at(-1).color).not.toBe("#e11d48");
+    expect(updated.groups.at(-1).color).not.toBe("#2563eb");
+    expect(updated.groups.slice(0, 2)).toEqual(bounds.groups);
+  });
+
+  test("uses distinct colors for the first ten groups", () => {
+    let bounds = createEmptyBounds({ width: 100, height: 80 });
+    for (let i = 0; i < 10; i += 1) bounds = addGroup(bounds);
+    expect(new Set(bounds.groups.map((group) => group.color)).size).toBe(10);
+  });
+
+  test("reuses the least-used palette colors only after every color is assigned", () => {
+    let bounds = createEmptyBounds({ width: 100, height: 80 });
+    for (let i = 0; i < 21; i += 1) bounds = addGroup(bounds);
+    const counts = Object.values(bounds.groups.reduce((acc, group) => {
+      acc[group.color] = (acc[group.color] ?? 0) + 1;
+      return acc;
+    }, {}));
+    expect(counts.length).toBeGreaterThanOrEqual(10);
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
+  });
+
   test("adds a point to the active group", () => {
     const bounds = addGroup(
       createEmptyBounds({

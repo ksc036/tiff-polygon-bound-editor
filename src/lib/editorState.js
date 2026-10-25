@@ -1,6 +1,9 @@
 import { clampPointToBounds, findNearestPoint } from "./geometry.js";
 
-const GROUP_COLORS = ["#e11d48", "#2563eb", "#16a34a", "#ca8a04", "#9333ea"];
+export const GROUP_COLORS = [
+  "#e11d48", "#2563eb", "#16a34a", "#ca8a04", "#9333ea",
+  "#06b6d4", "#f97316", "#f472b6", "#a3e635", "#e2e8f0",
+];
 const ANALYSIS_MODES = new Set(["outside", "inside"]);
 
 export function createEmptyBounds(image) {
@@ -14,8 +17,16 @@ export function createEmptyBounds(image) {
   };
 }
 
-export function addGroup(bounds) {
-  const groupNumber = nextNumber(bounds.groups, "group-");
+export function addGroup(bounds, reservedGroupIds = []) {
+  const groupNumber = nextNumber([...bounds.groups, ...reservedGroupIds.map((id) => ({ id }))], "group-");
+  const colorCounts = new Map(GROUP_COLORS.map((color) => [color, 0]));
+  for (const group of bounds.groups) {
+    const color = group.color?.trim().toLowerCase();
+    if (colorCounts.has(color)) colorCounts.set(color, colorCounts.get(color) + 1);
+  }
+  const color = GROUP_COLORS.reduce((best, candidate) =>
+    colorCounts.get(candidate) < colorCounts.get(best) ? candidate : best,
+  );
 
   return {
     ...bounds,
@@ -24,7 +35,7 @@ export function addGroup(bounds) {
       {
         id: `group-${groupNumber}`,
         name: `Group ${groupNumber}`,
-        color: GROUP_COLORS[(groupNumber - 1) % GROUP_COLORS.length],
+        color,
         analysisMode: "outside",
         migrationVector: null,
         points: [],

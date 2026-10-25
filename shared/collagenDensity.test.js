@@ -9,38 +9,42 @@ import {
 } from "./collagenDensity.js";
 
 describe("collagen density model", () => {
-  test("matches the provided area-fraction concentration curve", () => {
-    expect(pixelDensityFromCollagenDensity(0)).toBeCloseTo(0.0569, 10);
-    expect(pixelDensityFromCollagenDensity(1)).toBeCloseTo(0.08729294514093588, 10);
-    expect(pixelDensityFromCollagenDensity(2)).toBeCloseTo(0.11523437458564056, 10);
-    expect(pixelDensityFromCollagenDensity(3)).toBeCloseTo(0.14092202926316838, 10);
+  test("defaults to the approved High density correlation curve", () => {
+    expect(pixelDensityFromCollagenDensity(0)).toBeCloseTo(0.02, 10);
+    expect(pixelDensityFromCollagenDensity(1)).toBeCloseTo(0.07681590864870272, 10);
+    expect(pixelDensityFromCollagenDensity(2)).toBeCloseTo(0.12035313578536214, 10);
+    expect(pixelDensityFromCollagenDensity(3)).toBeCloseTo(0.15371509710624914, 10);
+    expect(pixelDensityFromCollagenDensity(8)).toBeCloseTo(0.23419909581456913, 10);
+    expect(pixelDensityFromCollagenDensity(10)).toBeCloseTo(0.24612956213312234, 10);
   });
 
   test("reports the provided curve in exported model metadata", () => {
     expect(collagenDensityModelText()).toBe(
-      "Pixel Density = -0.3768 * exp(-0.0841 * Collagen Density) + 0.4337",
+      "Area Fraction = 0.2631 - 0.2431 * exp(-0.2662 * Collagen Density)",
     );
   });
 
   test("inverts the fixed one-phase association curve", () => {
-    expect(estimateCollagenDensity(0.08729294514093588)).toBeCloseTo(1, 10);
-    expect(estimateCollagenDensity(0.11523437458564056)).toBeCloseTo(2, 10);
-    expect(estimateCollagenDensity(0.0569)).toBeCloseTo(0, 10);
+    expect(estimateCollagenDensity(0.07681590864870272)).toBeCloseTo(1, 10);
+    expect(estimateCollagenDensity(0.12035313578536214)).toBeCloseTo(2, 10);
+    expect(estimateCollagenDensity(0.02)).toBeCloseTo(0, 10);
   });
 
-  test("saturates pixel densities outside the displayed model range", () => {
-    const { plateau, y0 } = COLLAGEN_DENSITY_MODEL;
-    expect(estimateCollagenDensity(plateau)).toBe(8);
-    expect(estimateCollagenDensity(plateau + 0.01)).toBe(8);
+  test("does not invent finite concentrations outside the model range", () => {
+    const { plateau } = COLLAGEN_DENSITY_MODEL;
+    const y0 = pixelDensityFromCollagenDensity(0);
+    expect(estimateCollagenDensity(plateau)).toBeNull();
+    expect(estimateCollagenDensity(plateau + 0.01)).toBeNull();
+    expect(estimateCollagenDensity(y0)).toBe(0);
     expect(estimateCollagenDensity(y0 - 0.01)).toBe(0);
   });
 
-  test("uses a requested calculation maximum while keeping 8 as the default", () => {
+  test("preserves actual finite concentrations independently of the color maximum", () => {
     const pixelDensityAtTen = pixelDensityFromCollagenDensity(10);
 
-    expect(estimateCollagenDensity(pixelDensityAtTen)).toBe(8);
+    expect(estimateCollagenDensity(pixelDensityAtTen)).toBeCloseTo(10, 10);
     expect(estimateCollagenDensity(pixelDensityAtTen, 10)).toBeCloseTo(10, 10);
-    expect(estimateCollagenDensity(0.8, 10)).toBe(10);
+    expect(estimateCollagenDensity(0.8, 10)).toBeNull();
   });
 
   test("accepts only supported color-scale maxima", () => {

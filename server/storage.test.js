@@ -307,6 +307,117 @@ describe("createStorage", () => {
     });
   });
 
+  test("serializes complete bounds updates across frozen contexts and ordinary saves", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "target");
+    const storage = createStorage({ initialRoot: rootDir });
+    expect(storage.createBoundaryMutationContext).toBeTypeOf("function");
+    const first = storage.createBoundaryMutationContext();
+    const second = storage.createBoundaryMutationContext();
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(first.setRoot).toBeUndefined();
+    const append = (id) => async (bounds) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { ...bounds, groups: [...bounds.groups, { id, points: [] }] };
+    };
+
+    await Promise.all([
+      storage.saveBounds("target", { groups: [{ id: "saved", points: [] }] }),
+      first.updateBounds("target", append("first")),
+      second.updateBounds("target", append("second")),
+    ]);
+
+    expect((await storage.loadBounds("target")).groups.map(({ id }) => id)).toEqual(["saved", "first", "second"]);
+    expect(await readdir(storage.imagePaths("target").boundDir)).toEqual(["target.bounds.json"]);
+  });
+
+  test("captures bounds update paths before an active root switch", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    await writeImage(firstRoot, "target");
+    await writeImage(secondRoot, "target");
+    const storage = createStorage({ initialRoot: firstRoot });
+    expect(storage.createBoundaryMutationContext).toBeTypeOf("function");
+    const context = storage.createBoundaryMutationContext();
+    const update = context.updateBounds("target", (bounds) => ({
+      ...bounds, groups: [{ id: "appended", points: [] }],
+    }));
+    storage.setRoot(secondRoot);
+    await update;
+
+    expect((await createStorage({ initialRoot: firstRoot }).loadBounds("target")).groups).toEqual([
+      { id: "appended", points: [] },
+    ]);
+    await expect(readFile(storage.imagePaths("target").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("boundary context reads and saves remain bound to the captured root", async () => {
+    const firstRoot = await createTempRoot();
+    const secondRoot = await createTempRoot();
+    for (const root of [firstRoot, secondRoot]) await writeImage(root, "target");
+    const storage = createStorage({ initialRoot: firstRoot });
+    const context = storage.createBoundaryMutationContext();
+    storage.setRoot(secondRoot);
+    const saved = await context.saveBounds("target", {
+      groups: [{ id: "local", sharedBoundaryId: "shared", points: [] }],
+    });
+    expect(await context.loadBounds("target")).toEqual(saved);
+    expect((await createStorage({ initialRoot: firstRoot }).loadBounds("target")).groups).toEqual([
+      { id: "local", sharedBoundaryId: "shared", points: [] },
+    ]);
+    await expect(readFile(storage.imagePaths("target").boundsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test.skipIf(process.platform !== "win32")("shares the bounds update queue with namespaced Windows path aliases", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "target");
+    const storage = createStorage({ initialRoot: rootDir });
+    await storage.saveBounds("target", { groups: [{ id: "keep", points: [] }] });
+    const first = storage.createBoundaryMutationContext();
+    storage.setRoot(path.toNamespacedPath(rootDir).toUpperCase());
+    const second = storage.createBoundaryMutationContext();
+
+    await Promise.all([
+      first.updateBounds("target", async (bounds) => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return { ...bounds, groups: [...bounds.groups, { id: "first", points: [] }] };
+      }),
+      second.updateBounds("target", (bounds) => ({ ...bounds, groups: [...bounds.groups, { id: "second", points: [] }] })),
+    ]);
+
+    expect((await storage.loadBounds("target")).groups.map(({ id }) => id)).toEqual(["keep", "first", "second"]);
+  });
+
+  test("a bounds update rename failure preserves the destination and cleans its temporary file", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "target");
+    const storage = createStorage({ initialRoot: rootDir });
+    await storage.saveBounds("target", { groups: [{ id: "keep", points: [] }] });
+    const before = await readFile(storage.imagePaths("target").boundsPath, "utf8");
+    vi.mocked(fsPromises.rename).mockRejectedValueOnce(new Error("rename failed"));
+
+    await expect(storage.createBoundaryMutationContext().updateBounds("target", (bounds) => ({
+      ...bounds, groups: [...bounds.groups, { id: "new", points: [] }],
+    }))).rejects.toThrow("rename failed");
+
+    expect(await readFile(storage.imagePaths("target").boundsPath, "utf8")).toBe(before);
+    expect(await readdir(storage.imagePaths("target").boundDir)).toEqual(["target.bounds.json"]);
+  });
+
+  test("a failed bounds update leaves old data intact and releases the queue", async () => {
+    const rootDir = await createTempRoot();
+    await writeImage(rootDir, "target");
+    const storage = createStorage({ initialRoot: rootDir });
+    await storage.saveBounds("target", { groups: [{ id: "keep", points: [] }] });
+    const before = await readFile(storage.imagePaths("target").boundsPath, "utf8");
+    expect(storage.createBoundaryMutationContext).toBeTypeOf("function");
+    const context = storage.createBoundaryMutationContext();
+    await expect(context.updateBounds("target", () => { throw new Error("invalid bounds"); })).rejects.toThrow("invalid bounds");
+    expect(await readFile(storage.imagePaths("target").boundsPath, "utf8")).toBe(before);
+    await context.updateBounds("target", (bounds) => ({ ...bounds, groups: [...bounds.groups, { id: "next", points: [] }] }));
+    expect((await storage.loadBounds("target")).groups.map(({ id }) => id)).toEqual(["keep", "next"]);
+  });
+
   test("serializes concurrent bounds saves so the later invocation wins", async () => {
     const rootDir = await createTempRoot();
     await writeImage(rootDir, "selected-stack-sequence_T01", "frame001.tif");

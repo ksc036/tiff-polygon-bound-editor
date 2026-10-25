@@ -7,9 +7,53 @@ import {
   heatmapCellAtPoint,
   heatmapCompatibilityError,
   heatmapDisplayRange,
+  heatmapDisplayValue,
   heatmapMetricValue,
   infernoColor,
 } from "./heatmap.js";
+import { pixelDensityFromCollagenDensity } from "../../shared/collagenDensity.js";
+
+test("uses the selected calibration without capping finite comparisons", () => {
+  const current = heatmapWithDensities([pixelDensityFromCollagenDensity(12, "high-density"), 0.3, 0]);
+  const previous = heatmapWithDensities([pixelDensityFromCollagenDensity(10, "high-density"), 0.1, 0]);
+  current.cells[2].areaPx = 0;
+  expect(heatmapMetricValue(current.cells[0], "collagen-density", 3, "high-density")).toBeCloseTo(12);
+  expect(heatmapDisplayValue(current.cells[1], "collagen-density", 3, "high-density")).toBe(3);
+  expect(heatmapDisplayValue(current.cells[2], "collagen-density", 3, "high-density")).toBeNull();
+  const result = buildHeatmapDifference({ current, previous, metric: "collagen-density", collagenDensityMax: 3, model: "high-density" });
+  expect(result.values[0]).toBeCloseTo(2);
+  expect(result.values[1]).toBeCloseTo(1.5007161093);
+  expect(result.values[2]).toBeNull();
+  expect(heatmapMetricValue({ pixelDensity: 0.1 }, "collagen-density", 8, "low-density")).toBeCloseTo(1.5395741158);
+});
+
+test.each([3, 8, 10])("uses Max %s for out-of-model comparison cells while preserving missing data", (maximum) => {
+  const current = heatmapWithDensities([0.1087, 0, 0.2, null, 0.2, 0.2]);
+  const previous = heatmapWithDensities([0, 0.2, 0.1087, 0.2, 0.2, null]);
+  current.cells[4].areaPx = 0;
+
+  const result = buildHeatmapDifference({ current, previous, metric: "estimated-collagen-density",
+    collagenDensityMax: maximum, model: "low-density" });
+
+  expect(result.currentValues).toEqual([maximum, 0, maximum, null, null, maximum]);
+  expect(result.previousValues).toEqual([0, maximum, maximum, maximum, maximum, null]);
+  expect(result.values).toEqual([maximum, -maximum, 0, null, null, null]);
+  expect(result.maxAbs).toBe(maximum);
+});
+
+test.each([-0.1, 1.2, null, undefined, NaN, Infinity])("invalid AF %s is no data for both metrics", (pixelDensity) => {
+  for (const metric of ["pixel-density", "collagen-density"]) {
+    expect(heatmapMetricValue({ pixelDensity }, metric)).toBeNull();
+    expect(heatmapDisplayValue({ pixelDensity }, metric)).toBeNull();
+  }
+});
+
+test("empty cells are distinct from true zero cells for both metrics", () => {
+  for (const metric of ["pixel-density", "collagen-density"]) {
+    expect(heatmapMetricValue({ pixelDensity: 0, areaPx: 0 }, metric)).toBeNull();
+    expect(heatmapMetricValue({ pixelDensity: 0, areaPx: 1 }, metric)).toBe(0);
+  }
+});
 
 function heatmap(overrides = {}) {
   const width = overrides.width ?? 10;
@@ -52,13 +96,13 @@ function heatmapWithDensities(values) {
 }
 
 describe("heatmap calculations", () => {
-  test("uses the fixed one-phase density model", () => {
-    expect(estimateHeatmapCollagenDensity(0.1)).toBeCloseTo(1.4443776093);
+  test("uses the default High density model", () => {
+    expect(estimateHeatmapCollagenDensity(0.1)).toBeCloseTo(1.4992838907);
   });
 
   test("saturates values outside the displayed model range", () => {
-    expect(estimateHeatmapCollagenDensity(0.5)).toBe(8);
-    expect(estimateHeatmapCollagenDensity(0.5, 10)).toBe(10);
+    expect(estimateHeatmapCollagenDensity(0.5)).toBeNull();
+    expect(estimateHeatmapCollagenDensity(0.5, 10)).toBeNull();
     expect(estimateHeatmapCollagenDensity(Number.NaN)).toBeNull();
   });
 
@@ -66,7 +110,7 @@ describe("heatmap calculations", () => {
     const cell = { pixelDensity: 0.1 };
 
     expect(heatmapMetricValue(cell, "pixel-density")).toBe(0.1);
-    expect(heatmapMetricValue(cell, "estimated-collagen-density")).toBeCloseTo(1.4443776093);
+    expect(heatmapMetricValue(cell, "estimated-collagen-density")).toBeCloseTo(1.4992838907);
   });
 
   test("calculates signed previous-image changes without rescaling values", () => {
@@ -93,8 +137,8 @@ describe("heatmap calculations", () => {
       }),
     ).toMatchObject({
       currentValues: [expect.any(Number), 8],
-      previousValues: [expect.any(Number), expect.any(Number)],
-      values: [expect.any(Number), expect.any(Number)],
+      previousValues: [expect.any(Number), 8],
+      values: [expect.any(Number), 0],
     });
   });
 
@@ -134,8 +178,8 @@ describe("heatmap calculations", () => {
     expect(differenceColor(-1, 1)).toBe("#2563eb");
     expect(differenceColor(0, 1)).toBe("#f8fafc");
     expect(differenceColor(1, 1)).toBe("#dc2626");
-    expect(differenceColor(null, 1)).toBe("#f8fafc");
-    expect(differenceColor(Number.NaN, 1)).toBe("#f8fafc");
+    expect(differenceColor(null, 1)).toBe("#80858b");
+    expect(differenceColor(Number.NaN, 1)).toBe("#80858b");
   });
 
   test("provides metric display ranges", () => {
@@ -164,5 +208,27 @@ describe("heatmap calculations", () => {
     expect(heatmapCellAtPoint(map, { x: 11, y: 8 })).toMatchObject({ row: 1, column: 2, width: 2, height: 4 });
     expect(heatmapCellAtPoint(map, { x: 12, y: 8 })).toBeNull();
     expect(heatmapCellAtPoint(map, { x: -1, y: 0 })).toBeNull();
+  });
+
+  test("resolves centered cells on both axes at exact and fractional image coordinates", () => {
+    const starts = [0, 1, 5, 9];
+    const sizes = [1, 4, 4, 1];
+    const map = heatmap({ width: 10, height: 10, cellWidth: 4, cellHeight: 4,
+      gridAlignment: "center", columns: 4, rows: 4,
+      cells: starts.flatMap((y, row) => starts.map((x, column) => ({
+        row, column, x, y, width: sizes[column], height: sizes[row], pixelDensity: 0,
+      }))) });
+    expect(heatmapCellAtPoint(map, { x: 0.9, y: 0.9 })).toMatchObject({ row: 0, column: 0, width: 1, height: 1 });
+    expect(heatmapCellAtPoint(map, { x: 1, y: 1 })).toMatchObject({ row: 1, column: 1 });
+    expect(heatmapCellAtPoint(map, { x: 4.9, y: 5 })).toMatchObject({ row: 2, column: 1 });
+    expect(heatmapCellAtPoint(map, { x: 9, y: 9 })).toMatchObject({ row: 3, column: 3, width: 1, height: 1 });
+    expect(heatmapCellAtPoint(map, { x: 10, y: 9 })).toBeNull();
+  });
+
+  test("rejects comparisons with different cell coordinates even when counts and sizes match", () => {
+    const current = heatmap();
+    const previous = heatmap({ cells: current.cells.map((cell, index) => index === 0 ? { ...cell, x: 1 } : cell) });
+    expect(heatmapCompatibilityError(current, previous)).toMatch(/grid alignment/i);
+    expect(() => buildHeatmapDifference({ current, previous, metric: "pixel-density" })).toThrow(/grid alignment/i);
   });
 });

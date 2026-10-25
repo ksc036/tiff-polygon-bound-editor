@@ -71,7 +71,7 @@ input[type="range"] {
 .app-shell {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
-  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
@@ -351,6 +351,7 @@ input[type="range"] {
 
 .heatmap-preset-value {
   display: block;
+  width: 100%;
   min-width: 0;
   min-height: 28px;
   padding: 0 5px;
@@ -362,6 +363,10 @@ input[type="range"] {
   background: #1c252f;
   border: 1px solid #35404c;
   border-radius: 4px;
+}
+
+.heatmap-preset-value[aria-invalid="true"] {
+  border-color: #ef4444;
 }
 
 .heatmap-batch-state {
@@ -533,6 +538,35 @@ input[type="range"] {
 
 .stage-tools input[type="number"] {
   width: 92px;
+}
+
+.mask-overlay-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.mask-overlay-controls button[aria-pressed="true"] {
+  background: #2a3a49;
+  border-color: #e85b64;
+}
+
+.mask-overlay-controls input[type="range"] {
+  width: 100px;
+  min-width: 0;
+}
+
+.mask-overlay-controls output {
+  min-width: 4ch;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.mask-overlay-error {
+  color: #ff9aa1;
+  overflow-wrap: anywhere;
 }
 
 .heatmap-display {
@@ -773,6 +807,10 @@ input[type="range"] {
 }
 
 .mask-preview {
+  z-index: 1;
+}
+
+.original-mask-overlay {
   z-index: 1;
 }
 
@@ -2016,3 +2054,40 @@ input[type="range"] {
     flex: 1;
   }
 }
+.collagen-calibration-control {
+  flex: 1 0 100%;
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 6px 0;
+  border-top: 1px solid #42505a;
+  font-size: 12px;
+}
+
+.collagen-calibration-control label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.collagen-calibration-control select {
+  max-width: 100%;
+  min-width: 140px;
+  min-height: 32px;
+  border: 1px solid #35404c;
+  border-radius: 5px;
+  padding: 0 8px;
+  color: #e8edf2;
+  background: #151b22;
+  font: inherit;
+}
+.collagen-calibration-control select:focus-visible { outline: 2px solid #6cb7ff; outline-offset: 2px; }
+.collagen-calibration-control p { margin: 0; overflow-wrap: anywhere; }
+.calibration-error { color: #ff9da3; }
+.heatmap-calibration-caption { font-size: 11px; overflow-wrap: anywhere; }
+.heatmap-no-data-legend { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-top: 6px; }
+.heatmap-no-data-legend i { width: 12px; height: 12px; display: inline-block; }

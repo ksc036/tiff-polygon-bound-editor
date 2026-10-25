@@ -1,11 +1,12 @@
 import ExcelJS from "exceljs";
 import { buildAnalysisRows } from "../shared/analysisRows.js";
 import {
-  COLLAGEN_DENSITY_MODEL,
   collagenDensityInverseText,
   collagenDensityModelText,
-  estimateCollagenDensity,
+  collagenDensityResultFromMetrics,
+  pixelDensityFromCollagenDensity,
 } from "../shared/collagenDensity.js";
+import { exportCalibrationSnapshot } from "./exportCalibration.js";
 
 const HEADER_FILL = "FF1E293B";
 const HEADER_FONT = "FFFFFFFF";
@@ -30,18 +31,20 @@ const ROI_COLUMNS = [
   ["Migration Axis Alignment", "migrationAlignment", 24],
   ["Empty", "empty", 12],
   ["ROI Image", "roiOverview", 20],
+  ["Concentration Status", "concentrationStatus", 26],
 ];
 
-const METRIC_DEFINITIONS = [
+const metricDefinitions = (model) => [
   ["Pixel Density", "mask pixels / ROI area pixels", "0 to 1", "ratio"],
-  ["Estimated Collagen Density", collagenDensityInverseText(), "one-phase model-derived", "mg/ml"],
+  ["Estimated Collagen Density", collagenDensityInverseText(model), "Finite values uncapped; see Concentration Status", "mg/ml"],
   ["ROI Alignment", "nematic order of all fiber segment angles in the ROI", "0 random to 1 aligned", "unitless"],
   ["Radial Alignment", "mean cos(2(theta - boundary-normal angle))", "-1 circumferential to 1 radial", "unitless"],
   ["Circumferential Alignment", "negative radial alignment", "-1 radial to 1 circumferential", "unitless"],
   ["Migration Axis Alignment", "mean cos(2(theta - migration-axis angle))", "-1 perpendicular to 1 parallel", "unitless"],
 ];
 
-export async function createImageWorkbook(input) {
+export async function createImageWorkbook(input = {}) {
+  input = { ...input, calibration: exportCalibrationSnapshot(input.calibration) };
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "TIFF Polygon Bound Editor";
   workbook.created = dateValue(input?.exportedAt) ?? new Date();
@@ -49,7 +52,7 @@ export async function createImageWorkbook(input) {
 
   addRoiStatisticsSheet(workbook, input ?? {});
   addImageSummarySheet(workbook, input ?? {});
-  addMetricDefinitionsSheet(workbook);
+  addMetricDefinitionsSheet(workbook, input.calibration.model);
   addHeatmapIndexSheet(workbook, input ?? {});
   addExportReportSheet(workbook, input ?? {});
 
@@ -64,15 +67,23 @@ export function workbookFailureText({ imageFolder, error }) {
   );
 }
 
+function includedAnalysisRows(input) {
+  const excluded = new Set(input.excludedGroupIds ?? []);
+  return buildAnalysisRows(input.analysis, input.bounds).filter((row) => !excluded.has(row.sourceGroupId));
+}
+
 function addRoiStatisticsSheet(workbook, input) {
   const sheet = workbook.addWorksheet("ROI Statistics");
   const roiEntry = input.roiEntry ?? {};
-  const rows = buildAnalysisRows(input.analysis, input.bounds);
+  const rows = includedAnalysisRows(input);
   configureSheet(sheet, ROI_COLUMNS.map(([header]) => header), ROI_COLUMNS.map(([, , width]) => width));
 
   for (const row of rows) {
     const metrics = row.metrics ?? {};
     const groupColor = normalizeColor(row.groupColor);
+    const concentration = collagenDensityResultFromMetrics(metrics, input.calibration.model, {
+      colorMax: input.estimatedCollagenColorMax,
+    });
     const values = [
       row.roiId,
       row.groupId,
@@ -85,19 +96,20 @@ function addRoiStatisticsSheet(workbook, input) {
       numberOrBlank(metrics.roiAreaPx),
       numberOrBlank(metrics.maskPixelCount),
       numberOrBlank(metrics.density),
-      estimateCollagenDensity(metrics.density),
+      concentration.value,
       numberOrBlank(metrics.globalAlignment),
       numberOrBlank(metrics.radialNormalAlignment),
       numberOrBlank(metrics.tangentialAlignment),
       numberOrBlank(metrics.migrationAlignment),
       typeof metrics.empty === "boolean" ? metrics.empty : null,
       artifactValue({ entry: roiEntry, label: "Open ROI overview", directory: "roi" }),
+      concentration.status,
     ];
     const excelRow = sheet.addRow(values);
     formatRoiRow(excelRow, groupColor);
   }
 
-  applyAutoFilter(sheet, "R");
+  applyAutoFilter(sheet, "S");
 }
 
 function addImageSummarySheet(workbook, input) {
@@ -106,7 +118,9 @@ function addImageSummarySheet(workbook, input) {
   const image = input.image ?? {};
   const dimensions = input.dimensions ?? {};
   const sourceFiles = input.sourceFiles ?? {};
-  const rows = buildAnalysisRows(input.analysis, input.bounds);
+  const rows = includedAnalysisRows(input);
+  const excluded = new Set(input.excludedGroupIds ?? []);
+  const { model, revision } = input.calibration;
   const sourceRows = [
     ["Image folder", safeFileName(image.imageFolder ?? image.id)],
     ["Image file", safeFileName(sourceFiles.image?.file ?? image.imageFile)],
@@ -116,16 +130,22 @@ function addImageSummarySheet(workbook, input) {
     ["Image width (px)", numberOrBlank(dimensions.width)],
     ["Image height (px)", numberOrBlank(dimensions.height)],
     ["ROI count", rows.length],
-    ["Saved group count", Array.isArray(input.bounds?.groups) ? input.bounds.groups.length : 0],
+    ["Saved group count", Array.isArray(input.bounds?.groups) ? input.bounds.groups.filter((group) => !excluded.has(group.id)).length : 0],
     ["Image modified", dateValue(sourceFiles.image?.mtimeMs)],
     ["Mask modified", dateValue(sourceFiles.mask?.mtimeMs)],
     ["Bounds modified", dateValue(sourceFiles.bounds?.mtimeMs)],
     ["Analysis modified", dateValue(sourceFiles.analysis?.mtimeMs)],
-    ["Density model", "One-phase association"],
-    ["Pixel density model", collagenDensityModelText()],
-    ["Model Y0", COLLAGEN_DENSITY_MODEL.y0],
-    ["Model plateau", COLLAGEN_DENSITY_MODEL.plateau],
-    ["Model K", COLLAGEN_DENSITY_MODEL.k],
+    ["Density model", model.label],
+    ["Pixel density model", collagenDensityModelText(model)],
+    ["Model Y0", pixelDensityFromCollagenDensity(0, model)],
+    ["Model plateau", model.plateau],
+    ["Model K", model.k],
+    ["Model amplitude", model.amplitude],
+    ["Model ID", model.id],
+    ["Model version", model.version],
+    ["Calibration revision", revision],
+    ["Color Max (mg/ml)", input.estimatedCollagenColorMax ?? 8],
+    ["Concentration policy", "Finite values uncapped; color Max is display-only."],
     ["Bounds auto-saved before export", Boolean(input.autoSavedBounds)],
     ["Exported at", dateValue(input.exportedAt)],
   ];
@@ -134,10 +154,10 @@ function addImageSummarySheet(workbook, input) {
   applyAutoFilter(sheet, "B");
 }
 
-function addMetricDefinitionsSheet(workbook) {
+function addMetricDefinitionsSheet(workbook, model) {
   const sheet = workbook.addWorksheet("Metric Definitions");
   configureSheet(sheet, ["Metric", "Formula", "Range", "Unit"], [32, 38, 30, 14]);
-  METRIC_DEFINITIONS.forEach((definition) => sheet.addRow(definition));
+  metricDefinitions(model).forEach((definition) => sheet.addRow(definition));
   applyAutoFilter(sheet, "D");
 }
 
@@ -184,7 +204,7 @@ function addExportReportSheet(workbook, input) {
       safeStatus(entry.status),
       safeText(entry.artifact),
       safeText(entry.message ?? entry.reason),
-      "One-phase association",
+      input.calibration.model.label,
     ]);
   }
   if (entries.length === 0) {
@@ -193,7 +213,7 @@ function addExportReportSheet(workbook, input) {
       "Included",
       "Workbook",
       "Workbook generated.",
-      "One-phase association",
+      input.calibration.model.label,
     ]);
   }
   formatDates(sheet, 1);

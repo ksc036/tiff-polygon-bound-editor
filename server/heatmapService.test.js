@@ -73,6 +73,29 @@ test("recursively writes each unique preset beside image and mask folders", asyn
   }
 });
 
+test("regeneration replaces a legacy grid with centered cells on both axes", async () => {
+  const rootDir = await createTempRoot();
+  await writeBundle(rootDir, "sample-a", { width: 10, height: 10 });
+  const storage = await createStorage({ initialRoot: rootDir });
+  const filePath = savedHeatmapPath(storage, "sample-a", 4);
+  const legacy = { schemaVersion: 1, imageFolder: "sample-a", maskSource: { file: "sample-a.png", size: 1 },
+    width: 10, height: 10, cellWidth: 4, cellHeight: 4, columns: 3, rows: 3,
+    cells: [4, 4, 2].flatMap((height, row) => [4, 4, 2].map((width, column) => ({
+      row, column, x: column * 4, y: row * 4, width, height,
+      areaPx: width * height, maskPixelCount: 0, pixelDensity: 0,
+    }))) };
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(legacy));
+  expect((await loadImageHeatmap(storage, "sample-a", 4)).columns).toBe(3);
+
+  expect(await generateHeatmapBatch({ rootPath: rootDir, cellSizes: [4] })).toMatchObject({ completed: 1, failed: 0 });
+  const centered = await loadImageHeatmap(storage, "sample-a", 4);
+  expect(centered).toMatchObject({ schemaVersion: 2, gridAlignment: "center", columns: 4, rows: 4 });
+  expect(centered.cells.slice(0, 4).map(({ width }) => width)).toEqual([1, 4, 4, 1]);
+  expect(centered.cells.filter(({ column }) => column === 0).map(({ height }) => height)).toEqual([1, 4, 4, 1]);
+  expect(centered.cells.every(({ pixelDensity }) => pixelDensity === 1)).toBe(true);
+});
+
 test("continues after an unreadable bundle and returns relative failures", async () => {
   const rootDir = await createTempRoot();
   await writeBundle(rootDir, "good", { width: 2, height: 2 });

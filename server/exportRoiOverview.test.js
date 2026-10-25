@@ -148,6 +148,48 @@ test("labels ROI identities and keeps editable handles out of the report", () =>
   expect(svg).not.toContain("<circle");
 });
 
+test.each(["outside", "inside"])("omits disabled %s geometry and legend without renumbering remaining groups", (excludedId) => {
+  const svg = buildRoiOverviewSvg({
+    width: 80,
+    height: 60,
+    normalizedImageDataUrl: "data:image/png;base64,AA==",
+    bounds,
+    excludedGroupIds: [excludedId],
+  });
+  const excluded = bounds.groups.find((group) => group.id === excludedId);
+  const retained = bounds.groups.find((group) => group.id !== excludedId);
+  expect(svg).not.toContain(excluded.name);
+  expect(svg).not.toContain(`fill="${excluded.color}" data-role="group-color-swatch"`);
+  expect(svg).not.toContain(`data-group-id="${excludedId}"`);
+  expect(svg).not.toContain(excludedId === "outside" ? "G01" : "G02");
+  expect(svg).toContain(retained.name);
+  expect(svg).toContain(retained.color);
+  expect(svg).toContain(excludedId === "outside" ? "G02-I" : "G01-N");
+});
+
+test("disabled outside groups are transparent without reassigning their pixels to enabled groups", async () => {
+  const options = { width: nearbyOutsideBounds.width, height: nearbyOutsideBounds.height, bounds: nearbyOutsideBounds };
+  const original = await sharp(await buildOutsideRoiOverlay(options)).ensureAlpha().raw().toBuffer();
+  const filtered = await sharp(await buildOutsideRoiOverlay({ ...options, excludedGroupIds: ["a-left"] })).ensureAlpha().raw().toBuffer();
+  const assignments = assignOutwardRoiPixels({ ...options, groups: nearbyGroupsWithBands });
+  expect(assignments.get("10,6").groupId).toBe("a-left");
+  expect(filtered[(6 * options.width + 10) * 4 + 3]).toBe(0);
+  for (let y = 0; y < options.height; y += 1) {
+    for (let x = 0; x < options.width; x += 1) {
+      const offset = (y * options.width + x) * 4;
+      if (assignments.get(`${x},${y}`)?.groupId === "a-left") {
+        expect(filtered[offset + 3]).toBe(0);
+      } else {
+        expect(filtered.subarray(offset, offset + 4)).toEqual(original.subarray(offset, offset + 4));
+      }
+    }
+  }
+  const svg = buildRoiOverviewSvg({ ...options, normalizedImageDataUrl: "data:image/png;base64,AA==", excludedGroupIds: ["a-left"] });
+  expect(svg).not.toContain('data-group-id="a-left"');
+  expect(svg).toContain('data-group-id="z-right"');
+  expect(svg).toContain("G02-N");
+});
+
 test("builds exclusive assignment runs when no raster outside overlay is supplied", () => {
   const svg = buildRoiOverviewSvg({
     width: nearbyOutsideBounds.width,

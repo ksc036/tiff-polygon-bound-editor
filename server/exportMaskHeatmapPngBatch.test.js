@@ -4,6 +4,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import sharp from "sharp";
 import { afterEach, describe, expect, test } from "vitest";
+import { pixelDensityFigure, renderHeatmapOnlyPng } from "./exportMaskHeatmapPngBatch.js";
+import { buildHeatmapFigureSvg, renderHeatmapFigure } from "./exportHeatmaps.js";
 
 const temporaryRoots = [];
 
@@ -12,6 +14,42 @@ afterEach(async () => {
 });
 
 describe("MASK heatmap PNG batch export", () => {
+  test("keeps centered partial cells in annotated and heatmap-only PNGs", async () => {
+    const edges = [0, 1, 5, 9, 10];
+    const heatmap = {
+      schemaVersion: 2, gridAlignment: "center", width: 10, height: 10,
+      cellWidth: 4, cellHeight: 4, columns: 4, rows: 4,
+      cells: Array.from({ length: 16 }, (_, index) => {
+        const row = Math.floor(index / 4);
+        const column = index % 4;
+        return {
+          row, column, x: edges[column], y: edges[row],
+          width: edges[column + 1] - edges[column], height: edges[row + 1] - edges[row],
+          pixelDensity: row === 1 && column === 1 ? 1 : 0,
+        };
+      }),
+    };
+    const figure = pixelDensityFigure("centered", heatmap);
+    const svg = buildHeatmapFigureSvg(figure);
+    const [, x, y, width, height] = svg.match(/<rect x="([^"]+)" y="([^"]+)" width="([^"]+)" height="([^"]+)" fill="none" stroke="#111827" stroke-width="1"/).map(Number);
+    expect([width, height]).toEqual([60, 60]);
+    for (const [png, originX, originY, scale] of [
+      [await renderHeatmapFigure(figure), x, y, 6],
+      [await renderHeatmapOnlyPng(heatmap), 0, 0, 1],
+    ]) {
+      expect((await sharp(png).metadata()).format).toBe("png");
+      const { data, info } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+      const pixel = (dx, dy) => {
+        const offset = ((originY + dy * scale) * info.width + originX + dx * scale) * 3;
+        return [...data.subarray(offset, offset + 3)];
+      };
+      expect(pixel(2, 2)).toEqual([252, 255, 164]);
+      expect(pixel(4, 4)).toEqual([252, 255, 164]);
+      expect(pixel(6, 2)).toEqual([0, 0, 4]);
+      expect(pixel(2, 6)).toEqual([0, 0, 4]);
+    }
+  });
+
   test("writes app-compatible JSON plus annotated, heatmap-only, original, and colorbar PNGs", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "mask-heatmap-png-"));
     temporaryRoots.push(root);
@@ -46,6 +84,7 @@ describe("MASK heatmap PNG batch export", () => {
       { cwd: process.cwd(), encoding: "utf8" },
     );
     expect(command.status, command.stderr || command.stdout).toBe(0);
+    expect(JSON.parse(command.stdout)).toMatchObject({ failed: 0, generatedPngFiles: 4 });
 
     const outputDir = path.join(bundle, "heatmap", "2x2");
     const prefix = `${imageFolder}_cell_2px_pixel_density`;
@@ -72,7 +111,7 @@ describe("MASK heatmap PNG batch export", () => {
     expect([...heatmapPixels.subarray(2 * 3, 3 * 3)]).toEqual([0, 0, 4]);
 
     const annotatedPixels = await sharp(annotatedPath).raw().toBuffer({ resolveWithObject: true });
-    const annotatedGridOffset = (186 * annotatedPixels.info.width + 142) * annotatedPixels.info.channels;
+    const annotatedGridOffset = (166 * annotatedPixels.info.width + 142) * annotatedPixels.info.channels;
     expect([...annotatedPixels.data.subarray(annotatedGridOffset, annotatedGridOffset + 3)])
       .toEqual([188, 55, 84]);
 

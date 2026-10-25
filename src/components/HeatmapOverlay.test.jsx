@@ -5,6 +5,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { estimateHeatmapCollagenDensity, infernoColor } from "../lib/heatmap.js";
 import HeatmapOverlay from "./HeatmapOverlay.jsx";
+import { pixelDensityFromCollagenDensity } from "../../shared/collagenDensity.js";
 
 const heatmap = {
   width: 10,
@@ -62,7 +63,7 @@ describe("HeatmapOverlay", () => {
     expect(context.fillRect).toHaveBeenNthCalledWith(2, 5, 0, 5, 5);
     expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 1 / 25");
     expect(screen.getByRole("status")).toHaveTextContent("Pixel Density 0.0400");
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.0000 mg/ml");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.323 mg/mL");
     expect(screen.getByRole("status")).toHaveTextContent("Previous 0.0200, Current 0.0400, Change 0.0200");
   });
 
@@ -82,6 +83,24 @@ describe("HeatmapOverlay", () => {
     expect(context.clearRect).not.toHaveBeenCalled();
     expect(context.fillRect).not.toHaveBeenCalled();
     expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 5 / 25");
+  });
+
+  test("draws centered edge widths and heights without shifting pointer statistics", () => {
+    const starts = [0, 1, 5, 9];
+    const sizes = [1, 4, 4, 1];
+    const centered = { width: 10, height: 10, cellWidth: 4, cellHeight: 4,
+      gridAlignment: "center", columns: 4, rows: 4,
+      cells: starts.flatMap((y, row) => starts.map((x, column) => ({ row, column, x, y,
+        width: sizes[column], height: sizes[row], areaPx: sizes[column] * sizes[row],
+        maskPixelCount: 0, pixelDensity: 0,
+      }))) };
+    render(<HeatmapOverlay heatmap={centered} metric="pixel-density" pointer={{ x: 1, y: 1 }} />);
+    expect(context.fillRect).toHaveBeenCalledTimes(16);
+    expect(context.fillRect).toHaveBeenNthCalledWith(1, 0, 0, 1, 1);
+    expect(context.fillRect).toHaveBeenNthCalledWith(6, 1, 1, 4, 4);
+    expect(context.fillRect).toHaveBeenNthCalledWith(16, 9, 9, 1, 1);
+    expect(screen.getByRole("status")).toHaveTextContent("Row 2, Column 2");
+    expect(screen.getByRole("status")).toHaveTextContent("Mask pixels 0 / 16");
   });
 
   test("draws estimated collagen density cells with the fixed model", () => {
@@ -112,7 +131,7 @@ describe("HeatmapOverlay", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.0000 mg/ml");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 0.323 mg/mL");
   });
 
   test("uses the selected maximum for estimated-density colors and the pointer value", () => {
@@ -136,7 +155,7 @@ describe("HeatmapOverlay", () => {
     );
 
     expect(colors).toEqual([infernoColor(10, 0, 10)]);
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 10.0000 mg/ml");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density Model range exceeded");
   });
 
   test("keeps the selected density maximum in the pointer while viewing pixel density", () => {
@@ -157,6 +176,31 @@ describe("HeatmapOverlay", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density 10.0000 mg/ml");
+    expect(screen.getByRole("status")).toHaveTextContent("Estimated Collagen Density Model range exceeded");
+  });
+
+  test("changes selected-model colors while preserving uncapped finite tooltip values", () => {
+    const customHeatmap = { ...heatmap, cells: [{ ...heatmap.cells[0], pixelDensity: 0.1 }], width: 5, columns: 1 };
+    const colors = [];
+    context.fillRect.mockImplementation(() => colors.push(context.fillStyle));
+    const props = { heatmap: customHeatmap, metric: "collagen-density", pointer: { x: 1, y: 1 }, collagenDensityColorMax: 3 };
+    const { rerender } = render(<HeatmapOverlay {...props} model="high-density" />);
+    expect(screen.getByRole("status")).toHaveTextContent("1.499 mg/mL");
+    rerender(<HeatmapOverlay {...props} model="low-density" />);
+    expect(screen.getByRole("status")).toHaveTextContent("1.540 mg/mL");
+    expect(colors[0]).not.toBe(colors[1]);
+    rerender(<HeatmapOverlay {...props} model="high-density" heatmap={{ ...customHeatmap, cells: [{ ...customHeatmap.cells[0], pixelDensity: pixelDensityFromCollagenDensity(12) }] }} />);
+    expect(colors.at(-1)).toBe(infernoColor(3, 0, 3));
+    expect(screen.getByRole("status")).toHaveTextContent("12.000 mg/mL (color Max exceeded)");
+  });
+
+  test("renders unknown calibration and empty cells as neutral no data", () => {
+    const props = { heatmap, metric: "collagen-density", pointer: { x: 1, y: 1 } };
+    const { rerender } = render(<HeatmapOverlay {...props} model={null} />);
+    expect(context.fillStyle).toBe("#80858b");
+    expect(screen.getByRole("status")).toHaveTextContent("Calibration unavailable");
+    rerender(<HeatmapOverlay {...props} heatmap={{ ...heatmap, cells: heatmap.cells.map((cell) => ({ ...cell, areaPx: 0 })) }} />);
+    expect(context.fillStyle).toBe("#80858b");
+    expect(screen.getByRole("status")).toHaveTextContent("No data");
   });
 });
